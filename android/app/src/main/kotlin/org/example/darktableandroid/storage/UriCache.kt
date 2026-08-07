@@ -11,12 +11,17 @@ import java.security.MessageDigest
 class UriCache(private val context: Context, private val maxBytes: Long = 512L * 1024 * 1024) {
     data class CachedSource(val file: File, val sha256: String)
 
+    private companion object {
+        // Every instance writes to the same cache directory within this process.
+        val copyLock = Any()
+    }
+
     fun retainPermission(uri: Uri, flags: Int) {
         val allowed = flags and Intent.FLAG_GRANT_READ_URI_PERMISSION
         if (allowed != 0) runCatching { context.contentResolver.takePersistableUriPermission(uri, allowed) }
     }
 
-    fun copyForNative(uri: Uri): CachedSource {
+    fun copyForNative(uri: Uri): CachedSource = synchronized(copyLock) {
         require(uri.scheme == ContentResolver.SCHEME_CONTENT) { "Only content URIs are accepted" }
         val directory = File(context.cacheDir, "raw-sources").apply { mkdirs() }
         pruneCache(directory, maxBytes)
@@ -41,7 +46,7 @@ class UriCache(private val context: Context, private val maxBytes: Long = 512L *
             val stable = File(directory, "$hash.raw")
             if (!stable.exists()) check(temporary.renameTo(stable)) { "Unable to finalize cached source" } else temporary.delete()
             pruneCache(directory, maxBytes, stable)
-            return CachedSource(stable, hash)
+            CachedSource(stable, hash)
         } catch (failure: Throwable) { temporary.delete(); throw failure }
     }
 }
