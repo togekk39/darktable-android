@@ -35,9 +35,13 @@ jobs:
       - uses: gradle/actions/wrapper-validation@v4
       - id: version
         shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           test -z "$(git status --porcelain)"
-          TAG="${{ inputs.tag || github.ref_name }}"; [[ "$TAG" == v* ]]
+          TAG="$RELEASE_TAG"; [[ "$TAG" == v* ]]
+          TAG_COMMIT=$(git rev-parse --verify "refs/tags/$TAG^{commit}")
+          test "$TAG_COMMIT" = "$(git rev-parse HEAD)"
           VERSION=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' android/app/build.gradle.kts)
           test "v$VERSION" = "$TAG"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
