@@ -5,6 +5,7 @@ plugins { id("com.android.application"); id("org.jetbrains.kotlin.android"); id(
 android {
     namespace = "org.example.darktableandroid"
     compileSdk = 35
+    ndkVersion = "27.2.12479018"
     defaultConfig {
         applicationId = "org.example.darktableandroid"
         minSdk = 26
