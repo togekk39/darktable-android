@@ -12,7 +12,9 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-24.04
-    outputs: {tag: "${{ steps.version.outputs.tag }}"}
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      tag_commit: ${{ steps.version.outputs.tag_commit }}
     steps:
       - uses: actions/checkout@v4
         with: {ref: "${{ inputs.tag || github.ref }}", fetch-depth: 0, submodules: recursive}
@@ -45,6 +47,7 @@ jobs:
           VERSION=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' android/app/build.gradle.kts)
           test "v$VERSION" = "$TAG"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "tag_commit=$TAG_COMMIT" >> "$GITHUB_OUTPUT"
       - run: cmake -S mobile -B build/mobile -DDT_MOBILE_BUILD_TESTS=ON && cmake --build build/mobile && ctest --test-dir build/mobile --output-on-failure
       - working-directory: android
         run: ./gradlew --no-daemon lintProductionRelease testProductionReleaseUnitTest assembleProductionRelease bundleProductionRelease
@@ -67,7 +70,7 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@v4
-        with: {ref: "${{ needs.verify.outputs.tag }}", submodules: recursive}
+        with: {ref: "${{ needs.verify.outputs.tag_commit }}", submodules: recursive}
       - uses: actions/setup-java@v4
         with: {distribution: temurin, java-version: "17"}
       - uses: android-actions/setup-android@v3
