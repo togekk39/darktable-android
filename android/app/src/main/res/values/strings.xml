@@ -1,0 +1,7 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<resources>
+  <string name="app_name">Mobile RAW Editor (Unofficial)</string>
+  <string name="open_photo">Open photo</string><string name="export">Export</string><string name="about">About &amp; licenses</string>
+  <string name="empty_state">Open a RAW photo with Android’s document picker. This app never scans your library.</string>
+  <string name="unofficial_notice">This is an unofficial Android application based on darktable.\nIt is not affiliated with or endorsed by the darktable project.</string>
+</resources>

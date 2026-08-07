@@ -27,3 +27,22 @@ CMakeLists.txt.user
 workspace/
 cmake-build-debug/
 .idea/
+
+# Android/NDK build outputs
+android/.gradle/
+android/local.properties
+android/**/build/
+.cxx/
+build/mobile/
+
+# Local Android packages, native outputs, and signing material
+*.apk
+*.aab
+*.apks
+*.so
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pkcs12
+android/gradle/wrapper/gradle-wrapper.jar

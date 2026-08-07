@@ -1,0 +1,99 @@
+name: Android production release
+on:
+  push: {tags: ["v*"]}
+  workflow_dispatch:
+    inputs:
+      tag: {description: "Existing v* tag to release", required: true, type: string}
+permissions:
+  contents: read
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    outputs: {tag: "${{ steps.version.outputs.tag }}"}
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: "${{ inputs.tag || github.ref }}", fetch-depth: 0, submodules: recursive}
+      - uses: actions/setup-java@v4
+        with: {distribution: temurin, java-version: "17"}
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+      - uses: gradle/actions/wrapper-validation@v4
+      - uses: gradle/actions/setup-gradle@v4
+      - id: version
+        shell: bash
+        run: |
+          test -z "$(git status --porcelain)"
+          TAG="${{ inputs.tag || github.ref_name }}"; [[ "$TAG" == v* ]]
+          VERSION=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' android/app/build.gradle.kts)
+          test "v$VERSION" = "$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+      - run: cmake -S mobile -B build/mobile -DDT_MOBILE_BUILD_TESTS=ON && cmake --build build/mobile && ctest --test-dir build/mobile --output-on-failure
+      - working-directory: android
+        run: ./gradlew --no-daemon lintProductionRelease testProductionReleaseUnitTest assembleProductionRelease bundleProductionRelease
+      - name: Create complete corresponding source
+        run: |
+          mkdir -p dist/source
+          git archive --format=tar HEAD | tar -x -C dist/source
+          git submodule foreach --recursive 'mkdir -p "$toplevel/dist/source/$sm_path"; git archive --format=tar HEAD | tar -x -C "$toplevel/dist/source/$sm_path"'
+          printf 'Tag: %s\nJDK: 17\nSDK: 35\nBuild tools: 35.0.0\nNDK: 27.2.12479018\nCMake: 3.22.1\n' "${{ steps.version.outputs.tag }}" > dist/source/ANDROID_BUILD_VERSIONS.txt
+          tar -C dist -czf "dist/darktable-android-${{ steps.version.outputs.tag }}-source.tar.gz" source
+      - uses: actions/upload-artifact@v4
+        with: {name: verified-release-inputs, path: dist/*.tar.gz}
+  release:
+    needs: verify
+    environment: production
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: "${{ needs.verify.outputs.tag }}", submodules: recursive}
+      - uses: actions/setup-java@v4
+        with: {distribution: temurin, java-version: "17"}
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+      - uses: gradle/actions/setup-gradle@v4
+      - uses: actions/download-artifact@v4
+        with: {name: verified-release-inputs, path: dist}
+      - name: Require signing secrets and create temporary keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          test -n "$KEYSTORE_B64" && test -n "$KEYSTORE_PASSWORD" && test -n "$KEY_ALIAS" && test -n "$KEY_PASSWORD"
+          umask 077; printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/release.keystore"
+      - name: Build signed production artifacts
+        working-directory: android
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/release.keystore
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon assembleProductionRelease bundleProductionRelease
+      - name: Verify and collect
+        run: |
+          mkdir -p dist/release
+          cp android/app/build/outputs/apk/production/release/*.apk dist/release/
+          cp android/app/build/outputs/bundle/productionRelease/*.aab dist/release/
+          cp dist/*.tar.gz LICENSE NOTICE.md THIRD_PARTY_LICENSES.md dist/release/
+          apksigner verify --verbose --print-certs dist/release/*.apk
+          (cd dist/release && sha256sum *.apk *.aab *.tar.gz > SHA256SUMS)
+          cp -r android/app/build/outputs/native-debug-symbols/productionRelease dist/release/native-symbols 2>/dev/null || true
+          cp -r android/app/build/outputs/mapping/productionRelease dist/release/mapping 2>/dev/null || true
+      - uses: actions/attest-build-provenance@v2
+        with: {subject-path: "dist/release/*.{apk,aab,tar.gz}"}
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.verify.outputs.tag }}
+          generate_release_notes: true
+          files: dist/release/**
+      - name: Remove temporary keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.keystore"
