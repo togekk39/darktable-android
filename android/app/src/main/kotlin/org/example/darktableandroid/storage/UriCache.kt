@@ -12,7 +12,7 @@ class UriCache(private val context: Context, private val maxBytes: Long = 512L *
     data class CachedSource(val file: File, val sha256: String)
 
     fun retainPermission(uri: Uri, flags: Int) {
-        val allowed = flags and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        val allowed = flags and Intent.FLAG_GRANT_READ_URI_PERMISSION
         if (allowed != 0) runCatching { context.contentResolver.takePersistableUriPermission(uri, allowed) }
     }
 
