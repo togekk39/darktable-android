@@ -19,7 +19,7 @@ class UriCache(private val context: Context, private val maxBytes: Long = 512L *
     fun copyForNative(uri: Uri): CachedSource {
         require(uri.scheme == ContentResolver.SCHEME_CONTENT) { "Only content URIs are accepted" }
         val directory = File(context.cacheDir, "raw-sources").apply { mkdirs() }
-        prune(directory)
+        pruneCache(directory, maxBytes)
         val temporary = File.createTempFile("incoming-", ".raw", directory)
         val digest = MessageDigest.getInstance("SHA-256")
         try {
@@ -40,13 +40,19 @@ class UriCache(private val context: Context, private val maxBytes: Long = 512L *
             val hash = digest.digest().joinToString("") { "%02x".format(it) }
             val stable = File(directory, "$hash.raw")
             if (!stable.exists()) check(temporary.renameTo(stable)) { "Unable to finalize cached source" } else temporary.delete()
+            pruneCache(directory, maxBytes, stable)
             return CachedSource(stable, hash)
         } catch (failure: Throwable) { temporary.delete(); throw failure }
     }
+}
 
-    private fun prune(directory: File) {
-        val files = directory.listFiles()?.sortedBy { it.lastModified() } ?: return
-        var size = files.sumOf { it.length() }
-        for (file in files) if (size > maxBytes) { size -= file.length(); file.delete() }
+internal fun pruneCache(directory: File, maxBytes: Long, retained: File? = null) {
+    val files = directory.listFiles()?.sortedBy { it.lastModified() } ?: return
+    var size = files.sumOf { it.length() }
+    for (file in files) {
+        if (size <= maxBytes) break
+        val fileSize = file.length()
+        if (file != retained && file.delete()) size -= fileSize
     }
+    check(size <= maxBytes) { "Unable to reduce source cache to its configured limit" }
 }
