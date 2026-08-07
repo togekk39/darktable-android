@@ -10,6 +10,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -27,7 +28,7 @@ class MainActivity : ComponentActivity() {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MobileRawApp(initialUri: Uri?, permissionFlags: Int) {
-    var source by remember { mutableStateOf(initialUri) }
+    var source by rememberSaveable { mutableStateOf(initialUri) }
     var about by remember { mutableStateOf(false) }
     val context = androidx.compose.ui.platform.LocalContext.current
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
