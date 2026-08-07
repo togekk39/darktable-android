@@ -17,3 +17,5 @@ git commit -m "Add official Gradle wrapper JAR"
 ```
 
 Review the generated changes before committing; the command should agree with the checked-in Gradle 8.14.4 wrapper properties. Do not download an arbitrary JAR or replace the wrapper with a custom binary. The wrapper JAR is the only expected binary source file; APKs, AABs, native libraries, build directories, and signing material must remain untracked.
+
+CI and release jobs generate this ignored wrapper JAR from the pinned Gradle 8.14.4 installation before wrapper validation and every Gradle build. Therefore fork pull requests and release runners do not depend on a binary being committed to the repository.

@@ -23,8 +23,19 @@ jobs:
       - uses: android-actions/setup-android@v3
       - name: Install pinned Android tools
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
-      - uses: gradle/actions/wrapper-validation@v4
       - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.14.4"
+      - name: Generate Gradle Wrapper JAR
+        shell: bash
+        run: |
+          set -euo pipefail
+          wrapper_dir=$(mktemp -d)
+          trap 'rm -rf "$wrapper_dir"' EXIT
+          touch "$wrapper_dir/settings.gradle" "$wrapper_dir/build.gradle"
+          gradle --no-daemon -p "$wrapper_dir" wrapper --gradle-version 8.14.4 --distribution-type bin --no-validate-url
+          cp "$wrapper_dir/gradle/wrapper/gradle-wrapper.jar" android/gradle/wrapper/gradle-wrapper.jar
+      - uses: gradle/actions/wrapper-validation@v4
       - name: Native host test
         run: cmake -S mobile -B build/mobile -DDT_MOBILE_BUILD_TESTS=ON && cmake --build build/mobile && ctest --test-dir build/mobile --output-on-failure
       - name: Lint, unit tests, and dev release
