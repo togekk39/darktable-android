@@ -18,17 +18,34 @@ import androidx.compose.ui.unit.dp
 import org.example.darktableandroid.storage.UriCache
 
 class MainActivity : ComponentActivity() {
+    private var sourceIntent by mutableStateOf<SourceIntent?>(null)
+    private var sourceIntentId = 0L
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val initialUri = intent?.takeIf { it.action == Intent.ACTION_VIEW || it.action == Intent.ACTION_EDIT }?.data
-        setContent { MobileRawApp(initialUri, intent.flags) }
+        if(savedInstanceState == null) acceptSourceIntent(intent)
+        setContent { MobileRawApp(sourceIntent) }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        acceptSourceIntent(intent)
+    }
+
+    private fun acceptSourceIntent(intent: Intent) {
+        if(intent.action != Intent.ACTION_VIEW && intent.action != Intent.ACTION_EDIT) return
+        val uri = intent.data ?: return
+        sourceIntent = SourceIntent(uri, intent.flags, ++sourceIntentId)
     }
 }
 
+private data class SourceIntent(val uri: Uri, val permissionFlags: Int, val id: Long)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun MobileRawApp(initialUri: Uri?, permissionFlags: Int) {
-    var source by rememberSaveable { mutableStateOf(initialUri) }
+private fun MobileRawApp(sourceIntent: SourceIntent?) {
+    var source by rememberSaveable { mutableStateOf(sourceIntent?.uri) }
     var about by remember { mutableStateOf(false) }
     val context = androidx.compose.ui.platform.LocalContext.current
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -48,5 +65,10 @@ private fun MobileRawApp(initialUri: Uri?, permissionFlags: Int) {
             Text(stringResource(R.string.unofficial_notice) + "\n\nGPL-3.0-or-later\nhttps://github.com/darktable-org/darktable\nUpstream commit: 249f20eda79fdbc650e89778694c4829dba64d4b")
         })
     }
-    LaunchedEffect(initialUri) { if(initialUri != null) UriCache(context).retainPermission(initialUri, permissionFlags) }
+    LaunchedEffect(sourceIntent?.id) {
+        sourceIntent?.let {
+            UriCache(context).retainPermission(it.uri, it.permissionFlags)
+            source = it.uri
+        }
+    }
 }
