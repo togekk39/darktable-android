@@ -6,6 +6,10 @@ android {
     namespace = "org.example.darktableandroid"
     compileSdk = 35
     ndkVersion = "27.2.12479018"
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
     defaultConfig {
         applicationId = "org.example.darktableandroid"
         minSdk = 26
@@ -57,6 +61,8 @@ android {
     buildFeatures { compose = true; buildConfig = true }
     packaging { jniLibs.keepDebugSymbols += "**/libdt_mobile.so" }
 }
+
+kotlin { jvmToolchain(17) }
 
 dependencies {
     implementation(platform("androidx.compose:compose-bom:2025.04.01"))
