@@ -148,6 +148,26 @@ jobs:
           CHECKSUM_PATH: ${{ steps.apk.outputs.checksum }}
         run: |
           set -euo pipefail
+
+          publication_ref=refs/remotes/origin/dev-latest-publication
+          set +e
+          git ls-remote --exit-code --refs origin refs/tags/dev-latest >/dev/null
+          tag_status=$?
+          set -e
+          if (( tag_status == 0 )); then
+            git fetch --no-tags --force origin \
+              refs/tags/dev-latest:"$publication_ref"
+            published_sha=$(git rev-parse "$publication_ref^{commit}")
+            if ! git merge-base --is-ancestor "$published_sha" "$GITHUB_SHA"; then
+              printf 'Skipping stale development release for %s; dev-latest is already at %s.\n' \
+                "$GITHUB_SHA" "$published_sha"
+              exit 0
+            fi
+          elif (( tag_status != 2 )); then
+            printf 'Unable to determine the current dev-latest revision.\n' >&2
+            exit "$tag_status"
+          fi
+
           git tag --force dev-latest "$GITHUB_SHA"
           git push --force origin refs/tags/dev-latest
 
