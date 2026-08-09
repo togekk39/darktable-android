@@ -34,3 +34,13 @@ Kotlin owns `content://` access. It optionally persists grants, streams to a bou
 The Android skeleton uses API 26 minimum, compile/target 35, NDK ABI `arm64-v8a`, CMake 3.22.1, AGP 8.9.1, Kotlin 2.1.20 and JDK 17 in CI. R8/resource shrinking is explicitly deferred until JNI/Compose keep behavior is tested. The blocking engineering task is extracting a GTK-free initialization/pixelpipe subset and obtaining reproducible Android builds of RawSpeed, Exiv2, GLib, SQLite, LCMS2 and codecs. No Android bitmap fallback is permitted.
 
 Release signing reads environment variables only. `devRelease` uses the debug key and `.dev`; production is unsigned without credentials and the release workflow fails before signing when secrets are absent. Source archives use recursive submodule checkout and `git archive` per repository so gitlink contents are included.
+
+## Phase 1 pipeline progress (2026-08-09)
+
+The activity now sends picker and external-view URIs to a lifecycle-owned `EditorViewModel`. It persists read grants, copies and hashes on `Dispatchers.IO`, preserves a sanitized source extension in the content-addressed cache, opens a native session, requests RGBA pixels off the UI thread, and constructs the display bitmap directly from those pixels. Copy, decode, render, cancellation, retry, and native error states are visible. Replacement requests are generation-checked so an obsolete render cannot replace a newer image, and sessions are cancelled and closed during replacement or ViewModel teardown.
+
+The JNI render boundary copies native-owned RGBA into a JVM byte array and immediately releases the native allocation. Open failures now throw a descriptive exception instead of returning an unexplained zero handle. These ownership improvements do **not** change the native engine status described above: the checked-in target still has no RawSpeed/Exiv2/VC-5 dependencies or darktable pixelpipe registry, so it deliberately reports `UNSUPPORTED` rather than showing an embedded thumbnail or a fake Android-decoded preview.
+
+### Remaining release blocker
+
+A usable editor and GPR verification remain blocked on a reproducible Android dependency bundle and the GTK-free upstream pixelpipe extraction. In particular, GoPro GPR is DNG-based but its image payload may use VC-5; extension recognition is not evidence of decoding. The integration test must use a redistributable GPR or an opt-in `DT_MOBILE_GPR_FIXTURE` path and prove that the full raw plane, exposure, temperature, and export stages run. Until that exists, edit controls and export UI must not be presented as functional. The deterministic registry planned above remains the required implementation path; no Kotlin image algorithm or `BitmapFactory` fallback has been introduced.

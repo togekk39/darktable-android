@@ -5,21 +5,25 @@
 #include <stdlib.h>
 #include <string.h>
 struct dt_mobile_session { char *path; atomic_bool cancelled; char error[256]; };
+static _Thread_local char open_error[256];
 static dt_mobile_status fail(dt_mobile_session *s, dt_mobile_status status, const char *message)
 { if(s) snprintf(s->error, sizeof(s->error), "%s", message); return status; }
 dt_mobile_status dt_mobile_open(const char *path, dt_mobile_session **out)
 {
-  if(!path || !path[0] || !out) return DT_MOBILE_ERROR_INVALID_ARGUMENT;
+  open_error[0] = '\0';
+  if(!path || !path[0] || !out) { snprintf(open_error, sizeof(open_error), "a non-empty source path and output session are required"); return DT_MOBILE_ERROR_INVALID_ARGUMENT; }
   *out = NULL;
   FILE *input = fopen(path, "rb");
-  if(!input) return DT_MOBILE_ERROR_IO;
+  if(!input) { snprintf(open_error, sizeof(open_error), "unable to open cached source: %s", path); return DT_MOBILE_ERROR_IO; }
+  if(fseek(input, 0, SEEK_END) != 0 || ftell(input) < 16) { fclose(input); snprintf(open_error, sizeof(open_error), "source is empty or truncated"); return DT_MOBILE_ERROR_IO; }
   fclose(input);
   dt_mobile_session *s = calloc(1, sizeof(*s));
-  if(!s) return DT_MOBILE_ERROR_OUT_OF_MEMORY;
+  if(!s) { snprintf(open_error, sizeof(open_error), "unable to allocate native session"); return DT_MOBILE_ERROR_OUT_OF_MEMORY; }
   s->path = malloc(strlen(path) + 1);
   if(!s->path) { free(s); return DT_MOBILE_ERROR_OUT_OF_MEMORY; }
   strcpy(s->path, path); atomic_init(&s->cancelled, 0); *out = s; return DT_MOBILE_OK;
 }
+const char *dt_mobile_open_error(void) { return open_error[0] ? open_error : "native open failed"; }
 dt_mobile_status dt_mobile_set_module_params(dt_mobile_session *s, const char *module,
                                                const void *params, size_t size)
 {

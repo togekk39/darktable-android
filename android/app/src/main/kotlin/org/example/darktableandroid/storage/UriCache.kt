@@ -5,8 +5,10 @@ import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.provider.OpenableColumns
 import java.io.File
 import java.security.MessageDigest
+import java.util.Locale
 
 class UriCache(private val context: Context, private val maxBytes: Long = 512L * 1024 * 1024) {
     data class CachedSource(val file: File, val sha256: String)
@@ -21,11 +23,12 @@ class UriCache(private val context: Context, private val maxBytes: Long = 512L *
         if (allowed != 0) runCatching { context.contentResolver.takePersistableUriPermission(uri, allowed) }
     }
 
-    fun copyForNative(uri: Uri): CachedSource = synchronized(copyLock) {
+    fun copyForNative(uri: Uri, isCancelled: () -> Boolean = { false }): CachedSource = synchronized(copyLock) {
         require(uri.scheme == ContentResolver.SCHEME_CONTENT) { "Only content URIs are accepted" }
         val directory = File(context.cacheDir, "raw-sources").apply { mkdirs() }
         pruneCache(directory, maxBytes)
-        val temporary = File.createTempFile("incoming-", ".raw", directory)
+        val extension = safeExtension(displayName(uri))
+        val temporary = File.createTempFile("incoming-", ".$extension.part", directory)
         val digest = MessageDigest.getInstance("SHA-256")
         try {
             context.contentResolver.openInputStream(uri).use { input ->
@@ -34,6 +37,7 @@ class UriCache(private val context: Context, private val maxBytes: Long = 512L *
                     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
                     var total = 0L
                     while (true) {
+                        check(!isCancelled()) { "Copy cancelled" }
                         val count = input.read(buffer)
                         if (count < 0) break
                         total += count
@@ -43,12 +47,21 @@ class UriCache(private val context: Context, private val maxBytes: Long = 512L *
                 }
             }
             val hash = digest.digest().joinToString("") { "%02x".format(it) }
-            val stable = File(directory, "$hash.raw")
+            val stable = File(directory, "$hash.$extension")
             if (!stable.exists()) check(temporary.renameTo(stable)) { "Unable to finalize cached source" } else temporary.delete()
             pruneCache(directory, maxBytes, stable)
             CachedSource(stable, hash)
         } catch (failure: Throwable) { temporary.delete(); throw failure }
     }
+
+    private fun displayName(uri: Uri): String? = context.contentResolver.query(
+        uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null
+    )?.use { cursor -> if(cursor.moveToFirst()) cursor.getString(0) else null }
+}
+
+internal fun safeExtension(displayName: String?): String {
+    val candidate = displayName?.substringAfterLast('.', "")?.lowercase(Locale.ROOT).orEmpty()
+    return candidate.takeIf { it.length in 1..10 && it.all(Char::isLetterOrDigit) } ?: "raw"
 }
 
 internal fun pruneCache(directory: File, maxBytes: Long, retained: File? = null) {

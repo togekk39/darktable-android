@@ -16,6 +16,7 @@ typedef enum dt_mobile_status {
   DT_MOBILE_ERROR_OUT_OF_MEMORY = 5
 } dt_mobile_status;
 dt_mobile_status dt_mobile_open(const char *path, dt_mobile_session **out_session);
+const char *dt_mobile_open_error(void);
 dt_mobile_status dt_mobile_set_module_params(dt_mobile_session *session, const char *module,
                                                const void *params, size_t params_size);
 dt_mobile_status dt_mobile_render_preview(dt_mobile_session *session, int max_width, int max_height,
