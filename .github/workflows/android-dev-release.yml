@@ -168,11 +168,38 @@ jobs:
             gh release create dev-latest --title "Development Build" --notes-file "$notes_file" --prerelease --latest=false --target "$GITHUB_SHA"
           fi
 
-          mapfile -t old_assets < <(gh release view dev-latest --json assets --jq '.assets[].name | select(endswith(".apk") or endswith(".sha256"))')
-          for asset in "${old_assets[@]}"; do
-            gh release delete-asset dev-latest "$asset" --yes
+          apk_name=$(basename "$APK_PATH")
+          checksum_name=$(basename "$CHECKSUM_PATH")
+          mapfile -t published_assets < <(gh release view dev-latest --json assets --jq '.assets[].name')
+          asset_exists() {
+            local wanted=$1
+            local existing
+            for existing in "${published_assets[@]}"; do
+              [[ "$existing" == "$wanted" ]] && return 0
+            done
+            return 1
+          }
+          for path in "$APK_PATH" "$CHECKSUM_PATH"; do
+            name=$(basename "$path")
+            if ! asset_exists "$name"; then
+              gh release upload dev-latest "$path"
+            fi
           done
-          gh release upload dev-latest "$APK_PATH" "$CHECKSUM_PATH"
+
+          mapfile -t published_assets < <(gh release view dev-latest --json assets --jq '.assets[].name')
+          for name in "$apk_name" "$checksum_name"; do
+            if ! asset_exists "$name"; then
+              printf 'Required release asset was not published: %s\n' "$name" >&2
+              exit 1
+            fi
+          done
+
+          for asset in "${published_assets[@]}"; do
+            if [[ "$asset" != "$apk_name" && "$asset" != "$checksum_name" &&
+                  ( "$asset" == *.apk || "$asset" == *.sha256 ) ]]; then
+              gh release delete-asset dev-latest "$asset" --yes
+            fi
+          done
 
       - name: Remove temporary keystore
         if: always()
