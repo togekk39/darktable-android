@@ -1,0 +1,229 @@
+name: Android development release
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "android/**"
+      - "mobile/**"
+      - "src/**"
+      - "CMakeLists.txt"
+      - "cmake/**"
+      - ".github/workflows/android-dev-release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-development-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Require signing secrets and create temporary keystore
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [[ -n "$KEYSTORE_B64" ]] || missing+=(ANDROID_KEYSTORE_BASE64)
+          [[ -n "$KEYSTORE_PASSWORD" ]] || missing+=(ANDROID_KEYSTORE_PASSWORD)
+          [[ -n "$KEY_ALIAS" ]] || missing+=(ANDROID_KEY_ALIAS)
+          [[ -n "$KEY_PASSWORD" ]] || missing+=(ANDROID_KEY_PASSWORD)
+          if (( ${#missing[@]} )); then
+            printf 'Missing required signing secrets:\n' >&2
+            printf ' - %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
+          umask 077
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/dev-release.keystore"
+          chmod 600 "$RUNNER_TEMP/dev-release.keystore"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install pinned Android tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+          echo "$ANDROID_SDK_ROOT/build-tools/35.0.0" >> "$GITHUB_PATH"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.14.4"
+
+      - name: Generate Gradle Wrapper JAR
+        shell: bash
+        run: |
+          set -euo pipefail
+          wrapper_dir=$(mktemp -d)
+          trap 'rm -rf "$wrapper_dir"' EXIT
+          touch "$wrapper_dir/settings.gradle" "$wrapper_dir/build.gradle"
+          gradle --no-daemon -p "$wrapper_dir" wrapper --gradle-version 8.14.4 --distribution-type bin --no-validate-url
+          cp "$wrapper_dir/gradle/wrapper/gradle-wrapper.jar" android/gradle/wrapper/gradle-wrapper.jar
+
+      - uses: gradle/actions/wrapper-validation@v4
+
+      - name: Native host tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S mobile -B build/mobile -DDT_MOBILE_BUILD_TESTS=ON
+          cmake --build build/mobile
+          ctest --test-dir build/mobile --output-on-failure
+
+      - name: Lint, unit tests, and signed dev release
+        working-directory: android
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/dev-release.keystore
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon lintDevRelease testDevReleaseUnitTest assembleDevRelease
+
+      - name: Verify and collect APK
+        id: apk
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk_dir=android/app/build/outputs/apk/dev/release
+          mapfile -t apks < <(find "$apk_dir" -maxdepth 1 -type f -name '*.apk' -print)
+          if (( ${#apks[@]} != 1 )); then
+            printf 'Expected exactly one dev release APK in %s, found %d:\n' "$apk_dir" "${#apks[@]}" >&2
+            printf ' - %s\n' "${apks[@]}" >&2
+            exit 1
+          fi
+          short_sha=${GITHUB_SHA:0:7}
+          mkdir -p dist/dev-release
+          output="dist/dev-release/darktable-android-dev-$short_sha.apk"
+          mv "${apks[0]}" "$output"
+          apksigner verify --verbose --print-certs "$output"
+          package_name=$(aapt2 dump badging "$output" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")
+          if [[ "$package_name" != org.example.darktableandroid.dev ]]; then
+            printf 'Unexpected APK package name: %s\n' "$package_name" >&2
+            exit 1
+          fi
+          (cd "$(dirname "$output")" && sha256sum "$(basename "$output")") > "$output.sha256"
+          echo "path=$output" >> "$GITHUB_OUTPUT"
+          echo "checksum=$output.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload development release diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-release-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            ${{ steps.apk.outputs.path }}
+            ${{ steps.apk.outputs.checksum }}
+            android/app/build/outputs/mapping/devRelease/**
+            android/app/build/outputs/native-debug-symbols/devRelease/**
+            android/app/build/reports/**
+            android/app/build/test-results/**
+            build/mobile/Testing/**
+
+      - name: Publish moving development prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          APK_PATH: ${{ steps.apk.outputs.path }}
+          CHECKSUM_PATH: ${{ steps.apk.outputs.checksum }}
+        run: |
+          set -euo pipefail
+
+          publication_ref=refs/remotes/origin/dev-latest-publication
+          set +e
+          git ls-remote --exit-code --refs origin refs/tags/dev-latest >/dev/null
+          tag_status=$?
+          set -e
+          if (( tag_status == 0 )); then
+            git fetch --no-tags --force origin \
+              refs/tags/dev-latest:"$publication_ref"
+            published_sha=$(git rev-parse "$publication_ref^{commit}")
+            if ! git merge-base --is-ancestor "$published_sha" "$GITHUB_SHA"; then
+              printf 'Skipping stale development release for %s; dev-latest is already at %s.\n' \
+                "$GITHUB_SHA" "$published_sha"
+              exit 0
+            fi
+          elif (( tag_status != 2 )); then
+            printf 'Unable to determine the current dev-latest revision.\n' >&2
+            exit "$tag_status"
+          fi
+
+          git tag --force dev-latest "$GITHUB_SHA"
+          git push --force origin refs/tags/dev-latest
+
+          commit_message=$(git log -1 --pretty=%B "$GITHUB_SHA")
+          build_time=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          notes_file=$(mktemp)
+          trap 'rm -f "$notes_file"' EXIT
+          {
+            printf 'Automated development build from commit `%s`.\n\n' "$GITHUB_SHA"
+            printf '**Commit message:**\n\n%s\n\n' "$commit_message"
+            printf '**Built (UTC):** %s\n\n' "$build_time"
+            printf '**Warning:** This is an unstable development build. It may contain incomplete features, regressions, or data-loss bugs.\n'
+          } > "$notes_file"
+
+          if gh release view dev-latest >/dev/null 2>&1; then
+            gh release edit dev-latest --title "Development Build" --notes-file "$notes_file" --prerelease --latest=false --target "$GITHUB_SHA"
+          else
+            gh release create dev-latest --title "Development Build" --notes-file "$notes_file" --prerelease --latest=false --target "$GITHUB_SHA"
+          fi
+
+          apk_name=$(basename "$APK_PATH")
+          checksum_name=$(basename "$CHECKSUM_PATH")
+          mapfile -t published_assets < <(gh release view dev-latest --json assets --jq '.assets[].name')
+          asset_exists() {
+            local wanted=$1
+            local existing
+            for existing in "${published_assets[@]}"; do
+              [[ "$existing" == "$wanted" ]] && return 0
+            done
+            return 1
+          }
+          for path in "$APK_PATH" "$CHECKSUM_PATH"; do
+            name=$(basename "$path")
+            if ! asset_exists "$name"; then
+              gh release upload dev-latest "$path"
+            fi
+          done
+
+          mapfile -t published_assets < <(gh release view dev-latest --json assets --jq '.assets[].name')
+          for name in "$apk_name" "$checksum_name"; do
+            if ! asset_exists "$name"; then
+              printf 'Required release asset was not published: %s\n' "$name" >&2
+              exit 1
+            fi
+          done
+
+          for asset in "${published_assets[@]}"; do
+            if [[ "$asset" != "$apk_name" && "$asset" != "$checksum_name" &&
+                  ( "$asset" == *.apk || "$asset" == *.sha256 ) ]]; then
+              gh release delete-asset dev-latest "$asset" --yes
+            fi
+          done
+
+      - name: Remove temporary keystore
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f "$RUNNER_TEMP/dev-release.keystore"
