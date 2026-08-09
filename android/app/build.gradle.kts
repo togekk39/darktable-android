@@ -2,6 +2,13 @@
 import java.util.Properties
 plugins { id("com.android.application"); id("org.jetbrains.kotlin.android"); id("org.jetbrains.kotlin.plugin.compose") }
 
+val persistentSigningConfigured = listOf(
+    "ANDROID_KEYSTORE_PATH",
+    "ANDROID_KEYSTORE_PASSWORD",
+    "ANDROID_KEY_ALIAS",
+    "ANDROID_KEY_PASSWORD",
+).all { providers.environmentVariable(it).isPresent }
+
 android {
     namespace = "org.example.darktableandroid"
     compileSdk = 35
@@ -55,8 +62,12 @@ android {
         }
         if(System.getenv("ANDROID_KEYSTORE_PATH") != null) productFlavors.getByName("production").signingConfig = productionSigning
     }
-    // devRelease deliberately uses the standard debug key; production never falls back to it.
-    productFlavors.getByName("dev").signingConfig = signingConfigs.getByName("debug")
+    // Local and pull-request builds use the debug key; development releases use the persistent key when configured.
+    productFlavors.getByName("dev").signingConfig = if(persistentSigningConfigured) {
+        signingConfigs.getByName("productionRelease")
+    } else {
+        signingConfigs.getByName("debug")
+    }
     externalNativeBuild { cmake { path = file("../../mobile/CMakeLists.txt"); version = "3.22.1" } }
     buildFeatures { compose = true; buildConfig = true }
     packaging { jniLibs.keepDebugSymbols += "**/libdt_mobile.so" }
