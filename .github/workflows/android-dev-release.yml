@@ -121,7 +121,7 @@ jobs:
             printf 'Unexpected APK package name: %s\n' "$package_name" >&2
             exit 1
           fi
-          sha256sum "$output" > "$output.sha256"
+          (cd "$(dirname "$output")" && sha256sum "$(basename "$output")") > "$output.sha256"
           echo "path=$output" >> "$GITHUB_OUTPUT"
           echo "checksum=$output.sha256" >> "$GITHUB_OUTPUT"
 
