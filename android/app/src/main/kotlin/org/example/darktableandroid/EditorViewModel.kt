@@ -62,7 +62,14 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             } catch(_: CancellationException) {
                 // A replacement request owns the visible state.
             } catch(failure: Throwable) {
-                if(request == generation) mutableState.value = EditorState.Failed(uri, failure.message ?: "Unable to open image")
+                if(request == generation) {
+                    if(opened != 0L) {
+                        NativeCore.close(opened)
+                        if(handle == opened) handle = 0L
+                        opened = 0L
+                    }
+                    mutableState.value = EditorState.Failed(uri, failure.message ?: "Unable to open image")
+                }
             } finally {
                 if(opened != 0L && request != generation) {
                     NativeCore.close(opened)
