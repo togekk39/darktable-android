@@ -54,10 +54,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 if(request != generation) { NativeCore.close(opened); return@launch }
                 handle = opened
                 mutableState.value = EditorState.Working(EditorState.Stage.RENDERING)
-                val dimensions = IntArray(2)
-                val rgba = withContext(Dispatchers.Default) { NativeCore.renderPreview(opened, 2048, 2048, dimensions) }
-                val bitmap = Bitmap.createBitmap(dimensions[0], dimensions[1], Bitmap.Config.ARGB_8888)
-                bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(rgba))
+                val bitmap = withContext(Dispatchers.Default) {
+                    val dimensions = IntArray(2)
+                    val rgba = NativeCore.renderPreview(opened, 2048, 2048, dimensions)
+                    Bitmap.createBitmap(dimensions[0], dimensions[1], Bitmap.Config.ARGB_8888).also {
+                        it.copyPixelsFromBuffer(ByteBuffer.wrap(rgba))
+                    }
+                }
                 if(request == generation) mutableState.value = EditorState.Ready(uri, bitmap) else bitmap.recycle()
             } catch(_: CancellationException) {
                 // A replacement request owns the visible state.
