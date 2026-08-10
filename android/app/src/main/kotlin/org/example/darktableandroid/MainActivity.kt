@@ -29,8 +29,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if(savedInstanceState == null) acceptSourceIntent(intent)
-        setContent { MobileRawApp(sourceIntent) }
+        restoreSource(savedInstanceState)
+        if(sourceIntent == null) acceptSourceIntent(intent)
+        setContent { MobileRawApp(sourceIntent, ::acceptSource) }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        sourceIntent?.let { source ->
+            outState.putString(SOURCE_URI, source.uri.toString())
+            outState.putInt(SOURCE_FLAGS, source.permissionFlags)
+            outState.putLong(SOURCE_ID, source.id)
+        }
+        super.onSaveInstanceState(outState)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -42,15 +52,37 @@ class MainActivity : ComponentActivity() {
     private fun acceptSourceIntent(intent: Intent) {
         if(intent.action != Intent.ACTION_VIEW && intent.action != Intent.ACTION_EDIT) return
         val uri = intent.data ?: return
-        sourceIntent = SourceIntent(uri, intent.flags, ++sourceIntentId)
+        acceptSource(uri, intent.flags)
+    }
+
+    private fun acceptSource(uri: Uri, permissionFlags: Int) {
+        sourceIntent = SourceIntent(uri, permissionFlags, ++sourceIntentId, shouldOpen = true)
+    }
+
+    private fun restoreSource(savedInstanceState: Bundle?) {
+        val uri = savedInstanceState?.getString(SOURCE_URI)?.let(Uri::parse) ?: return
+        val id = savedInstanceState.getLong(SOURCE_ID)
+        sourceIntentId = id
+        sourceIntent = SourceIntent(uri, savedInstanceState.getInt(SOURCE_FLAGS), id, shouldOpen = false)
+    }
+
+    private companion object {
+        const val SOURCE_URI = "source_uri"
+        const val SOURCE_FLAGS = "source_flags"
+        const val SOURCE_ID = "source_id"
     }
 }
 
-private data class SourceIntent(val uri: Uri, val permissionFlags: Int, val id: Long)
+private data class SourceIntent(
+    val uri: Uri,
+    val permissionFlags: Int,
+    val id: Long,
+    val shouldOpen: Boolean,
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun MobileRawApp(sourceIntent: SourceIntent?) {
+private fun MobileRawApp(sourceIntent: SourceIntent?, onSourceSelected: (Uri, Int) -> Unit) {
     var about by remember { mutableStateOf(false) }
     val context = androidx.compose.ui.platform.LocalContext.current
     val editor: EditorViewModel = viewModel()
@@ -58,7 +90,7 @@ private fun MobileRawApp(sourceIntent: SourceIntent?) {
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if(uri != null) {
             UriCache(context).retainPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            editor.open(uri)
+            onSourceSelected(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
     }
     MaterialTheme {
@@ -87,7 +119,7 @@ private fun MobileRawApp(sourceIntent: SourceIntent?) {
         })
     }
     LaunchedEffect(sourceIntent?.id) {
-        sourceIntent?.let {
+        sourceIntent?.takeIf { it.shouldOpen || state == EditorState.Empty }?.let {
             UriCache(context).retainPermission(it.uri, it.permissionFlags)
             editor.open(it.uri)
         }
