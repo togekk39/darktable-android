@@ -7,6 +7,7 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import java.nio.ByteBuffer
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -32,26 +33,26 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     val state: StateFlow<EditorState> = mutableState.asStateFlow()
     private var work: Job? = null
     private var handle = 0L
-    private var generation = 0L
+    private val generation = AtomicLong()
 
     fun open(uri: Uri) {
         cancel(false)
-        val request = ++generation
+        val request = generation.incrementAndGet()
         work = viewModelScope.launch {
             var opened = 0L
             try {
                 mutableState.value = EditorState.Working(EditorState.Stage.COPYING)
                 val cached = withContext(Dispatchers.IO) {
-                    UriCache(getApplication()).copyForNative(uri) { request != generation }
+                    UriCache(getApplication()).copyForNative(uri) { request != generation.get() }
                 }
-                if(request != generation) return@launch
+                if(request != generation.get()) return@launch
                 mutableState.value = EditorState.Working(EditorState.Stage.DECODING)
                 // Keep the hand-off to this coroutine non-cancellable. Otherwise withContext can
                 // discard a successfully opened handle while returning from the IO dispatcher.
                 opened = withContext(NonCancellable) {
                     withContext(Dispatchers.IO) { NativeCore.open(cached.file.absolutePath) }
                 }
-                if(request != generation) { NativeCore.close(opened); return@launch }
+                if(request != generation.get()) { NativeCore.close(opened); return@launch }
                 handle = opened
                 mutableState.value = EditorState.Working(EditorState.Stage.RENDERING)
                 val bitmap = withContext(Dispatchers.Default) {
@@ -61,11 +62,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                         it.copyPixelsFromBuffer(ByteBuffer.wrap(rgba))
                     }
                 }
-                if(request == generation) mutableState.value = EditorState.Ready(uri, bitmap) else bitmap.recycle()
+                if(request == generation.get()) mutableState.value = EditorState.Ready(uri, bitmap) else bitmap.recycle()
             } catch(_: CancellationException) {
                 // A replacement request owns the visible state.
             } catch(failure: Throwable) {
-                if(request == generation) {
+                if(request == generation.get()) {
                     if(opened != 0L) {
                         NativeCore.close(opened)
                         if(handle == opened) handle = 0L
@@ -74,7 +75,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     mutableState.value = EditorState.Failed(uri, failure.message ?: "Unable to open image")
                 }
             } finally {
-                if(opened != 0L && request != generation) {
+                if(opened != 0L && request != generation.get()) {
                     NativeCore.close(opened)
                     if(handle == opened) handle = 0L
                 }
@@ -83,8 +84,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun cancel(showState: Boolean = true) {
-        generation++
-        val cancellation = generation
+        val cancellation = generation.incrementAndGet()
         val cancelledWork = work
         if(showState) mutableState.value = EditorState.Working(EditorState.Stage.CANCELLING)
         if(handle != 0L) NativeCore.cancel(handle)
@@ -92,7 +92,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if(cancelledWork?.isCompleted != false) closeSession()
         if(showState) viewModelScope.launch {
             cancelledWork?.join()
-            if(generation == cancellation) {
+            if(generation.get() == cancellation) {
                 closeSession()
                 mutableState.value = EditorState.Empty
             }
