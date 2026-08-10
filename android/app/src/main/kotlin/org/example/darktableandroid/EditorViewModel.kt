@@ -74,10 +74,19 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     fun cancel(showState: Boolean = true) {
         generation++
+        val cancellation = generation
+        val cancelledWork = work
         if(showState) mutableState.value = EditorState.Working(EditorState.Stage.CANCELLING)
         if(handle != 0L) NativeCore.cancel(handle)
-        work?.cancel()
-        if(work?.isCompleted != false) closeSession()
+        cancelledWork?.cancel()
+        if(cancelledWork?.isCompleted != false) closeSession()
+        if(showState) viewModelScope.launch {
+            cancelledWork?.join()
+            if(generation == cancellation) {
+                closeSession()
+                mutableState.value = EditorState.Empty
+            }
+        }
     }
 
     private fun closeSession() {
