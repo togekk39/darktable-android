@@ -10,6 +10,7 @@ import java.nio.ByteBuffer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -45,7 +46,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 if(request != generation) return@launch
                 mutableState.value = EditorState.Working(EditorState.Stage.DECODING)
-                opened = withContext(Dispatchers.IO) { NativeCore.open(cached.file.absolutePath) }
+                // Keep the hand-off to this coroutine non-cancellable. Otherwise withContext can
+                // discard a successfully opened handle while returning from the IO dispatcher.
+                opened = withContext(NonCancellable) {
+                    withContext(Dispatchers.IO) { NativeCore.open(cached.file.absolutePath) }
+                }
                 if(request != generation) { NativeCore.close(opened); return@launch }
                 handle = opened
                 mutableState.value = EditorState.Working(EditorState.Stage.RENDERING)
