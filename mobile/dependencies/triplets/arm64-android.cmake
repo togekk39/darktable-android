@@ -8,9 +8,11 @@ set(VCPKG_LIBRARY_LINKAGE static)
 set(VCPKG_CMAKE_SYSTEM_NAME Android)
 set(VCPKG_CMAKE_SYSTEM_VERSION 26)
 set(VCPKG_CMAKE_SYSTEM_PROCESSOR aarch64)
+set(ANDROID_ABI arm64-v8a)
+set(ANDROID_PLATFORM android-26)
+set(VCPKG_CHAINLOAD_TOOLCHAIN_FILE
+    "$ENV{ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake")
 
-# Autoconf cannot infer that NDK executables are cross-compiled merely from CC.
-# vcpkg-make adds the --host option itself; this variable must contain only the
-# canonical tuple.  The explicit CMake processor above also keeps make-based
-# ports from falling back to vcpkg's 32-bit ARM Android compiler.
+# Keep Autoconf ports and the NDK toolchain on the same 64-bit Android target.
+# vcpkg-make adds the --host option itself, so this is the canonical tuple only.
 set(VCPKG_MAKE_BUILD_TRIPLET "aarch64-linux-android")
