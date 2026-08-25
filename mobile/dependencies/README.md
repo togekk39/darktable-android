@@ -49,7 +49,7 @@ task makes the copy deterministic for every variant.
 ```sh
 export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/27.2.12479018"
 mobile/dependencies/build-android-dependencies.sh
-./gradlew -p android testDevDebugUnitTest assembleDevRelease
+./android/gradlew -p android testDevDebugUnitTest assembleDevRelease
 unzip -l android/app/build/outputs/apk/dev/release/app-dev-release.apk
 ```
 
