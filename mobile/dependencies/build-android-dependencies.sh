@@ -10,6 +10,7 @@ readonly root_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 readonly triplet_dir="$root_dir/mobile/dependencies/triplets"
 readonly source_dir=${DT_MOBILE_VCPKG_ROOT:-"$root_dir/.vcpkg/$VCPKG_TAG"}
 readonly install_dir=${DT_MOBILE_VCPKG_INSTALLED:-"$root_dir/.vcpkg/installed"}
+readonly cmake_toolchain_file="$source_dir/scripts/buildsystems/vcpkg.cmake"
 
 : "${ANDROID_NDK_HOME:?ANDROID_NDK_HOME must name NDK 27.2.12479018}"
 if [[ $(basename "$ANDROID_NDK_HOME") != 27.2.12479018 ]]; then
@@ -24,10 +25,14 @@ test "$(git -C "$source_dir" describe --tags --exact-match)" = "$VCPKG_TAG"
 [[ -x "$source_dir/vcpkg" ]] || "$source_dir/bootstrap-vcpkg.sh" -disableMetrics
 
 export ANDROID_NDK_HOME
+export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
 export ANDROID_ABI=arm64-v8a
 export ANDROID_PLATFORM=android-$API
 export CMAKE_ANDROID_ARCH_ABI=arm64-v8a
 export CMAKE_ANDROID_ARCH=aarch64
+export CMAKE_TOOLCHAIN_FILE="$cmake_toolchain_file"
+export VCPKG_ROOT="$source_dir"
+export VCPKG_DEFAULT_TRIPLET=$ABI
 export VCPKG_TARGET_TRIPLET=$ABI
 export VCPKG_FORCE_SYSTEM_BINARIES=1
 
@@ -40,6 +45,20 @@ if armv7_environment=$(env | grep -Ei '(^|=)(armeabi-v7a|armv7|[^[:alnum:]]mthum
 fi
 [[ $ANDROID_ABI == arm64-v8a && $ANDROID_PLATFORM == android-26 ]]
 [[ $ANDROID_TARGET == aarch64-linux-android ]]
+test -f "$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
+test -f "$CMAKE_TOOLCHAIN_FILE"
+
+# Validate the checked-in triplet itself, rather than trusting its filename.
+cmake -DTRIPLET_FILE="$triplet_dir/$ABI.cmake" \
+  -DEXPECTED_NDK_TOOLCHAIN="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+  -P "$root_dir/mobile/dependencies/validate-android-triplet.cmake"
+
+echo 'Android dependency build environment:'
+for name in ANDROID_NDK_HOME ANDROID_NDK_ROOT VCPKG_ROOT \
+  VCPKG_DEFAULT_TRIPLET VCPKG_TARGET_TRIPLET CMAKE_TOOLCHAIN_FILE; do
+  printf '%s=%s\n' "$name" "${!name-<unset>}"
+done
+env | LC_ALL=C sort | grep -E '^(ANDROID_(ABI|PLATFORM)|CMAKE_ANDROID_)' || true
 
 "$source_dir/vcpkg" install \
   --triplet "$ABI" \
@@ -48,6 +67,6 @@ fi
   --x-install-root="$install_dir" \
   --clean-after-build
 
-printf 'VCPKG_ROOT=%s\nVCPKG_INSTALLED_DIR=%s\nVCPKG_TARGET_TRIPLET=%s\nANDROID_ABI=%s\nANDROID_PLATFORM=%s\n' \
-  "$source_dir" "$install_dir" "$ABI" "$ANDROID_ABI" "$ANDROID_PLATFORM" \
+printf 'VCPKG_ROOT=%s\nVCPKG_INSTALLED_DIR=%s\nVCPKG_DEFAULT_TRIPLET=%s\nVCPKG_TARGET_TRIPLET=%s\nANDROID_ABI=%s\nANDROID_PLATFORM=%s\n' \
+  "$source_dir" "$install_dir" "$ABI" "$ABI" "$ANDROID_ABI" "$ANDROID_PLATFORM" \
   > "$root_dir/mobile/dependencies/android-dependencies.env"

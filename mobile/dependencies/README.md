@@ -8,6 +8,12 @@ overlay triplet sets `VCPKG_CMAKE_SYSTEM_VERSION` so all dependencies are
 compiled for the advertised API 26 baseline. It also supplies the canonical
 `aarch64-linux-android` host tuple used by Autoconf-based ports, preventing
 vcpkg's make helper from falling back to an ARMv7 compiler for ARM64 builds.
+Before invoking `vcpkg install`, the dependency script validates the checked-in
+triplet and exports the NDK roots, vcpkg root/default triplet, vcpkg CMake
+toolchain, ABI, architecture, and platform. The validation fails unless the
+triplet resolves to `arm64-v8a`, `aarch64-linux-android`, and API 26, preventing
+a cache or inherited environment from silently changing the target.
+
 The dependency script and Gradle CMake invocation both pin `ANDROID_ABI` to
 `arm64-v8a`, `ANDROID_PLATFORM` to `android-26`, and the CMake Android
 architecture to `aarch64`; no port-specific ABI override is used. Nothing from
