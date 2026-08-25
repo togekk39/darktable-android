@@ -5,7 +5,10 @@ NDK 27.2.12479018. `build-android-dependencies.sh` checks out the immutable vcpk
 2025.06.13 release catalog, whose portfiles pin upstream source versions and
 SHA-512-check every downloaded archive, then builds from source. The checked-in
 overlay triplet sets `VCPKG_CMAKE_SYSTEM_VERSION` so all dependencies are
-compiled for the advertised API 26 baseline. Nothing from
+compiled for the advertised API 26 baseline. It also supplies the canonical
+`aarch64-linux-android` host tuple used by Autoconf-based ports, preventing
+vcpkg's make helper from falling back to an ARMv7 compiler for ARM64 builds.
+Nothing from
 `.vcpkg/` is checked in. Gradle runs this same command before CMake and CI caches
 only its installed output and download cache.
 
