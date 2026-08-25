@@ -31,4 +31,8 @@ add_library(dt_mobile_android_dependencies INTERFACE)
 target_link_libraries(dt_mobile_android_dependencies INTERFACE
   ZLIB::ZLIB JPEG::JPEG PNG::PNG TIFF::TIFF
   lcms2::lcms2 unofficial::sqlite3::sqlite3 unofficial::glib::glib
-  pugixml::pugixml Exiv2::exiv2lib libraw::raw_r rawspeed)
+  pugixml::pugixml Exiv2::exiv2lib libraw::raw_r
+  # The decoder adapter does not reference RawSpeed yet. Keep its complete
+  # archive in libdt_mobile.so so this dependency probe actually validates and
+  # ships the decoder rather than letting the linker discard every object.
+  "-Wl,--whole-archive" rawspeed "-Wl,--no-whole-archive")
