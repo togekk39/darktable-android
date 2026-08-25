@@ -20,7 +20,6 @@ val prepareNativeDependencies = tasks.register<Exec>("prepareNativeDependencies"
         repositoryRoot.resolve("mobile/dependencies/build-android-dependencies.sh"),
         repositoryRoot.resolve("mobile/dependencies/triplets/arm64-android.cmake"),
     )
-    inputs.dir(repositoryRoot.resolve("mobile/dependencies/ports"))
     outputs.dir(vcpkgInstalled.resolve("arm64-android"))
     environment("ANDROID_NDK_HOME", pinnedNdk.get().absolutePath)
     commandLine(repositoryRoot.resolve("mobile/dependencies/build-android-dependencies.sh"))
@@ -48,6 +47,10 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         externalNativeBuild { cmake {
             arguments += listOf(
+                "-DANDROID_ABI=arm64-v8a",
+                "-DANDROID_PLATFORM=android-26",
+                "-DCMAKE_ANDROID_ARCH_ABI=arm64-v8a",
+                "-DCMAKE_ANDROID_ARCH=aarch64",
                 "-DANDROID_STL=c++_shared",
                 "-DCMAKE_TOOLCHAIN_FILE=${vcpkgRoot.resolve("scripts/buildsystems/vcpkg.cmake")}",
                 "-DVCPKG_CHAINLOAD_TOOLCHAIN_FILE=${pinnedNdk.get().resolve("build/cmake/android.toolchain.cmake")}",

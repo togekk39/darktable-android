@@ -8,11 +8,9 @@ overlay triplet sets `VCPKG_CMAKE_SYSTEM_VERSION` so all dependencies are
 compiled for the advertised API 26 baseline. It also supplies the canonical
 `aarch64-linux-android` host tuple used by Autoconf-based ports, preventing
 vcpkg's make helper from falling back to an ARMv7 compiler for ARM64 builds.
-The `ports/libiconv` overlay supplies the explicit `--host` option required by
-the older `vcpkg_configure_make` helper used by the pinned libiconv port. This
-makes Autoconf enter cross-compilation mode instead of executing Android probe
-binaries on the build host; other make-based ports retain the canonical tuple.
-Nothing from
+The dependency script and Gradle CMake invocation both pin `ANDROID_ABI` to
+`arm64-v8a`, `ANDROID_PLATFORM` to `android-26`, and the CMake Android
+architecture to `aarch64`; no port-specific ABI override is used. Nothing from
 `.vcpkg/` is checked in. Gradle runs this same command before CMake and CI caches
 only its installed output and download cache.
 
