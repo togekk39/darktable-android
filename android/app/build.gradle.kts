@@ -20,6 +20,7 @@ val prepareNativeDependencies = tasks.register<Exec>("prepareNativeDependencies"
         repositoryRoot.resolve("mobile/dependencies/build-android-dependencies.sh"),
         repositoryRoot.resolve("mobile/dependencies/triplets/arm64-android.cmake"),
     )
+    inputs.dir(repositoryRoot.resolve("mobile/dependencies/ports"))
     outputs.dir(vcpkgInstalled.resolve("arm64-android"))
     environment("ANDROID_NDK_HOME", pinnedNdk.get().absolutePath)
     commandLine(repositoryRoot.resolve("mobile/dependencies/build-android-dependencies.sh"))

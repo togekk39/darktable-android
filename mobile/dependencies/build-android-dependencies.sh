@@ -7,6 +7,7 @@ readonly ABI=arm64-android
 readonly API=26
 readonly root_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 readonly triplet_dir="$root_dir/mobile/dependencies/triplets"
+readonly overlay_ports_dir="$root_dir/mobile/dependencies/ports"
 readonly source_dir=${DT_MOBILE_VCPKG_ROOT:-"$root_dir/.vcpkg/$VCPKG_TAG"}
 readonly install_dir=${DT_MOBILE_VCPKG_INSTALLED:-"$root_dir/.vcpkg/installed"}
 
@@ -27,6 +28,7 @@ export VCPKG_FORCE_SYSTEM_BINARIES=1
 "$source_dir/vcpkg" install \
   --triplet "$ABI" \
   --overlay-triplets="$triplet_dir" \
+  --overlay-ports="$overlay_ports_dir" \
   --x-manifest-root="$root_dir/mobile/dependencies" \
   --x-install-root="$install_dir" \
   --clean-after-build
