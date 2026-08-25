@@ -9,6 +9,26 @@ val persistentSigningConfigured = listOf(
     "ANDROID_KEY_PASSWORD",
 ).all { providers.environmentVariable(it).isPresent }
 
+val repositoryRoot = rootProject.projectDir.parentFile
+val vcpkgTag = "2025.06.13"
+val vcpkgRoot = repositoryRoot.resolve(".vcpkg/$vcpkgTag")
+val vcpkgInstalled = repositoryRoot.resolve(".vcpkg/installed")
+val pinnedNdk = androidComponents.sdkComponents.ndkDirectory.map { it.asFile }
+val prepareNativeDependencies = tasks.register<Exec>("prepareNativeDependencies") {
+    inputs.files(
+        repositoryRoot.resolve("mobile/dependencies/vcpkg.json"),
+        repositoryRoot.resolve("mobile/dependencies/build-android-dependencies.sh"),
+    )
+    outputs.dir(vcpkgInstalled.resolve("arm64-android"))
+    environment("ANDROID_NDK_HOME", pinnedNdk.get().absolutePath)
+    commandLine(repositoryRoot.resolve("mobile/dependencies/build-android-dependencies.sh"))
+}
+val prepareMobileAssets = tasks.register<Sync>("prepareMobileAssets") {
+    from(repositoryRoot.resolve("src/external/rawspeed/data")) { include("cameras.xml") }
+    from(repositoryRoot.resolve("data")) { include("noiseprofiles.json", "wb_presets.json") }
+    into(layout.buildDirectory.dir("generated/mobileAssets"))
+}
+
 android {
     namespace = "org.example.darktableandroid"
     compileSdk = 35
@@ -24,7 +44,17 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        externalNativeBuild { cmake { arguments += listOf("-DANDROID_STL=c++_shared"); abiFilters += "arm64-v8a" } }
+        externalNativeBuild { cmake {
+            arguments += listOf(
+                "-DANDROID_STL=c++_shared",
+                "-DCMAKE_TOOLCHAIN_FILE=${vcpkgRoot.resolve("scripts/buildsystems/vcpkg.cmake")}",
+                "-DVCPKG_CHAINLOAD_TOOLCHAIN_FILE=${pinnedNdk.get().resolve("build/cmake/android.toolchain.cmake")}",
+                "-DVCPKG_TARGET_TRIPLET=arm64-android",
+                "-DVCPKG_INSTALLED_DIR=$vcpkgInstalled",
+                "-DVCPKG_MANIFEST_MODE=OFF",
+            )
+            abiFilters += "arm64-v8a"
+        } }
     }
     signingConfigs {
         create("productionRelease") {
@@ -70,7 +100,13 @@ android {
     }
     externalNativeBuild { cmake { path = file("../../mobile/CMakeLists.txt"); version = "3.22.1" } }
     buildFeatures { compose = true; buildConfig = true }
+    sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("generated/mobileAssets"))
     packaging { jniLibs.keepDebugSymbols += "**/libdt_mobile.so" }
+}
+
+tasks.configureEach {
+    if(name.startsWith("configureCMake") || name.startsWith("buildCMake")) dependsOn(prepareNativeDependencies)
+    if(name.startsWith("merge") && name.endsWith("Assets")) dependsOn(prepareMobileAssets)
 }
 
 kotlin { jvmToolchain(17) }

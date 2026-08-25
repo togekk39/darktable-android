@@ -1,0 +1,9 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "darktable-android-native",
+  "version-string": "1.0.0",
+  "dependencies": [
+    "exiv2", "glib", "lcms", "libjpeg-turbo", "libpng", "libraw",
+    "pugixml", "sqlite3", "tiff", "zlib"
+  ]
+}

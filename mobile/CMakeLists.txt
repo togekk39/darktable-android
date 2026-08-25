@@ -1,15 +1,32 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 cmake_minimum_required(VERSION 3.22.1)
-project(dt_mobile LANGUAGES C)
+project(dt_mobile LANGUAGES C CXX)
+
+option(DT_MOBILE_BUILD_TESTS "Build host mobile API tests" OFF)
+option(DT_MOBILE_ANDROID_DEPENDENCIES "Link the pinned Android native dependency bundle" ${ANDROID})
+
 add_library(dt_mobile_core STATIC core/dt_mobile.c)
 target_include_directories(dt_mobile_core PUBLIC include)
 target_compile_features(dt_mobile_core PRIVATE c_std_11)
+
+if(DT_MOBILE_ANDROID_DEPENDENCIES)
+  if(NOT ANDROID)
+    message(FATAL_ERROR "The mobile dependency bundle is Android-only; disable DT_MOBILE_ANDROID_DEPENDENCIES for host tests")
+  endif()
+  include(cmake/AndroidDependencies.cmake)
+  add_library(dt_mobile_dependency_probe STATIC core/android_dependency_probe.cpp)
+  target_compile_features(dt_mobile_dependency_probe PRIVATE cxx_std_17)
+  target_link_libraries(dt_mobile_dependency_probe PUBLIC dt_mobile_android_dependencies)
+  target_link_libraries(dt_mobile_core PUBLIC dt_mobile_dependency_probe)
+  target_compile_definitions(dt_mobile_core PRIVATE DT_MOBILE_HAS_ANDROID_DEPENDENCIES=1)
+endif()
+
 if(ANDROID)
   add_library(dt_mobile SHARED jni/dt_mobile_jni.c)
   target_link_libraries(dt_mobile PRIVATE dt_mobile_core log)
   target_compile_options(dt_mobile PRIVATE -Wall -Wextra -Werror)
 endif()
-option(DT_MOBILE_BUILD_TESTS "Build host mobile API tests" OFF)
+
 if(DT_MOBILE_BUILD_TESTS)
   enable_testing()
   add_executable(dt_mobile_api_test tests/dt_mobile_api_test.c)

@@ -25,6 +25,13 @@ jobs:
         run: |
           sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
           echo "$ANDROID_SDK_ROOT/build-tools/35.0.0" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .vcpkg/installed
+            ~/.cache/vcpkg/archives
+            ~/.cache/vcpkg/downloads
+          key: android-native-${{ runner.os }}-arm64-api26-ndk27.2.12479018-vcpkg2025.06.13-${{ hashFiles('mobile/dependencies/**', '.gitmodules') }}
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.14.4"
@@ -49,6 +56,12 @@ jobs:
           test -n "$APK"
           aapt2 dump badging "$APK" | tee android/app/build/outputs/apk/dev/release/manifest.txt
           aapt2 dump badging "$APK" | grep "package: name='org.example.darktableandroid.dev'"
+          unzip -l "$APK" | grep 'lib/arm64-v8a/libdt_mobile.so'
+          unzip -l "$APK" | grep 'lib/arm64-v8a/libc++_shared.so'
+          for asset in cameras.xml noiseprofiles.json wb_presets.json; do unzip -l "$APK" | grep "assets/$asset"; done
+          unzip -p "$APK" lib/arm64-v8a/libdt_mobile.so > /tmp/libdt_mobile.so
+          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -d /tmp/libdt_mobile.so | tee /tmp/dt-mobile-elf.txt
+          grep 'libc++_shared.so' /tmp/dt-mobile-elf.txt
           sha256sum "$APK" > "$APK.sha256"
       - uses: actions/upload-artifact@v4
         with:
