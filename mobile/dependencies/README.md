@@ -3,7 +3,9 @@
 The Android engine uses the `arm64-android` triplet at API 26 and the repository's
 NDK 27.2.12479018. `build-android-dependencies.sh` checks out the immutable vcpkg
 2025.06.13 release catalog, whose portfiles pin upstream source versions and
-SHA-512-check every downloaded archive, then builds from source. Nothing from
+SHA-512-check every downloaded archive, then builds from source. The checked-in
+overlay triplet sets `VCPKG_CMAKE_SYSTEM_VERSION` so all dependencies are
+compiled for the advertised API 26 baseline. Nothing from
 `.vcpkg/` is checked in. Gradle runs this same command before CMake and CI caches
 only its installed output and download cache.
 
