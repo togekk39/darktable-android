@@ -50,7 +50,6 @@ test -f "$CMAKE_TOOLCHAIN_FILE"
 
 # Validate the checked-in triplet itself, rather than trusting its filename.
 cmake -DTRIPLET_FILE="$triplet_dir/$ABI.cmake" \
-  -DEXPECTED_NDK_TOOLCHAIN="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
   -P "$root_dir/mobile/dependencies/validate-android-triplet.cmake"
 
 echo 'Android dependency build environment:'
@@ -59,6 +58,8 @@ for name in ANDROID_NDK_HOME ANDROID_NDK_ROOT VCPKG_ROOT \
   printf '%s=%s\n' "$name" "${!name-<unset>}"
 done
 env | LC_ALL=C sort | grep -E '^(ANDROID_(ABI|PLATFORM)|CMAKE_ANDROID_)' || true
+printf 'CPPFLAGS=%s\n' "${CPPFLAGS-<unset>}"
+printf 'CMAKE_ANDROID_ARCH_ABI=%s\n' "$CMAKE_ANDROID_ARCH_ABI"
 
 "$source_dir/vcpkg" install \
   --triplet "$ABI" \

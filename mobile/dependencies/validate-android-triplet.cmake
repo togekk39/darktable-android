@@ -14,12 +14,15 @@ endfunction()
 require_triplet_value(VCPKG_TARGET_ARCHITECTURE arm64)
 require_triplet_value(VCPKG_CMAKE_SYSTEM_NAME Android)
 require_triplet_value(VCPKG_CMAKE_SYSTEM_VERSION 26)
-require_triplet_value(VCPKG_CMAKE_SYSTEM_PROCESSOR aarch64)
-require_triplet_value(ANDROID_ABI arm64-v8a)
-require_triplet_value(ANDROID_PLATFORM android-26)
-require_triplet_value(CMAKE_ANDROID_ARCH_ABI arm64-v8a)
-require_triplet_value(CMAKE_ANDROID_ARCH aarch64)
-require_triplet_value(VCPKG_MAKE_BUILD_TRIPLET aarch64-linux-android)
-require_triplet_value(VCPKG_CHAINLOAD_TOOLCHAIN_FILE "${EXPECTED_NDK_TOOLCHAIN}")
 
-message(STATUS "Validated arm64-v8a / aarch64-linux-android / API 26 triplet")
+# These settings bypass or override vcpkg's architecture mapping and have
+# previously allowed stale ARMv7 flags to leak into make-based ports.
+foreach(name IN ITEMS ANDROID_ABI ANDROID_PLATFORM CMAKE_ANDROID_ARCH_ABI
+                      CMAKE_ANDROID_ARCH VCPKG_CMAKE_SYSTEM_PROCESSOR
+                      VCPKG_CHAINLOAD_TOOLCHAIN_FILE VCPKG_MAKE_BUILD_TRIPLET)
+  if(DEFINED ${name})
+    message(FATAL_ERROR "${name} must be derived by vcpkg's Android toolchain")
+  endif()
+endforeach()
+
+message(STATUS "Validated vcpkg arm64 Android / API 26 triplet")
