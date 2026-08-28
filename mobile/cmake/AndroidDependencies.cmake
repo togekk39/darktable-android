@@ -18,15 +18,16 @@ find_package(exiv2 CONFIG REQUIRED)
 find_package(libraw CONFIG REQUIRED)
 
 # FindPkgConfig runs the host pkg-config executable during a cross-build, so
-# verify that the module it found describes the target installation. This is
-# deliberately stricter than merely rejecting /usr: every absolute GLib search
-# path must be below vcpkg's selected arm64-android prefix.
+# verify that the module it found describes the target installation. This
+# validates the package's own include and library directories rather than its
+# transitive link libraries. The latter can legitimately include Android NDK
+# sysroot libraries such as libm and libdl.
 if(NOT DEFINED VCPKG_INSTALLED_DIR)
   message(FATAL_ERROR "VCPKG_INSTALLED_DIR is required to validate the Android GLib package")
 endif()
 cmake_path(ABSOLUTE_PATH VCPKG_INSTALLED_DIR NORMALIZE OUTPUT_VARIABLE _vcpkg_installed_dir)
 set(_glib2_prefix "${_vcpkg_installed_dir}/${VCPKG_TARGET_TRIPLET}")
-foreach(_glib2_path IN LISTS GLIB2_INCLUDE_DIRS GLIB2_LIBRARY_DIRS GLIB2_LINK_LIBRARIES)
+foreach(_glib2_path IN LISTS GLIB2_INCLUDE_DIRS GLIB2_LIBRARY_DIRS)
   if(IS_ABSOLUTE "${_glib2_path}")
     cmake_path(NORMAL_PATH _glib2_path OUTPUT_VARIABLE _glib2_normalized_path)
     cmake_path(IS_PREFIX _glib2_prefix "${_glib2_normalized_path}" NORMALIZE _glib2_is_vcpkg_target)
@@ -36,6 +37,18 @@ foreach(_glib2_path IN LISTS GLIB2_INCLUDE_DIRS GLIB2_LIBRARY_DIRS GLIB2_LINK_LI
     endif()
   endif()
 endforeach()
+
+# Also require the GLib archive itself to exist in the selected target prefix.
+# Searching both release and debug library directories keeps this check valid
+# for either vcpkg build configuration without allowing a host fallback.
+find_library(_glib2_target_library
+  NAMES glib-2.0
+  PATHS "${_glib2_prefix}/lib" "${_glib2_prefix}/debug/lib"
+  NO_DEFAULT_PATH)
+if(NOT _glib2_target_library)
+  message(FATAL_ERROR
+    "glib-2.0 library is missing from the vcpkg ${VCPKG_TARGET_TRIPLET} prefix: ${_glib2_prefix}")
+endif()
 
 # RawSpeed is darktable's pinned gitlink, not a second downloaded copy. Its
 # camera database is consequently guaranteed to match the decoder code.
