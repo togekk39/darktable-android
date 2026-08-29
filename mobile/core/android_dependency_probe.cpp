@@ -1,4 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include <cstddef>
+#include <cstdio>
+
 #include <glib.h>
 #include <jpeglib.h>
 #include <lcms2.h>
