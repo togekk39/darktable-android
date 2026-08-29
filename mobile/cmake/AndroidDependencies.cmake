@@ -53,13 +53,29 @@ endif()
 # RawSpeed is darktable's pinned gitlink, not a second downloaded copy. Its
 # camera database is consequently guaranteed to match the decoder code.
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
-set(RAWSPEED_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
-set(RAWSPEED_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(BUILD_BENCHMARKING OFF CACHE BOOL "" FORCE)
+set(BUILD_FUZZERS OFF CACHE BOOL "" FORCE)
+set(BUILD_DOCS OFF CACHE BOOL "" FORCE)
+set(USE_XMLLINT OFF CACHE BOOL "" FORCE)
 set(RAWSPEED_PATH "${CMAKE_CURRENT_LIST_DIR}/../../src/external/rawspeed")
 if(NOT EXISTS "${RAWSPEED_PATH}/CMakeLists.txt")
   message(FATAL_ERROR "RawSpeed submodule is missing; run git submodule update --init --recursive")
 endif()
-add_subdirectory("${RAWSPEED_PATH}" "${CMAKE_CURRENT_BINARY_DIR}/rawspeed" EXCLUDE_FROM_ALL)
+
+# AGP uses RelWithDebInfo for this single-config Ninja build, whereas the
+# pinned RawSpeed revision rejects that name and calls its equivalent
+# configuration ReleaseWithAsserts. A function scope lets the RawSpeed child
+# directory inherit the compatible name without changing the build type seen
+# by the rest of the Android project. Targets created by add_subdirectory()
+# remain available after the function returns.
+function(_dt_mobile_add_rawspeed)
+  if(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+    set(CMAKE_BUILD_TYPE "ReleaseWithAsserts")
+  endif()
+  add_subdirectory("${RAWSPEED_PATH}" "${CMAKE_CURRENT_BINARY_DIR}/rawspeed" EXCLUDE_FROM_ALL)
+endfunction()
+_dt_mobile_add_rawspeed()
 
 add_library(dt_mobile_android_dependencies INTERFACE)
 target_link_libraries(dt_mobile_android_dependencies INTERFACE
