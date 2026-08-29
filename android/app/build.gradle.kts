@@ -1,5 +1,40 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+import org.gradle.api.DefaultTask
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.file.FileSystemOperations
+import org.gradle.api.file.RegularFileProperty
+import org.gradle.api.tasks.InputFile
+import org.gradle.api.tasks.OutputDirectory
+import org.gradle.api.tasks.TaskAction
 import java.util.Properties
+import javax.inject.Inject
+
+abstract class PrepareMobileAssetsTask @Inject constructor(
+    private val fileSystemOperations: FileSystemOperations,
+) : DefaultTask() {
+    @get:InputFile
+    abstract val camerasXml: RegularFileProperty
+
+    @get:InputFile
+    abstract val noiseProfilesJson: RegularFileProperty
+
+    @get:InputFile
+    abstract val whiteBalancePresetsJson: RegularFileProperty
+
+    @get:OutputDirectory
+    abstract val outputDirectory: DirectoryProperty
+
+    @TaskAction
+    fun generate() {
+        fileSystemOperations.sync {
+            from(camerasXml)
+            from(noiseProfilesJson)
+            from(whiteBalancePresetsJson)
+            into(outputDirectory)
+        }
+    }
+}
+
 plugins { id("com.android.application"); id("org.jetbrains.kotlin.android"); id("org.jetbrains.kotlin.plugin.compose") }
 
 val persistentSigningConfigured = listOf(
@@ -25,12 +60,6 @@ val prepareNativeDependencies = tasks.register<Exec>("prepareNativeDependencies"
     environment("ANDROID_NDK_HOME", pinnedNdk.get().absolutePath)
     commandLine(repositoryRoot.resolve("mobile/dependencies/build-android-dependencies.sh"))
 }
-val prepareMobileAssets = tasks.register<Sync>("prepareMobileAssets") {
-    from(repositoryRoot.resolve("src/external/rawspeed/data")) { include("cameras.xml") }
-    from(repositoryRoot.resolve("data")) { include("noiseprofiles.json", "wb_presets.json") }
-    into(layout.buildDirectory.dir("generated/mobileAssets"))
-}
-
 android {
     namespace = "org.example.darktableandroid"
     compileSdk = 35
@@ -106,13 +135,29 @@ android {
     }
     externalNativeBuild { cmake { path = file("../../mobile/CMakeLists.txt"); version = "3.22.1" } }
     buildFeatures { compose = true; buildConfig = true }
-    sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("generated/mobileAssets"))
     packaging { jniLibs.keepDebugSymbols += "**/libdt_mobile.so" }
+}
+
+androidComponents.onVariants { variant ->
+    val variantName = variant.name.replaceFirstChar { it.uppercase() }
+    val prepareMobileAssets = tasks.register<PrepareMobileAssetsTask>(
+        "prepare${variantName}MobileAssets",
+    ) {
+        camerasXml.set(
+            layout.projectDirectory.file("../../src/external/rawspeed/data/cameras.xml"),
+        )
+        noiseProfilesJson.set(layout.projectDirectory.file("../../data/noiseprofiles.json"))
+        whiteBalancePresetsJson.set(layout.projectDirectory.file("../../data/wb_presets.json"))
+        outputDirectory.set(layout.buildDirectory.dir("generated/mobileAssets/${variant.name}"))
+    }
+    variant.sources.assets?.addGeneratedSourceDirectory(
+        prepareMobileAssets,
+        PrepareMobileAssetsTask::outputDirectory,
+    )
 }
 
 tasks.configureEach {
     if(name.startsWith("configureCMake") || name.startsWith("buildCMake")) dependsOn(prepareNativeDependencies)
-    if(name.startsWith("merge") && name.endsWith("Assets")) dependsOn(prepareMobileAssets)
 }
 
 kotlin { jvmToolchain(17) }

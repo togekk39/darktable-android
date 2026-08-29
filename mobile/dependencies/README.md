@@ -52,8 +52,8 @@ distributed with releases.
 
 RawSpeed's `cameras.xml`, plus darktable's `noiseprofiles.json` and
 `wb_presets.json`, are copied to generated Android assets. Only those runtime
-databases are packaged—not the desktop data tree. Gradle's `prepareMobileAssets`
-task makes the copy deterministic for every variant.
+databases are packaged—not the desktop data tree. Gradle registers a generated
+assets producer for each Android variant to make the copy deterministic.
 
 ## Direct build and verification
 
