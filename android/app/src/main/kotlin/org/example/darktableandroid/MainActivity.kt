@@ -103,7 +103,7 @@ private fun MobileRawApp(sourceIntent: SourceIntent?, onSourceSelected: (Uri, In
                     is EditorState.Working -> {
                         CircularProgressIndicator()
                         Text(current.stage.name.lowercase().replaceFirstChar(Char::uppercase))
-                        TextButton(onClick = editor::cancel) { Text("Cancel") }
+                        TextButton(onClick = { editor.cancel() }) { Text("Cancel") }
                     }
                     is EditorState.Ready -> Image(current.preview.asImageBitmap(), "Processed RAW preview", Modifier.fillMaxWidth().weight(1f), contentScale = ContentScale.Fit)
                     is EditorState.Failed -> {
