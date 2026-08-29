@@ -73,6 +73,13 @@ function(_dt_mobile_add_rawspeed)
   if(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
     set(CMAKE_BUILD_TYPE "ReleaseWithAsserts")
   endif()
+
+  # RawSpeed's package-build mode uses portable hardware defaults instead of
+  # executing cache-line and page-size probes, which cannot run while CMake is
+  # cross-compiling Android binaries on the host. Keep this as a normal,
+  # function-scoped variable so only the RawSpeed subdirectory sees it.
+  set(BINARY_PACKAGE_BUILD ON)
+
   add_subdirectory("${RAWSPEED_PATH}" "${CMAKE_CURRENT_BINARY_DIR}/rawspeed" EXCLUDE_FROM_ALL)
 endfunction()
 _dt_mobile_add_rawspeed()
