@@ -6,10 +6,16 @@
 #include <string.h>
 struct dt_mobile_session { char *path; atomic_bool cancelled; char error[256]; };
 static _Thread_local char open_error[256];
+#ifdef DT_MOBILE_HAS_ANDROID_DEPENDENCIES
+extern unsigned long dt_mobile_dependency_probe(void);
+#endif
 static dt_mobile_status fail(dt_mobile_session *s, dt_mobile_status status, const char *message)
 { if(s) snprintf(s->error, sizeof(s->error), "%s", message); return status; }
 dt_mobile_status dt_mobile_open(const char *path, dt_mobile_session **out)
 {
+#ifdef DT_MOBILE_HAS_ANDROID_DEPENDENCIES
+  (void)dt_mobile_dependency_probe();
+#endif
   open_error[0] = '\0';
   if(!path || !path[0] || !out) { snprintf(open_error, sizeof(open_error), "a non-empty source path and output session are required"); return DT_MOBILE_ERROR_INVALID_ARGUMENT; }
   *out = NULL;

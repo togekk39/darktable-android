@@ -36,6 +36,7 @@ android/**/build/
 build/mobile/
 
 # Local Android packages, native outputs, and signing material
+.vcpkg/
 *.apk
 *.aab
 *.apks

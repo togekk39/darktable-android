@@ -1,5 +1,40 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+import org.gradle.api.DefaultTask
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.file.FileSystemOperations
+import org.gradle.api.file.RegularFileProperty
+import org.gradle.api.tasks.InputFile
+import org.gradle.api.tasks.OutputDirectory
+import org.gradle.api.tasks.TaskAction
 import java.util.Properties
+import javax.inject.Inject
+
+abstract class PrepareMobileAssetsTask @Inject constructor(
+    private val fileSystemOperations: FileSystemOperations,
+) : DefaultTask() {
+    @get:InputFile
+    abstract val camerasXml: RegularFileProperty
+
+    @get:InputFile
+    abstract val noiseProfilesJson: RegularFileProperty
+
+    @get:InputFile
+    abstract val whiteBalancePresetsJson: RegularFileProperty
+
+    @get:OutputDirectory
+    abstract val outputDirectory: DirectoryProperty
+
+    @TaskAction
+    fun generate() {
+        fileSystemOperations.sync {
+            from(camerasXml)
+            from(noiseProfilesJson)
+            from(whiteBalancePresetsJson)
+            into(outputDirectory)
+        }
+    }
+}
+
 plugins { id("com.android.application"); id("org.jetbrains.kotlin.android"); id("org.jetbrains.kotlin.plugin.compose") }
 
 val persistentSigningConfigured = listOf(
@@ -9,6 +44,22 @@ val persistentSigningConfigured = listOf(
     "ANDROID_KEY_PASSWORD",
 ).all { providers.environmentVariable(it).isPresent }
 
+val repositoryRoot = rootProject.projectDir.parentFile
+val vcpkgTag = "2025.06.13"
+val vcpkgRoot = repositoryRoot.resolve(".vcpkg/$vcpkgTag")
+val vcpkgInstalled = repositoryRoot.resolve(".vcpkg/installed")
+val pinnedNdk = androidComponents.sdkComponents.ndkDirectory.map { it.asFile }
+val prepareNativeDependencies = tasks.register<Exec>("prepareNativeDependencies") {
+    inputs.files(
+        repositoryRoot.resolve("mobile/dependencies/vcpkg.json"),
+        repositoryRoot.resolve("mobile/dependencies/build-android-dependencies.sh"),
+        repositoryRoot.resolve("mobile/dependencies/triplets/arm64-android.cmake"),
+        repositoryRoot.resolve("mobile/dependencies/validate-android-triplet.cmake"),
+    )
+    outputs.dir(vcpkgInstalled.resolve("arm64-android"))
+    environment("ANDROID_NDK_HOME", pinnedNdk.get().absolutePath)
+    commandLine(repositoryRoot.resolve("mobile/dependencies/build-android-dependencies.sh"))
+}
 android {
     namespace = "org.example.darktableandroid"
     compileSdk = 35
@@ -24,7 +75,21 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        externalNativeBuild { cmake { arguments += listOf("-DANDROID_STL=c++_shared"); abiFilters += "arm64-v8a" } }
+        externalNativeBuild { cmake {
+            arguments += listOf(
+                "-DANDROID_ABI=arm64-v8a",
+                "-DANDROID_PLATFORM=android-26",
+                "-DCMAKE_ANDROID_ARCH_ABI=arm64-v8a",
+                "-DCMAKE_ANDROID_ARCH=aarch64",
+                "-DANDROID_STL=c++_shared",
+                "-DCMAKE_TOOLCHAIN_FILE=${vcpkgRoot.resolve("scripts/buildsystems/vcpkg.cmake")}",
+                "-DVCPKG_CHAINLOAD_TOOLCHAIN_FILE=${pinnedNdk.get().resolve("build/cmake/android.toolchain.cmake")}",
+                "-DVCPKG_TARGET_TRIPLET=arm64-android",
+                "-DVCPKG_INSTALLED_DIR=$vcpkgInstalled",
+                "-DVCPKG_MANIFEST_MODE=OFF",
+            )
+            abiFilters += "arm64-v8a"
+        } }
     }
     signingConfigs {
         create("productionRelease") {
@@ -71,6 +136,28 @@ android {
     externalNativeBuild { cmake { path = file("../../mobile/CMakeLists.txt"); version = "3.22.1" } }
     buildFeatures { compose = true; buildConfig = true }
     packaging { jniLibs.keepDebugSymbols += "**/libdt_mobile.so" }
+}
+
+androidComponents.onVariants { variant ->
+    val variantName = variant.name.replaceFirstChar { it.uppercase() }
+    val prepareMobileAssets = tasks.register<PrepareMobileAssetsTask>(
+        "prepare${variantName}MobileAssets",
+    ) {
+        camerasXml.set(
+            layout.projectDirectory.file("../../src/external/rawspeed/data/cameras.xml"),
+        )
+        noiseProfilesJson.set(layout.projectDirectory.file("../../data/noiseprofiles.json"))
+        whiteBalancePresetsJson.set(layout.projectDirectory.file("../../data/wb_presets.json"))
+        outputDirectory.set(layout.buildDirectory.dir("generated/mobileAssets/${variant.name}"))
+    }
+    variant.sources.assets?.addGeneratedSourceDirectory(
+        prepareMobileAssets,
+        PrepareMobileAssetsTask::outputDirectory,
+    )
+}
+
+tasks.configureEach {
+    if(name.startsWith("configureCMake") || name.startsWith("buildCMake")) dependsOn(prepareNativeDependencies)
 }
 
 kotlin { jvmToolchain(17) }

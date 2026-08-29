@@ -7,6 +7,14 @@ on:
     branches: [master]
     paths: ["android/**", "mobile/**", "src/**", "CMakeLists.txt", "cmake/**", ".github/workflows/android-ci.yml"]
   workflow_dispatch:
+env:
+  ANDROID_ABI: arm64-v8a
+  ANDROID_PLATFORM: android-26
+  CMAKE_ANDROID_ARCH_ABI: arm64-v8a
+  CMAKE_ANDROID_ARCH: aarch64
+  VCPKG_ROOT: ${{ github.workspace }}/.vcpkg/2025.06.13
+  VCPKG_DEFAULT_TRIPLET: arm64-android
+  VCPKG_TARGET_TRIPLET: arm64-android
 permissions:
   contents: read
 concurrency:
@@ -25,6 +33,24 @@ jobs:
         run: |
           sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
           echo "$ANDROID_SDK_ROOT/build-tools/35.0.0" >> "$GITHUB_PATH"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - name: Debug Android native target environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in ANDROID_NDK_HOME ANDROID_NDK_ROOT VCPKG_ROOT VCPKG_DEFAULT_TRIPLET VCPKG_TARGET_TRIPLET; do
+            printf '%s=%s\n' "$name" "${!name-<unset>}"
+          done
+          printf 'CMAKE_TOOLCHAIN_FILE=%s\n' "$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+          env | LC_ALL=C sort | grep -E '^(ANDROID_(ABI|PLATFORM)|CMAKE_ANDROID_)' || true
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .vcpkg/installed
+            ~/.cache/vcpkg/archives
+            ~/.cache/vcpkg/downloads
+          key: android-native-${{ runner.os }}-arm64-api26-ndk27.2.12479018-vcpkg2025.06.13-${{ hashFiles('mobile/dependencies/**', '.gitmodules') }}
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.14.4"
@@ -49,6 +75,12 @@ jobs:
           test -n "$APK"
           aapt2 dump badging "$APK" | tee android/app/build/outputs/apk/dev/release/manifest.txt
           aapt2 dump badging "$APK" | grep "package: name='org.example.darktableandroid.dev'"
+          unzip -l "$APK" | grep 'lib/arm64-v8a/libdt_mobile.so'
+          unzip -l "$APK" | grep 'lib/arm64-v8a/libc++_shared.so'
+          for asset in cameras.xml noiseprofiles.json wb_presets.json; do unzip -l "$APK" | grep "assets/$asset"; done
+          unzip -p "$APK" lib/arm64-v8a/libdt_mobile.so > /tmp/libdt_mobile.so
+          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -d /tmp/libdt_mobile.so | tee /tmp/dt-mobile-elf.txt
+          grep 'libc++_shared.so' /tmp/dt-mobile-elf.txt
           sha256sum "$APK" > "$APK.sha256"
       - uses: actions/upload-artifact@v4
         with:
