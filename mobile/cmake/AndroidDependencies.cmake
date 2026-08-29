@@ -102,4 +102,9 @@ target_link_libraries(dt_mobile_android_dependencies INTERFACE
   # The decoder adapter does not reference RawSpeed yet. Keep its complete
   # archive in libdt_mobile.so so this dependency probe actually validates and
   # ships the decoder rather than letting the linker discard every object.
-  "-Wl,--whole-archive" rawspeed "-Wl,--no-whole-archive")
+  # Keep both linker state changes and the concrete archive in one argument so
+  # RawSpeed's transitive dependencies cannot be expanded inside the
+  # whole-archive region. Link the target normally as well so all of its usage
+  # requirements continue to propagate.
+  "-Wl,--whole-archive,$<TARGET_FILE:rawspeed>,--no-whole-archive"
+  rawspeed)
