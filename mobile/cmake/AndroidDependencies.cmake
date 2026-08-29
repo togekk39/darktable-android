@@ -63,6 +63,16 @@ if(NOT EXISTS "${RAWSPEED_PATH}/CMakeLists.txt")
   message(FATAL_ERROR "RawSpeed submodule is missing; run git submodule update --init --recursive")
 endif()
 
+# RawSpeed publishes generator expressions that reference CMake's imported
+# OpenMP target. Imported targets are directory-scoped unless promoted to
+# GLOBAL, so discover OpenMP in this parent directory before adding RawSpeed.
+# This keeps the target visible when RawSpeed's public link interface is later
+# evaluated by the mobile targets in this directory.
+find_package(OpenMP REQUIRED COMPONENTS CXX)
+if(NOT TARGET OpenMP::OpenMP_CXX)
+  message(FATAL_ERROR "Android RawSpeed build requires the OpenMP::OpenMP_CXX target")
+endif()
+
 # AGP uses RelWithDebInfo for this single-config Ninja build, whereas the
 # pinned RawSpeed revision rejects that name and calls its equivalent
 # configuration ReleaseWithAsserts. A function scope lets the RawSpeed child
