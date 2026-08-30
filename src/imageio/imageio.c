@@ -1844,9 +1844,10 @@ gboolean dt_imageio_preview_to_memory(const dt_imgid_t imgid,
     dt_free_align(dat.buf);
     return TRUE;
   }
-  /* display_byteorder makes export produce BGRA bytes, matching Android's
-   * little-endian ARGB_8888 integer layout.  Alpha from the pipe is opaque. */
+  /* display_byteorder makes export produce BGRx bytes, matching Android's
+   * little-endian ARGB_8888 integer layout after alpha is made opaque. */
   memcpy(result, dat.buf, bytes);
+  for(size_t k = 3; k < bytes; k += 4) result[k] = 0xff;
   dt_free_align(dat.buf);
   *rgba = result;
   *width = dat.width;

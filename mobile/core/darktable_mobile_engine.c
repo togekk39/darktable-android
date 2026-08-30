@@ -9,6 +9,7 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 
 struct dt_mobile_engine { dt_imgid_t image_id; atomic_bool cancelled; pthread_mutex_t operation_lock; };
 static pthread_mutex_t runtime_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -18,6 +19,12 @@ static unsigned runtime_users;
 static dt_mobile_status engine_fail(char *error, size_t size, dt_mobile_status status, const char *text)
 { if(error && size) snprintf(error, size, "%s", text); return status; }
 
+static gboolean is_directory(const char *path)
+{
+  struct stat info;
+  return path && path[0] && !stat(path, &info) && S_ISDIR(info.st_mode);
+}
+
 dt_mobile_status dt_mobile_engine_open(const char *path, dt_mobile_engine **out,
                                         char *error, size_t error_size)
 {
@@ -25,8 +32,18 @@ dt_mobile_status dt_mobile_engine_open(const char *path, dt_mobile_engine **out,
   pthread_mutex_lock(&runtime_lock);
   if(!runtime_users)
   {
-    char *argv[] = { (char *)"darktable-mobile", (char *)"--library", (char *)":memory:", NULL };
-    if(dt_init(3, argv, FALSE, TRUE, NULL))
+    const char *datadir = g_getenv("DT_MOBILE_DATADIR");
+    const char *moduledir = g_getenv("DT_MOBILE_MODULEDIR");
+    if(!is_directory(datadir) || !is_directory(moduledir))
+    {
+      pthread_mutex_unlock(&runtime_lock);
+      return engine_fail(error, error_size, DT_MOBILE_ERROR_ENGINE,
+                         "DT_MOBILE_DATADIR and DT_MOBILE_MODULEDIR must name extracted runtime directories");
+    }
+    char *argv[] = { (char *)"darktable-mobile", (char *)"--library", (char *)":memory:",
+                     (char *)"--datadir", (char *)datadir,
+                     (char *)"--moduledir", (char *)moduledir, NULL };
+    if(dt_init(7, argv, FALSE, TRUE, NULL))
     { pthread_mutex_unlock(&runtime_lock); return engine_fail(error, error_size, DT_MOBILE_ERROR_ENGINE, "darktable headless initialization failed"); }
   }
   runtime_users++;
