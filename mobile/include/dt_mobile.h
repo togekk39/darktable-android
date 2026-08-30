@@ -13,7 +13,10 @@ typedef enum dt_mobile_status {
   DT_MOBILE_ERROR_IO = 2,
   DT_MOBILE_ERROR_UNSUPPORTED = 3,
   DT_MOBILE_ERROR_CANCELLED = 4,
-  DT_MOBILE_ERROR_OUT_OF_MEMORY = 5
+  DT_MOBILE_ERROR_OUT_OF_MEMORY = 5,
+  DT_MOBILE_ERROR_ENGINE = 6,
+  DT_MOBILE_ERROR_DECODE = 7,
+  DT_MOBILE_ERROR_PROCESSING = 8
 } dt_mobile_status;
 dt_mobile_status dt_mobile_open(const char *path, dt_mobile_session **out_session);
 const char *dt_mobile_open_error(void);

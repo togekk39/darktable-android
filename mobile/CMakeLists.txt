@@ -1,13 +1,26 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 cmake_minimum_required(VERSION 3.22.1)
-project(dt_mobile LANGUAGES C CXX)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  project(dt_mobile LANGUAGES C CXX)
+endif()
 
 option(DT_MOBILE_BUILD_TESTS "Build host mobile API tests" OFF)
 option(DT_MOBILE_ANDROID_DEPENDENCIES "Link the pinned Android native dependency bundle" ${ANDROID})
+option(DT_MOBILE_WITH_DARKTABLE_ENGINE "Enable the upstream darktable processing engine" ${ANDROID})
 
 add_library(dt_mobile_core STATIC core/dt_mobile.c)
 target_include_directories(dt_mobile_core PUBLIC include)
 target_compile_features(dt_mobile_core PRIVATE c_std_11)
+
+if(DT_MOBILE_WITH_DARKTABLE_ENGINE)
+  if(NOT TARGET lib_darktable)
+    message(FATAL_ERROR "DT_MOBILE_WITH_DARKTABLE_ENGINE requires the upstream lib_darktable target; include mobile/ from the darktable build")
+  endif()
+  target_sources(dt_mobile_core PRIVATE core/darktable_mobile_engine.c)
+  target_include_directories(dt_mobile_core PRIVATE core ${CMAKE_CURRENT_SOURCE_DIR}/../src ${CMAKE_BINARY_DIR}/src)
+  target_compile_definitions(dt_mobile_core PRIVATE DT_MOBILE_HAS_DARKTABLE_ENGINE=1)
+  target_link_libraries(dt_mobile_core PUBLIC lib_darktable)
+endif()
 
 if(DT_MOBILE_ANDROID_DEPENDENCIES)
   if(NOT ANDROID)

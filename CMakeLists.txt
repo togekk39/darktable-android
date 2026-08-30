@@ -451,6 +451,11 @@ set(CMAKE_INSTALL_DEFAULT_COMPONENT_NAME DTApplication)
 # lets continue into build directories
 include(data/supported_extensions.cmake) # this file needs to be included first as it gets amended in bin/
 add_subdirectory(src "${DARKTABLE_BINDIR}") # directory needs to be there before data directory so that the correct CSS file gets installed
+option(BUILD_MOBILE_ENGINE "Build the JNI/mobile adapter against libdarktable" OFF)
+if(BUILD_MOBILE_ENGINE)
+  set(DT_MOBILE_WITH_DARKTABLE_ENGINE ON CACHE BOOL "" FORCE)
+  add_subdirectory(mobile)
+endif()
 add_subdirectory(data "${DARKTABLE_DATADIR}")
 add_subdirectory(doc)
 add_subdirectory(tools "${DARKTABLE_DATADIR}/tools")
