@@ -33,8 +33,9 @@ target_include_directories(darktable_headless PUBLIC
 target_link_libraries(darktable_headless PUBLIC dt_mobile_android_dependencies android log dl m)
 set_target_properties(darktable_headless PROPERTIES OUTPUT_NAME darktable_headless)
 
-# Keep processing modules as ordinary Android shared libraries.  darktable's
-# existing GModule loader can discover them in ApplicationInfo.nativeLibraryDir.
+# Keep processing modules as ordinary Android shared libraries beneath the
+# plugins directory expected by dt_iop_load_modules_so().  moduledir itself is
+# ApplicationInfo.nativeLibraryDir at runtime.
 find_package(Perl REQUIRED)
 set(_required_iops rawprepare demosaic temperature colorin exposure colorbalancergb
   filmicrgb sigmoid colorout gamma finalscale flip highlights hotpixels
@@ -56,5 +57,6 @@ foreach(_iop IN LISTS _required_iops)
   target_include_directories(dt_iop_${_iop} PRIVATE "${DT_SRC}" "${DT_SRC}/external" "${CMAKE_CURRENT_LIST_DIR}/include")
   target_link_libraries(dt_iop_${_iop} PRIVATE darktable_headless)
   set_target_properties(dt_iop_${_iop} PROPERTIES
-    PREFIX "lib" OUTPUT_NAME "${_iop}" LIBRARY_OUTPUT_DIRECTORY "${DT_HEADLESS_MODULE_OUTPUT_DIRECTORY}")
+    PREFIX "lib" OUTPUT_NAME "${_iop}"
+    LIBRARY_OUTPUT_DIRECTORY "${DT_HEADLESS_MODULE_OUTPUT_DIRECTORY}/plugins")
 endforeach()

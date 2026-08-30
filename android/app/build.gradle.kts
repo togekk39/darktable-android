@@ -27,10 +27,13 @@ abstract class PrepareMobileAssetsTask @Inject constructor(
     @TaskAction
     fun generate() {
         fileSystemOperations.sync {
-            from(camerasXml)
-            from(noiseProfilesJson)
-            from(whiteBalancePresetsJson)
-            into(outputDirectory.dir("darktable"))
+            into(outputDirectory.dir("darktable")) {
+                from(noiseProfilesJson)
+                from(whiteBalancePresetsJson)
+                into("rawspeed") {
+                    from(camerasXml)
+                }
+            }
         }
     }
 }

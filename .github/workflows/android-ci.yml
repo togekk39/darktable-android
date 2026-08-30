@@ -77,7 +77,8 @@ jobs:
           aapt2 dump badging "$APK" | grep "package: name='org.example.darktableandroid.dev'"
           unzip -l "$APK" | grep 'lib/arm64-v8a/libdt_mobile.so'
           unzip -l "$APK" | grep 'lib/arm64-v8a/libc++_shared.so'
-          for asset in cameras.xml noiseprofiles.json wb_presets.json; do unzip -l "$APK" | grep "assets/darktable/$asset"; done
+          for asset in noiseprofiles.json wb_presets.json; do unzip -l "$APK" | grep "assets/darktable/$asset"; done
+          unzip -l "$APK" | grep "assets/darktable/rawspeed/cameras.xml"
           for module in rawprepare demosaic temperature colorin colorout; do
             unzip -l "$APK" | grep "lib/arm64-v8a/lib${module}.so"
           done
