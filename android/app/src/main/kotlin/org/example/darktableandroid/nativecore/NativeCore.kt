@@ -5,17 +5,32 @@ import android.content.Context
 import java.io.File
 
 object NativeCore {
+    private data class RuntimePaths(val datadir: String, val moduledir: String)
+
+    private val initializationLock = Any()
+    @Volatile private var initializedPaths: RuntimePaths? = null
+
     init { System.loadLibrary("dt_mobile") }
     external fun initialize(datadir: String, moduledir: String)
     fun initialize(context: Context) {
         val data = File(context.noBackupFilesDir, "darktable-runtime-v1")
-        if(!data.isDirectory) {
-            val staging = File(context.noBackupFilesDir, "darktable-runtime-v1.tmp")
-            staging.deleteRecursively(); staging.mkdirs()
-            copyAssets(context, "darktable", staging)
-            check(staging.renameTo(data)) { "Unable to install darktable runtime data" }
+        val paths = RuntimePaths(data.absolutePath, context.applicationInfo.nativeLibraryDir)
+        if(initializedPaths == paths) return
+
+        synchronized(initializationLock) {
+            if(initializedPaths == paths) return
+            check(initializedPaths == null) {
+                "Native runtime is already initialized with different paths"
+            }
+            if(!data.isDirectory) {
+                val staging = File(context.noBackupFilesDir, "darktable-runtime-v1.tmp")
+                staging.deleteRecursively(); staging.mkdirs()
+                copyAssets(context, "darktable", staging)
+                check(staging.renameTo(data)) { "Unable to install darktable runtime data" }
+            }
+            initialize(paths.datadir, paths.moduledir)
+            initializedPaths = paths
         }
-        initialize(data.absolutePath, context.applicationInfo.nativeLibraryDir)
     }
 
     private fun copyAssets(context: Context, path: String, destination: File) {
