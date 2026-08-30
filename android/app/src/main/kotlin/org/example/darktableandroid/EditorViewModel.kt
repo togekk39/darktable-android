@@ -10,8 +10,10 @@ import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -25,16 +27,38 @@ sealed interface EditorState {
     data class Working(val stage: Stage) : EditorState
     data class Ready(val source: Uri, val preview: Bitmap) : EditorState
     data class Failed(val source: Uri?, val message: String) : EditorState
-    enum class Stage { COPYING, DECODING, RENDERING, CANCELLING }
+    enum class Stage { INITIALIZING, COPYING, DECODING, RENDERING, CANCELLING }
 }
 
 class EditorViewModel(application: Application) : AndroidViewModel(application) {
-    init { NativeCore.initialize(application) }
-    private val mutableState = MutableStateFlow<EditorState>(EditorState.Empty)
+    private val mutableState = MutableStateFlow<EditorState>(
+        EditorState.Working(EditorState.Stage.INITIALIZING),
+    )
     val state: StateFlow<EditorState> = mutableState.asStateFlow()
+    private val initialization: Deferred<Unit> = viewModelScope.async {
+        NativeCore.initialize(application)
+    }
     private var work: Job? = null
     private var handle = 0L
     private val generation = AtomicLong()
+
+    init {
+        viewModelScope.launch {
+            try {
+                initialization.await()
+                if(mutableState.value == EditorState.Working(EditorState.Stage.INITIALIZING)) {
+                    mutableState.value = EditorState.Empty
+                }
+            } catch(cancellation: CancellationException) {
+                throw cancellation
+            } catch(failure: Throwable) {
+                mutableState.value = EditorState.Failed(
+                    null,
+                    failure.message ?: "Unable to initialize the editor",
+                )
+            }
+        }
+    }
 
     fun open(uri: Uri) {
         cancel(false)
@@ -42,6 +66,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         work = viewModelScope.launch {
             var opened = 0L
             try {
+                initialization.await()
+                if(request != generation.get()) return@launch
                 mutableState.value = EditorState.Working(EditorState.Stage.COPYING)
                 val cached = withContext(Dispatchers.IO) {
                     UriCache(getApplication()).copyForNative(uri) { request != generation.get() }

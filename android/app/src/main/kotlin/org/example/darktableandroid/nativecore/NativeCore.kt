@@ -3,6 +3,8 @@ package org.example.darktableandroid.nativecore
 
 import android.content.Context
 import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 object NativeCore {
     private data class RuntimePaths(val datadir: String, val moduledir: String)
@@ -12,13 +14,13 @@ object NativeCore {
 
     init { System.loadLibrary("dt_mobile") }
     external fun initialize(datadir: String, moduledir: String)
-    fun initialize(context: Context) {
+    suspend fun initialize(context: Context) = withContext(Dispatchers.IO) {
         val data = File(context.noBackupFilesDir, "darktable-runtime-v1")
         val paths = RuntimePaths(data.absolutePath, context.applicationInfo.nativeLibraryDir)
-        if(initializedPaths == paths) return
+        if(initializedPaths == paths) return@withContext
 
         synchronized(initializationLock) {
-            if(initializedPaths == paths) return
+            if(initializedPaths == paths) return@synchronized
             check(initializedPaths == null) {
                 "Native runtime is already initialized with different paths"
             }
