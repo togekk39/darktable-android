@@ -30,7 +30,7 @@ abstract class PrepareMobileAssetsTask @Inject constructor(
             from(camerasXml)
             from(noiseProfilesJson)
             from(whiteBalancePresetsJson)
-            into(outputDirectory)
+            into(outputDirectory.dir("darktable"))
         }
     }
 }
@@ -87,9 +87,7 @@ android {
                 "-DVCPKG_TARGET_TRIPLET=arm64-android",
                 "-DVCPKG_INSTALLED_DIR=$vcpkgInstalled",
                 "-DVCPKG_MANIFEST_MODE=OFF",
-                // The full upstream graph currently requires desktop GTK and
-                // plugin dependencies which are not part of the Android bundle.
-                "-DDT_MOBILE_WITH_DARKTABLE_ENGINE=OFF",
+                "-DDT_MOBILE_WITH_DARKTABLE_ENGINE=ON",
             )
             abiFilters += "arm64-v8a"
         } }

@@ -77,10 +77,22 @@ jobs:
           aapt2 dump badging "$APK" | grep "package: name='org.example.darktableandroid.dev'"
           unzip -l "$APK" | grep 'lib/arm64-v8a/libdt_mobile.so'
           unzip -l "$APK" | grep 'lib/arm64-v8a/libc++_shared.so'
-          for asset in cameras.xml noiseprofiles.json wb_presets.json; do unzip -l "$APK" | grep "assets/$asset"; done
+          for asset in cameras.xml noiseprofiles.json wb_presets.json; do unzip -l "$APK" | grep "assets/darktable/$asset"; done
+          for module in rawprepare demosaic temperature colorin colorout; do
+            unzip -l "$APK" | grep "lib/arm64-v8a/lib${module}.so"
+          done
           unzip -p "$APK" lib/arm64-v8a/libdt_mobile.so > /tmp/libdt_mobile.so
           "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -d /tmp/libdt_mobile.so | tee /tmp/dt-mobile-elf.txt
           grep 'libc++_shared.so' /tmp/dt-mobile-elf.txt
+          NM="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
+          "$NM" /tmp/libdt_mobile.so | tee /tmp/dt-mobile-symbols.txt
+          for symbol in dt_mobile_engine_open dt_mobile_engine_render dt_imageio_preview_to_memory; do
+            grep -w "$symbol" /tmp/dt-mobile-symbols.txt
+          done
+          if strings /tmp/libdt_mobile.so | grep -Fq 'this build does not contain the darktable engine'; then
+            echo 'engine-disabled fallback leaked into Android libdt_mobile.so' >&2
+            exit 1
+          fi
           sha256sum "$APK" > "$APK.sha256"
       - uses: actions/upload-artifact@v4
         with:

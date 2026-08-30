@@ -2,6 +2,7 @@
 #pragma once
 #include "dt_mobile.h"
 typedef struct dt_mobile_engine dt_mobile_engine;
+dt_mobile_status dt_mobile_engine_initialize(const char *datadir, const char *moduledir);
 dt_mobile_status dt_mobile_engine_open(const char *path, dt_mobile_engine **engine,
                                         char *error, size_t error_size);
 dt_mobile_status dt_mobile_engine_render(dt_mobile_engine *engine, int max_width, int max_height,

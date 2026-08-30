@@ -29,6 +29,7 @@ sealed interface EditorState {
 }
 
 class EditorViewModel(application: Application) : AndroidViewModel(application) {
+    init { NativeCore.initialize(application) }
     private val mutableState = MutableStateFlow<EditorState>(EditorState.Empty)
     val state: StateFlow<EditorState> = mutableState.asStateFlow()
     private var work: Job? = null
