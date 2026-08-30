@@ -11,7 +11,8 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 
-struct dt_mobile_engine { dt_imgid_t image_id; atomic_bool cancelled; pthread_mutex_t operation_lock; };
+struct dt_mobile_engine { dt_imgid_t image_id; atomic_bool cancelled; pthread_mutex_t operation_lock;
+  dt_imageio_preview_cancel_t *preview_cancel; };
 static pthread_mutex_t runtime_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t engine_work_lock = PTHREAD_MUTEX_INITIALIZER;
 static unsigned runtime_users;
@@ -69,6 +70,7 @@ dt_mobile_status dt_mobile_engine_open(const char *path, dt_mobile_engine **out,
   engine->image_id = image_id;
   atomic_init(&engine->cancelled, false);
   pthread_mutex_init(&engine->operation_lock, NULL);
+  engine->preview_cancel = dt_imageio_preview_cancel_new();
   *out = engine;
   return DT_MOBILE_OK;
 }
@@ -85,10 +87,13 @@ dt_mobile_status dt_mobile_engine_render(dt_mobile_engine *engine, int mw, int m
   }
   uint32_t w = 0, h = 0;
   pthread_mutex_lock(&engine_work_lock);
-  if(dt_imageio_preview_to_memory(engine->image_id, (size_t)mw, (size_t)mh, pixels, &w, &h))
+  if(dt_imageio_preview_to_memory(engine->image_id, (size_t)mw, (size_t)mh, pixels, &w, &h,
+                                  engine->preview_cancel))
   {
     pthread_mutex_unlock(&engine_work_lock);
     pthread_mutex_unlock(&engine->operation_lock);
+    if(atomic_load(&engine->cancelled))
+      return engine_fail(error, error_size, DT_MOBILE_ERROR_CANCELLED, "operation cancelled");
     return engine_fail(error, error_size, DT_MOBILE_ERROR_PROCESSING, "darktable preview pixelpipe failed");
   }
   pthread_mutex_unlock(&engine_work_lock);
@@ -97,13 +102,15 @@ dt_mobile_status dt_mobile_engine_render(dt_mobile_engine *engine, int mw, int m
   pthread_mutex_unlock(&engine->operation_lock);
   return DT_MOBILE_OK;
 }
-void dt_mobile_engine_cancel(dt_mobile_engine *engine) { if(engine) atomic_store(&engine->cancelled, true); }
+void dt_mobile_engine_cancel(dt_mobile_engine *engine) { if(engine) { atomic_store(&engine->cancelled, true);
+  dt_imageio_preview_cancel(engine->preview_cancel); } }
 void dt_mobile_engine_close(dt_mobile_engine *engine)
 {
   if(!engine) return;
   pthread_mutex_lock(&engine->operation_lock);
   pthread_mutex_unlock(&engine->operation_lock);
   pthread_mutex_destroy(&engine->operation_lock);
+  dt_imageio_preview_cancel_free(engine->preview_cancel);
   free(engine);
   pthread_mutex_lock(&runtime_lock);
   if(runtime_users && !--runtime_users) dt_cleanup();

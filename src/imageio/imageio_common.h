@@ -129,12 +129,19 @@ gboolean dt_imageio_export_with_flags(const dt_imgid_t imgid, const char *filena
 
 /* Render the normal export pixelpipe into an owned, display-referred RGBA8
  * buffer.  This is the non-GUI counterpart of dt_imageio_preview(). */
+typedef struct dt_imageio_preview_cancel_t dt_imageio_preview_cancel_t;
+
+dt_imageio_preview_cancel_t *dt_imageio_preview_cancel_new(void);
+void dt_imageio_preview_cancel(dt_imageio_preview_cancel_t *cancel);
+void dt_imageio_preview_cancel_free(dt_imageio_preview_cancel_t *cancel);
+
 gboolean dt_imageio_preview_to_memory(const dt_imgid_t imgid,
                                       const size_t max_width,
                                       const size_t max_height,
                                       uint8_t **rgba,
                                       uint32_t *width,
-                                      uint32_t *height);
+                                      uint32_t *height,
+                                      dt_imageio_preview_cancel_t *cancel);
 
 // general, efficient buffer flipping function using memcopies
 void dt_imageio_flip_buffers(char *out,
