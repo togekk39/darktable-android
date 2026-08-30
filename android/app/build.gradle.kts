@@ -87,6 +87,7 @@ android {
                 "-DVCPKG_TARGET_TRIPLET=arm64-android",
                 "-DVCPKG_INSTALLED_DIR=$vcpkgInstalled",
                 "-DVCPKG_MANIFEST_MODE=OFF",
+                "-DBUILD_MOBILE_ENGINE=ON",
             )
             abiFilters += "arm64-v8a"
         } }
@@ -133,7 +134,9 @@ android {
     } else {
         signingConfigs.getByName("debug")
     }
-    externalNativeBuild { cmake { path = file("../../mobile/CMakeLists.txt"); version = "3.22.1" } }
+    // Configure the upstream tree so the mobile adapter links the real
+    // libdarktable target and its image-operation modules.
+    externalNativeBuild { cmake { path = file("../../CMakeLists.txt"); version = "3.22.1" } }
     buildFeatures { compose = true; buildConfig = true }
     packaging { jniLibs.keepDebugSymbols += "**/libdt_mobile.so" }
 }
