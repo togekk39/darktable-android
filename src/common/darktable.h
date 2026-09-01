@@ -54,8 +54,13 @@
 #include <glib/gstdio.h>
 #include <glib/gi18n.h>
 #include <inttypes.h>
+#ifndef DT_HEADLESS
 #include <json-glib/json-glib.h>
 #include <lua/lua.h>
+#else
+typedef void lua_State;
+typedef struct { int unused; } dt_lua_state_t;
+#endif
 #include <math.h>
 #include <sqlite3.h>
 #include <stdio.h>
@@ -426,6 +431,7 @@ typedef struct dt_gimp_t
   gboolean error;
 } dt_gimp_t;
 
+#ifndef DT_HEADLESS
 typedef struct dt_splash_t
 {
   GtkWidget *start_screen;
@@ -434,6 +440,7 @@ typedef struct dt_splash_t
   GtkWidget *remaining_box;
   gboolean create_if_needed;
 } dt_splash_t;
+#endif
 
 typedef struct darktable_t
 {
@@ -445,7 +452,11 @@ typedef struct darktable_t
   GList *iop_order_list;
   GList *iop_order_rules;
   GList *capabilities;
+#ifndef DT_HEADLESS
   JsonParser *noiseprofile_parser;
+#else
+  gpointer noiseprofile_parser;
+#endif
   struct dt_conf_t *conf;
   struct dt_develop_t *develop;
   struct dt_lib_t *lib;
@@ -504,7 +515,9 @@ typedef struct darktable_t
   struct dt_sys_resources_t dtresources;
   struct dt_backthumb_t backthumbs;
   struct dt_gimp_t gimp;
+#ifndef DT_HEADLESS
   struct dt_splash_t splash;
+#endif
   int darkroom_active_imgid_rowid;
 #ifdef HAVE_AI
   struct dt_ai_registry_t *ai_registry;

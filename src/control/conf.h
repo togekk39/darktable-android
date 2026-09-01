@@ -21,7 +21,6 @@
 #include "common/dtpthread.h"
 
 #include <glib.h>
-#include <gtk/gtk.h>
 #include <inttypes.h>
 
 G_BEGIN_DECLS
