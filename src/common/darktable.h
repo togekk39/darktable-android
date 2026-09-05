@@ -706,6 +706,7 @@ static inline void dt_unlock_image_pair(const dt_imgid_t imgid1,
   dt_pthread_mutex_unlock(&(darktable.db_image[imgid2 & (DT_IMAGE_DBLOCKS-1)]));
 }
 
+#ifndef DT_HEADLESS
 extern GdkModifierType dt_modifier_shortcuts;
 
 // check whether the specified mask of modifier keys exactly matches,
@@ -732,6 +733,7 @@ static inline gboolean dt_modifiers_include(const GdkModifierType state,
   return ((state | dt_modifier_shortcuts)
           & (modifiers & desired_modifier_mask)) == desired_modifier_mask;
 }
+#endif // DT_HEADLESS
 
 
 static inline gboolean dt_is_aligned(const void *pointer, const size_t byte_count)
