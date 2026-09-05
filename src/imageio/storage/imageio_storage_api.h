@@ -41,12 +41,14 @@ enum dt_iop_color_intent_t;
 
 /* get translated module name */
 REQUIRED(const char *, name, const struct dt_imageio_module_storage_t *self);
+#ifndef DT_HEADLESS
 /* construct widget above */
 REQUIRED(void, gui_init, struct dt_imageio_module_storage_t *self);
 /* destroy resources */
 REQUIRED(void, gui_cleanup, struct dt_imageio_module_storage_t *self);
 /* reset options to defaults */
 REQUIRED(void, gui_reset, struct dt_imageio_module_storage_t *self);
+#endif
 /* allow the module to initialize itself */
 REQUIRED(void, init, struct dt_imageio_module_storage_t *self);
 /* try and see if this format is supported? */

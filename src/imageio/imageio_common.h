@@ -26,7 +26,9 @@
 #include <glib.h>
 #include <stdio.h>
 
+#ifndef DT_HEADLESS
 #include <cairo.h>
+#endif
 #include <inttypes.h>
 
 #define FILTERS_ARE_CYGM(filters)                                                                                 \
@@ -186,11 +188,13 @@ gboolean dt_imageio_lookup_makermodel(const char *maker,
 // get the type of image from its extension
 dt_image_flags_t dt_imageio_get_type_from_extension(const char *extension);
 
+#ifndef DT_HEADLESS
 cairo_surface_t *dt_imageio_preview(const dt_imgid_t imgid,
                                     const size_t width,
                                     const size_t height,
                                     const int history_end,
                                     const char *style_name);
+#endif
 
 G_END_DECLS
 

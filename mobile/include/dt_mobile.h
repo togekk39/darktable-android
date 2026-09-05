@@ -18,6 +18,9 @@ typedef enum dt_mobile_status {
   DT_MOBILE_ERROR_DECODE = 7,
   DT_MOBILE_ERROR_PROCESSING = 8
 } dt_mobile_status;
+/* Must be called before opening the first Android session.  Both paths must
+ * remain valid until the last session is closed. */
+dt_mobile_status dt_mobile_initialize(const char *datadir, const char *moduledir);
 dt_mobile_status dt_mobile_open(const char *path, dt_mobile_session **out_session);
 const char *dt_mobile_open_error(void);
 dt_mobile_status dt_mobile_set_module_params(dt_mobile_session *session, const char *module,

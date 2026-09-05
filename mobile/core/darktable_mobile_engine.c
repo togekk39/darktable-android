@@ -16,6 +16,8 @@ struct dt_mobile_engine { dt_imgid_t image_id; atomic_bool cancelled; pthread_mu
 static pthread_mutex_t runtime_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t engine_work_lock = PTHREAD_MUTEX_INITIALIZER;
 static unsigned runtime_users;
+static char *runtime_datadir;
+static char *runtime_moduledir;
 
 static dt_mobile_status engine_fail(char *error, size_t size, dt_mobile_status status, const char *text)
 { if(error && size) snprintf(error, size, "%s", text); return status; }
@@ -26,6 +28,20 @@ static gboolean is_directory(const char *path)
   return path && path[0] && !stat(path, &info) && S_ISDIR(info.st_mode);
 }
 
+dt_mobile_status dt_mobile_engine_initialize(const char *datadir, const char *moduledir)
+{
+  pthread_mutex_lock(&runtime_lock);
+  if(runtime_users) { pthread_mutex_unlock(&runtime_lock); return DT_MOBILE_ERROR_ENGINE; }
+  if(!is_directory(datadir) || !is_directory(moduledir))
+  { pthread_mutex_unlock(&runtime_lock); return DT_MOBILE_ERROR_INVALID_ARGUMENT; }
+  char *data = g_strdup(datadir), *modules = g_strdup(moduledir);
+  if(!data || !modules) { g_free(data); g_free(modules); pthread_mutex_unlock(&runtime_lock); return DT_MOBILE_ERROR_OUT_OF_MEMORY; }
+  g_free(runtime_datadir); g_free(runtime_moduledir);
+  runtime_datadir = data; runtime_moduledir = modules;
+  pthread_mutex_unlock(&runtime_lock);
+  return DT_MOBILE_OK;
+}
+
 dt_mobile_status dt_mobile_engine_open(const char *path, dt_mobile_engine **out,
                                         char *error, size_t error_size)
 {
@@ -33,13 +49,13 @@ dt_mobile_status dt_mobile_engine_open(const char *path, dt_mobile_engine **out,
   pthread_mutex_lock(&runtime_lock);
   if(!runtime_users)
   {
-    const char *datadir = g_getenv("DT_MOBILE_DATADIR");
-    const char *moduledir = g_getenv("DT_MOBILE_MODULEDIR");
+    const char *datadir = runtime_datadir;
+    const char *moduledir = runtime_moduledir;
     if(!is_directory(datadir) || !is_directory(moduledir))
     {
       pthread_mutex_unlock(&runtime_lock);
       return engine_fail(error, error_size, DT_MOBILE_ERROR_ENGINE,
-                         "DT_MOBILE_DATADIR and DT_MOBILE_MODULEDIR must name extracted runtime directories");
+                         "darktable runtime paths were not initialized by the Android application");
     }
     char *argv[] = { (char *)"darktable-mobile", (char *)"--library", (char *)":memory:",
                      (char *)"--datadir", (char *)datadir,

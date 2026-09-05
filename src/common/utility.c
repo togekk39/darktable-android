@@ -23,7 +23,9 @@
 #include "common/grealpath.h"
 #include "common/utility.h"
 #include "control/conf.h"
+#ifndef DT_HEADLESS
 #include "gui/gtk.h"
+#endif
 
 /* getpwnam_r availability check */
 #if defined __APPLE__ || defined _POSIX_C_SOURCE >= 1 || defined _XOPEN_SOURCE || defined _BSD_SOURCE        \
@@ -46,10 +48,12 @@
 #include <sys/stat.h>
 #include <ctype.h>
 
+#ifndef DT_HEADLESS
 #include <librsvg/rsvg.h>
 // ugh, ugly hack. why do people break stuff all the time?
 #ifndef RSVG_CAIRO_H
 #include <librsvg/rsvg-cairo.h>
+#endif
 #endif
 
 const char *dt_util_localize_string(const char *s)
@@ -452,6 +456,7 @@ gchar *dt_util_foo_to_utf8(const char *string)
   return tag;
 }
 
+#ifndef DT_HEADLESS
 // get easter sunday (in the western world)
 static void easter(const int Y, int* month, int *day)
 {
@@ -594,6 +599,7 @@ cairo_surface_t *dt_util_get_logo_text(const float size)
 {
   return _util_get_svg_img(g_strdup("dt_text.svg"), size);
 }
+#endif
 
 // the following two functions (dt_util_latitude_str and
 // dt_util_longitude_str) were taken from libosmgpsmap
@@ -1044,6 +1050,7 @@ void dt_copy_resource_file(const char *src,
   g_free(sourcefile);
 }
 
+#ifndef DT_HEADLESS
 RsvgDimensionData dt_get_svg_dimension(RsvgHandle *svg)
 {
   RsvgDimensionData dimension;
@@ -1097,6 +1104,7 @@ void dt_render_svg(RsvgHandle *svg,
     rsvg_handle_render_cairo(svg, cr);
   #endif
 }
+#endif
 
 // check if the path + basenames are the same (<=> only differ by the
 // extension)

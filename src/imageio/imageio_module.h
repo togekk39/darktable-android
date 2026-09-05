@@ -23,7 +23,9 @@
 #include "common/metadata_export.h"
 #include "common/action.h"
 #include <gmodule.h>
+#ifndef DT_HEADLESS
 #include <gtk/gtk.h>
+#endif
 #include <inttypes.h>
 #ifdef USE_LUA
 #include "lua/call.h"
@@ -80,13 +82,13 @@ typedef struct dt_imageio_module_format_t
   char plugin_name[128];
   GModule *module;
 
-  // gui stuff:
+#ifndef DT_HEADLESS
+  // Desktop configuration state; encoding does not depend on it.
   GtkWidget *widget;
-
-  // data for you to initialize
   void *gui_data;
 
   luaA_Type parameter_lua_type;
+#endif
 
   gboolean ready;
 } dt_imageio_module_format_t;
@@ -104,13 +106,13 @@ typedef struct dt_imageio_module_storage_t
   char plugin_name[128];
   GModule *module;
 
-  // gui stuff:
+#ifndef DT_HEADLESS
+  // Desktop configuration state; storage processing does not depend on it.
   GtkWidget *widget;
-
-  // data for you to initialize
   void *gui_data;
 
   luaA_Type parameter_lua_type;
+#endif
 } dt_imageio_module_storage_t;
 
 

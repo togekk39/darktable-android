@@ -13,6 +13,7 @@ find_package(lcms2 CONFIG REQUIRED)
 find_package(unofficial-sqlite3 CONFIG REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GLIB2 REQUIRED IMPORTED_TARGET glib-2.0)
+pkg_check_modules(JSON_GLIB REQUIRED IMPORTED_TARGET json-glib-1.0)
 find_package(pugixml CONFIG REQUIRED)
 find_package(exiv2 CONFIG REQUIRED)
 find_package(libraw CONFIG REQUIRED)
@@ -97,7 +98,7 @@ _dt_mobile_add_rawspeed()
 add_library(dt_mobile_android_dependencies INTERFACE)
 target_link_libraries(dt_mobile_android_dependencies INTERFACE
   ZLIB::ZLIB JPEG::JPEG PNG::PNG TIFF::TIFF
-  lcms2::lcms2 unofficial::sqlite3::sqlite3 PkgConfig::GLIB2
+  lcms2::lcms2 unofficial::sqlite3::sqlite3 PkgConfig::GLIB2 PkgConfig::JSON_GLIB
   pugixml::pugixml Exiv2::exiv2lib libraw::raw_r
   # The decoder adapter does not reference RawSpeed yet. Keep its complete
   # archive in libdt_mobile.so so this dependency probe actually validates and

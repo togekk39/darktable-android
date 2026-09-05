@@ -16,11 +16,30 @@ struct dt_mobile_session {
   char error[256];
 };
 static _Thread_local char open_error[256];
+#ifdef DT_MOBILE_HAS_DARKTABLE_ENGINE
+static char *runtime_datadir;
+static char *runtime_moduledir;
+#endif
 #ifdef DT_MOBILE_HAS_ANDROID_DEPENDENCIES
 extern unsigned long dt_mobile_dependency_probe(void);
 #endif
 static dt_mobile_status fail(dt_mobile_session *s, dt_mobile_status status, const char *message)
 { if(s) snprintf(s->error, sizeof(s->error), "%s", message); return status; }
+dt_mobile_status dt_mobile_initialize(const char *datadir, const char *moduledir)
+{
+#ifdef DT_MOBILE_HAS_DARKTABLE_ENGINE
+  if(!datadir || !datadir[0] || !moduledir || !moduledir[0]) return DT_MOBILE_ERROR_INVALID_ARGUMENT;
+  char *new_datadir = malloc(strlen(datadir) + 1), *new_moduledir = malloc(strlen(moduledir) + 1);
+  if(!new_datadir || !new_moduledir) { free(new_datadir); free(new_moduledir); return DT_MOBILE_ERROR_OUT_OF_MEMORY; }
+  strcpy(new_datadir, datadir); strcpy(new_moduledir, moduledir);
+  free(runtime_datadir); free(runtime_moduledir);
+  runtime_datadir = new_datadir; runtime_moduledir = new_moduledir;
+  return dt_mobile_engine_initialize(runtime_datadir, runtime_moduledir);
+#else
+  (void)datadir; (void)moduledir;
+  return DT_MOBILE_ERROR_UNSUPPORTED;
+#endif
+}
 dt_mobile_status dt_mobile_open(const char *path, dt_mobile_session **out)
 {
 #ifdef DT_MOBILE_HAS_ANDROID_DEPENDENCIES

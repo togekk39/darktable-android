@@ -7,6 +7,18 @@ static void throw_io(JNIEnv *env, const char *message)
   jclass type = (*env)->FindClass(env, "java/io/IOException");
   if(type) (*env)->ThrowNew(env, type, message);
 }
+JNIEXPORT void JNICALL Java_org_example_darktableandroid_nativecore_NativeCore_initialize(JNIEnv *env, jobject self, jstring datadir, jstring moduledir)
+{
+  (void)self;
+  if(!datadir || !moduledir) { throw_io(env, "invalid darktable runtime paths"); return; }
+  const char *data = (*env)->GetStringUTFChars(env, datadir, NULL);
+  const char *modules = (*env)->GetStringUTFChars(env, moduledir, NULL);
+  if(!data || !modules) return;
+  const dt_mobile_status status = dt_mobile_initialize(data, modules);
+  (*env)->ReleaseStringUTFChars(env, datadir, data);
+  (*env)->ReleaseStringUTFChars(env, moduledir, modules);
+  if(status != DT_MOBILE_OK) throw_io(env, "unable to initialize darktable runtime directories");
+}
 JNIEXPORT jlong JNICALL Java_org_example_darktableandroid_nativecore_NativeCore_open(JNIEnv *env, jobject self, jstring path)
 {
   (void)self; if(!path) return 0;

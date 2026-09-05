@@ -1806,6 +1806,7 @@ static const char *_preview_mime(dt_imageio_module_data_t *data)
   return "memory";
 }
 
+#ifndef DT_HEADLESS
 cairo_surface_t *dt_imageio_preview(const dt_imgid_t imgid,
                                     const size_t width,
                                     const size_t height,
@@ -1849,6 +1850,7 @@ cairo_surface_t *dt_imageio_preview(const dt_imgid_t imgid,
 
   return surface;
 }
+#endif
 
 dt_imageio_preview_cancel_t *dt_imageio_preview_cancel_new(void)
 {

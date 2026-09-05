@@ -71,6 +71,7 @@ const dt_action_def_t dt_action_def_accels_show
       NULL, TRUE };
 
 
+#ifndef DT_HEADLESS
 GdkModifierType dt_modifier_shortcuts;
 
 static float _action_process_modifiers(const gpointer target,
@@ -108,6 +109,7 @@ const dt_action_def_t dt_action_def_modifiers
       _action_process_modifiers,
       _action_elements_modifiers,
       NULL, TRUE };
+#endif // DT_HEADLESS
 
 void dt_control_init(const gboolean withgui)
 {
@@ -211,6 +213,7 @@ void dt_control_init(const gboolean withgui)
   dt_action_define_fallback(DT_ACTION_TYPE_LIB, &dt_action_def_lib);
   dt_action_define_fallback(DT_ACTION_TYPE_VALUE_FALLBACK, &dt_action_def_value);
 
+#ifndef DT_HEADLESS
   dt_action_t *ac = dt_action_define(&s->actions_global, NULL,
                                      N_("show accels window"), NULL,
                                      &dt_action_def_accels_show);
@@ -218,6 +221,7 @@ void dt_control_init(const gboolean withgui)
 
   s->actions_modifiers = dt_action_define(&s->actions_global, NULL,
                                           N_("modifiers"), NULL, &dt_action_def_modifiers);
+#endif
 
   // same thread as init
   s->gui_thread = pthread_self();

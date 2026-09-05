@@ -18,9 +18,12 @@
 
 #pragma once
 
-#include <gtk/gtk.h>
+#include <glib.h>
 #include <string.h>
+#ifndef DT_HEADLESS
+#include <gtk/gtk.h>
 #include <librsvg/rsvg.h>
+#endif
 
 G_BEGIN_DECLS
 
@@ -92,11 +95,13 @@ typedef enum dt_logo_season_t
   DT_LOGO_SEASON_EASTER = 3
 } dt_logo_season_t;
 
+#ifndef DT_HEADLESS
 /** returns the dt logo season to use right now */
 dt_logo_season_t dt_util_get_logo_season(void);
 
 cairo_surface_t *dt_util_get_logo(const float size);
 cairo_surface_t *dt_util_get_logo_text(const float size);
+#endif
 
 gchar *dt_util_latitude_str(float latitude);
 gchar *dt_util_longitude_str(float longitude);
@@ -146,6 +151,7 @@ void dt_copy_file(const char *src,
 void dt_copy_resource_file(const char *src,
                            const char *dst);
 
+#ifndef DT_HEADLESS
 // returns the RsvgDimensionData of a supplied RsvgHandle
 RsvgDimensionData dt_get_svg_dimension(RsvgHandle *svg);
 
@@ -155,6 +161,7 @@ void dt_render_svg(RsvgHandle *svg, cairo_t *cr,
                    const double height,
                    const double offset_x,
                    const double offset_y);
+#endif
 
 // check if the path + basenames are the same (<=> only differ by the extension)
 gboolean dt_has_same_path_basename(const char *filename1,

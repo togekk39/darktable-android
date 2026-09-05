@@ -40,12 +40,14 @@ G_BEGIN_DECLS
 // gui and management:
 /* get translated module name */
 REQUIRED(const char *, name, void);
+#ifndef DT_HEADLESS
 /* construct widget above */
 OPTIONAL(void, gui_init, struct dt_imageio_module_format_t *self);
 /* destroy resources */
 REQUIRED(void, gui_cleanup, struct dt_imageio_module_format_t *self);
 /* reset options to defaults */
 REQUIRED(void, gui_reset, struct dt_imageio_module_format_t *self);
+#endif
 
 /* construct widget above */
 REQUIRED(void, init, struct dt_imageio_module_format_t *self);
