@@ -9,6 +9,9 @@
         <data android:mimeType="image/x-adobe-dng"/><data android:mimeType="image/x-canon-cr2"/>
         <data android:mimeType="image/x-canon-cr3"/><data android:mimeType="image/x-nikon-nef"/>
         <data android:mimeType="image/x-sony-arw"/>
+        <data android:mimeType="image/x-fuji-raf"/><data android:mimeType="image/x-olympus-orf"/>
+        <data android:mimeType="image/x-panasonic-rw2"/><data android:mimeType="image/x-pentax-pef"/>
+        <data android:mimeType="image/x-gopro-gpr"/><data android:mimeType="image/gpr"/>
       </intent-filter>
       <intent-filter>
         <action android:name="android.intent.action.VIEW"/><action android:name="android.intent.action.EDIT"/>

@@ -4,9 +4,15 @@ import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.file.FileSystemOperations
 import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.tasks.InputFile
+import org.gradle.api.tasks.InputDirectory
+import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.OutputDirectory
+import org.gradle.api.tasks.PathSensitive
+import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.TaskAction
-import java.util.Properties
+import org.gradle.api.provider.Property
+import org.gradle.process.ExecOperations
+import java.io.File
 import javax.inject.Inject
 
 abstract class PrepareMobileAssetsTask @Inject constructor(
@@ -35,6 +41,67 @@ abstract class PrepareMobileAssetsTask @Inject constructor(
     }
 }
 
+abstract class PreparePrebuiltRuntimeTask @Inject constructor(
+    private val execOperations: ExecOperations,
+    private val fileSystemOperations: FileSystemOperations,
+) : DefaultTask() {
+    @get:InputDirectory
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val stageDirectory: DirectoryProperty
+
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val moduleManifest: RegularFileProperty
+
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val verifierScript: RegularFileProperty
+
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val elfParserScript: RegularFileProperty
+
+    @get:Input
+    abstract val pythonExecutable: Property<String>
+
+    @get:OutputDirectory
+    abstract val outputDirectory: DirectoryProperty
+
+    // AGP assigns the actual generated-source paths to these properties. They
+    // must be task outputs so its source providers retain the producer dependency.
+    @get:OutputDirectory
+    abstract val assetsDirectory: DirectoryProperty
+
+    @get:OutputDirectory
+    abstract val jniLibsDirectory: DirectoryProperty
+
+    @TaskAction
+    fun prepare() {
+        execOperations.exec {
+            commandLine(pythonExecutable.get(), verifierScript.get().asFile.absolutePath,
+                "--stage", stageDirectory.get().asFile.absolutePath,
+                "--modules", moduleManifest.get().asFile.absolutePath,
+                "--output", outputDirectory.get().asFile.absolutePath)
+        }
+        fileSystemOperations.sync {
+            from(outputDirectory.dir("assets"))
+            into(assetsDirectory)
+        }
+        fileSystemOperations.sync {
+            from(outputDirectory.dir("jniLibs"))
+            into(jniLibsDirectory)
+        }
+        // Verify the directories AGP will package, after copying, against the
+        // same manifest. The verified staging root is not itself a source set.
+        execOperations.exec {
+            commandLine(pythonExecutable.get(), verifierScript.get().asFile.absolutePath,
+                "--stage", outputDirectory.get().asFile.absolutePath,
+                "--packaged-assets", assetsDirectory.get().asFile.absolutePath,
+                "--packaged-jni", jniLibsDirectory.get().asFile.absolutePath)
+        }
+    }
+}
+
 plugins { id("com.android.application"); id("org.jetbrains.kotlin.android"); id("org.jetbrains.kotlin.plugin.compose") }
 
 val persistentSigningConfigured = listOf(
@@ -45,11 +112,30 @@ val persistentSigningConfigured = listOf(
 ).all { providers.environmentVariable(it).isPresent }
 
 val repositoryRoot = rootProject.projectDir.parentFile
+val prebuiltStage = providers.gradleProperty("darktableRuntimeStage").orNull?.let { value ->
+    val directory = File(value)
+    if(value.isBlank() || !directory.isAbsolute || !directory.isDirectory) {
+        throw GradleException("darktableRuntimeStage must be an absolute path to an existing complete Android runtime stage")
+    }
+    if(!directory.resolve("manifest.json").isFile) {
+        throw GradleException("darktableRuntimeStage has no manifest.json; use stage-android-runtime.py output, not an install prefix or dependency probe")
+    }
+    directory
+}
+val prebuiltModules = providers.gradleProperty("darktableRuntimeModules").orNull?.let { value ->
+    if(prebuiltStage == null) throw GradleException("darktableRuntimeModules requires darktableRuntimeStage")
+    File(value).also {
+        if(!it.isAbsolute || !it.isFile) throw GradleException("darktableRuntimeModules must be an absolute path to the original configured engine module manifest")
+    }
+} ?: prebuiltStage?.resolve("android-runtime-libraries.txt")
+if(prebuiltModules != null && !prebuiltModules.isFile) {
+    throw GradleException("The Android runtime stage has no configured module manifest; recreate it with the current staging tool or supply darktableRuntimeModules")
+}
 val vcpkgTag = "2025.06.13"
 val vcpkgRoot = repositoryRoot.resolve(".vcpkg/$vcpkgTag")
 val vcpkgInstalled = repositoryRoot.resolve(".vcpkg/installed")
 val pinnedNdk = androidComponents.sdkComponents.ndkDirectory.map { it.asFile }
-val prepareNativeDependencies = tasks.register<Exec>("prepareNativeDependencies") {
+val prepareNativeDependencies = if(prebuiltStage == null) tasks.register<Exec>("prepareNativeDependencies") {
     inputs.files(
         repositoryRoot.resolve("mobile/dependencies/vcpkg.json"),
         repositoryRoot.resolve("mobile/dependencies/build-android-dependencies.sh"),
@@ -59,7 +145,7 @@ val prepareNativeDependencies = tasks.register<Exec>("prepareNativeDependencies"
     outputs.dir(vcpkgInstalled.resolve("arm64-android"))
     environment("ANDROID_NDK_HOME", pinnedNdk.get().absolutePath)
     commandLine(repositoryRoot.resolve("mobile/dependencies/build-android-dependencies.sh"))
-}
+} else null
 android {
     namespace = "org.example.darktableandroid"
     compileSdk = 35
@@ -75,7 +161,8 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        externalNativeBuild { cmake {
+        ndk { abiFilters += "arm64-v8a" }
+        if(prebuiltStage == null) externalNativeBuild { cmake {
             arguments += listOf(
                 "-DANDROID_ABI=arm64-v8a",
                 "-DANDROID_PLATFORM=android-26",
@@ -91,7 +178,6 @@ android {
                 // plugin dependencies which are not part of the Android bundle.
                 "-DDT_MOBILE_WITH_DARKTABLE_ENGINE=OFF",
             )
-            abiFilters += "arm64-v8a"
         } }
     }
     signingConfigs {
@@ -138,31 +224,56 @@ android {
     }
     // Keep Android on the deliberately small, Android-compatible graph.  The
     // upstream root graph also configures desktop-only dependencies.
-    externalNativeBuild { cmake { path = file("../../mobile/CMakeLists.txt"); version = "3.22.1" } }
+    if(prebuiltStage == null) externalNativeBuild { cmake { path = file("../../mobile/CMakeLists.txt"); version = "3.22.1" } }
     buildFeatures { compose = true; buildConfig = true }
-    packaging { jniLibs.keepDebugSymbols += "**/libdt_mobile.so" }
+    packaging {
+        jniLibs {
+            keepDebugSymbols += "**/libdt_mobile.so"
+            // The desktop plugin registry enumerates nativeLibraryDir. Ask
+            // Android's installer to extract code into that trusted directory
+            // so processing modules can be discovered by their category prefix.
+            useLegacyPackaging = true
+        }
+    }
 }
 
 androidComponents.onVariants { variant ->
     val variantName = variant.name.replaceFirstChar { it.uppercase() }
-    val prepareMobileAssets = tasks.register<PrepareMobileAssetsTask>(
-        "prepare${variantName}MobileAssets",
-    ) {
-        camerasXml.set(
-            layout.projectDirectory.file("../../src/external/rawspeed/data/cameras.xml"),
+    if(prebuiltStage != null) {
+        val prepareRuntime = tasks.register<PreparePrebuiltRuntimeTask>("prepare${variantName}PrebuiltRuntime") {
+            stageDirectory.set(prebuiltStage)
+            moduleManifest.set(checkNotNull(prebuiltModules))
+            verifierScript.set(repositoryRoot.resolve("mobile/dependencies/verify-android-runtime-stage.py"))
+            elfParserScript.set(repositoryRoot.resolve("mobile/dependencies/stage-android-runtime.py"))
+            pythonExecutable.set(providers.gradleProperty("darktablePython").orElse("python3"))
+            outputDirectory.set(layout.buildDirectory.dir("generated/prebuiltRuntime/${variant.name}"))
+            assetsDirectory.set(outputDirectory.dir("assets"))
+            jniLibsDirectory.set(outputDirectory.dir("jniLibs"))
+        }
+        variant.sources.assets?.addGeneratedSourceDirectory(prepareRuntime, PreparePrebuiltRuntimeTask::assetsDirectory)
+        variant.sources.jniLibs?.addGeneratedSourceDirectory(prepareRuntime, PreparePrebuiltRuntimeTask::jniLibsDirectory)
+    } else {
+        val prepareMobileAssets = tasks.register<PrepareMobileAssetsTask>(
+            "prepare${variantName}MobileAssets",
+        ) {
+            camerasXml.set(
+                layout.projectDirectory.file("../../src/external/rawspeed/data/cameras.xml"),
+            )
+            noiseProfilesJson.set(layout.projectDirectory.file("../../data/noiseprofiles.json"))
+            whiteBalancePresetsJson.set(layout.projectDirectory.file("../../data/wb_presets.json"))
+            outputDirectory.set(layout.buildDirectory.dir("generated/mobileAssets/${variant.name}"))
+        }
+        variant.sources.assets?.addGeneratedSourceDirectory(
+            prepareMobileAssets,
+            PrepareMobileAssetsTask::outputDirectory,
         )
-        noiseProfilesJson.set(layout.projectDirectory.file("../../data/noiseprofiles.json"))
-        whiteBalancePresetsJson.set(layout.projectDirectory.file("../../data/wb_presets.json"))
-        outputDirectory.set(layout.buildDirectory.dir("generated/mobileAssets/${variant.name}"))
     }
-    variant.sources.assets?.addGeneratedSourceDirectory(
-        prepareMobileAssets,
-        PrepareMobileAssetsTask::outputDirectory,
-    )
 }
 
 tasks.configureEach {
-    if(name.startsWith("configureCMake") || name.startsWith("buildCMake")) dependsOn(prepareNativeDependencies)
+    if(prepareNativeDependencies != null && (name.startsWith("configureCMake") || name.startsWith("buildCMake"))) {
+        dependsOn(prepareNativeDependencies)
+    }
 }
 
 kotlin { jvmToolchain(17) }

@@ -3,6 +3,7 @@
 #define DT_MOBILE_H
 #include <stddef.h>
 #include <stdint.h>
+#include "dt_mobile_export.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -18,14 +19,96 @@ typedef enum dt_mobile_status {
   DT_MOBILE_ERROR_DECODE = 7,
   DT_MOBILE_ERROR_PROCESSING = 8
 } dt_mobile_status;
+/* Capabilities describe the engine linked into this build, not file suffixes. */
+enum { DT_MOBILE_CAP_ENGINE = 1u, DT_MOBILE_CAP_GPR = 2u };
+uint32_t dt_mobile_capabilities(void);
+/* Configure absolute runtime directories before opening an image. Paths are
+ * copied and remain configured across the last session's cleanup/reopen.
+ * Configuration fails while initialization, cleanup or any session is active.
+ * data_dir contains the installed desktop data tree; module_dir contains the
+ * installed native modules; temp_root is a writable application-private folder.
+ * Host CLI callers may omit configuration and use DT_MOBILE_DATADIR/MODULEDIR
+ * with the platform temporary directory instead. No process environment changes
+ * are made by this API. Failures are described by dt_mobile_runtime_error(). */
+dt_mobile_status dt_mobile_configure_runtime(const char *data_dir, const char *module_dir,
+                                            const char *temp_root);
+const char *dt_mobile_runtime_error(void);
 dt_mobile_status dt_mobile_open(const char *path, dt_mobile_session **out_session);
 const char *dt_mobile_open_error(void);
+/* JSON strings and preview buffers belong to the caller; free with dt_mobile_free_buffer.
+ * Session operations must be serialized by the caller. Only cancel may run concurrently.
+ * Close must wait until the active operation and any cancellation calls finish. */
+dt_mobile_status dt_mobile_modules(dt_mobile_session *session, char **json);
+/* Session edit steps, excluding imported/automatic startup history. The JSON
+ * contains canUndo, canRedo, position, length and limit. At most 64 successful
+ * Apply steps are retained; editing after undo discards the redo branch. */
+dt_mobile_status dt_mobile_history(dt_mobile_session *session, char **json);
+dt_mobile_status dt_mobile_undo(dt_mobile_session *session);
+dt_mobile_status dt_mobile_redo(dt_mobile_session *session);
+dt_mobile_status dt_mobile_set_parameter(dt_mobile_session *session, const char *module,
+                                          const char *parameter, double value);
+typedef struct dt_mobile_curve_point { float x, y; } dt_mobile_curve_point;
+/* Atomic node/interpolation update for the dedicated basecurve/RGB curve editor.
+ * Points use normalized coordinates, with 2..20 finite nodes and at least 1e-6
+ * horizontal separation after conversion to float. Interpolation is 0 (cubic
+ * spline), 1 (Catmull-Rom) or 2 (monotone Hermite). Only channels advertised in
+ * module JSON are editable; unrelated module parameters remain unchanged. */
+dt_mobile_status dt_mobile_set_curve(dt_mobile_session *session, const char *module,
+                                     int channel, int interpolation,
+                                     const dt_mobile_curve_point *points, size_t count);
+/* Atomic RGB curve mode/color-preservation change. mode is 0 (linked RGB) or
+ * 1 (independent RGB); preserve_colors must be an advertised choice (currently
+ * 0 none, 1 luminance, 2 max RGB, 3 average RGB, 4 sum RGB, 5 norm RGB, 6 power).
+ * Switching to independent mode copies R to G/B only when both G/B curves are
+ * identity, matching the desktop widget. Other channel edits remain intact.
+ * Color preservation is stored in independent mode but only used when linked.
+ * The complete change, including any channel copies, is one undo step. */
+dt_mobile_status dt_mobile_set_rgb_curve_options(dt_mobile_session *session,
+                                                 const char *module, int mode,
+                                                 int preserve_colors);
+/* Atomic manual white balance in native channel-index order. The count must
+ * match the advertised three or four active channels. Each gain is finite and
+ * within the reviewed manual range [0.001f,8.0f]; inactive channel bytes are
+ * preserved. This selects user-defined gains and clears late adaptation.
+ * This is deliberately narrower than the desktop's zero-inclusive sliders. */
+dt_mobile_status dt_mobile_set_whitebalance_gains(dt_mobile_session *session,
+                                                 const char *module,
+                                                 const float *gains, size_t count);
+/* Original built-in settings: 0 as-shot, 3 camera reference, 4 as-shot to
+ * reference. Gains come from the current image's original native basis.
+ * Named settings retain valid original coefficients above the manual maximum;
+ * only settings advertised for the current image can be selected. */
+dt_mobile_status dt_mobile_set_whitebalance_setting(dt_mobile_session *session,
+                                                   const char *module, int setting);
+/* Atomic freehand crop in the upstream crop module's normalized coordinate
+ * space. Coordinates are finite and within [0,1]; right >= left+0.01f and
+ * bottom >= top+0.01f use float addition, matching the desktop minimum edges.
+ * This selects the desktop freehand ratio (0/0); it does not retain
+ * an earlier fixed aspect ratio. It does not interpret an already cropped
+ * preview as the original image. A full rectangle restores the uncropped area. */
+dt_mobile_status dt_mobile_set_crop(dt_mobile_session *session, const char *module,
+                                    float left, float top, float right, float bottom);
+dt_mobile_status dt_mobile_set_enabled(dt_mobile_session *session, const char *module, int enabled);
+dt_mobile_status dt_mobile_export_formats(dt_mobile_session *session, char **json);
+/* Trusted native integration only: params must be a complete, validated upstream
+ * parameter struct for this exact module/engine version. This low-level API checks
+ * its byte size, not cross-field invariants. Do not pass untrusted/UI-supplied blobs;
+ * use the reviewed numeric setter or a purpose-built structured editor instead. */
 dt_mobile_status dt_mobile_set_module_params(dt_mobile_session *session, const char *module,
                                                const void *params, size_t params_size);
+/* Preview pixels are byte-ordered B, G, R, A (opaque alpha). Convert these
+ * explicitly when the platform bitmap's byte layout differs. */
 dt_mobile_status dt_mobile_render_preview(dt_mobile_session *session, int max_width, int max_height,
                                             uint8_t **rgba, int *width, int *height);
 dt_mobile_status dt_mobile_export(dt_mobile_session *session, const char *output_path,
                                     const char *format, int quality);
+/* Format-specific settings are advertised by export_formats JSON. This keeps
+ * the source untouched and commits an output only after successful encoding.
+ * Use DT_MOBILE_EXPORT_SETTINGS_INIT before overriding advertised settings. */
+dt_mobile_status dt_mobile_export_with_settings(dt_mobile_session *session,
+                                                const char *output_path,
+                                                const char *format,
+                                                const dt_mobile_export_settings *settings);
 void dt_mobile_free_buffer(void *buffer);
 void dt_mobile_cancel(dt_mobile_session *session);
 const char *dt_mobile_last_error(const dt_mobile_session *session);

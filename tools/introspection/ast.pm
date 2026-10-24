@@ -15,6 +15,7 @@
 #  along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 
 use scanner;
+use Scalar::Util ();
 
 package ast;
 
@@ -29,7 +30,7 @@ our @arrays;
 our @assignments;
 my $linearisation_pos;
 
-my %enum_arrays; # a mapping of typename to linearisation_pos. this allows us to re-use enum value definitions
+my %enum_arrays; # a mapping of enum type identity to linearisation_pos, for reusing value definitions
 
 sub print_debug
 {
@@ -966,11 +967,16 @@ sub get_introspection_code
   my ($self, $name_prefix, $params_type, $declaration) = @_;
   my @enumerator_list = @{$self->{enumerator_list}};
   my $size = @enumerator_list;
+  # Anonymous enum declarations all have an empty name. They are distinct
+  # types, so sharing by name would attach the first enum's choices to every
+  # later anonymous enum (even when their entry counts differ).
+  my $enum_key = length($self->{name}) ? "named:".$self->{name}
+                                      : "anonymous:".Scalar::Util::refaddr($self);
 
   # add entry to @arrays and @assignments
   # we only do that once per type. if the same enum is used more than once then we can reuse that array.
   my $_linearisation_pos;
-  if(not defined $enum_arrays{$self->{name}})
+  if(not defined $enum_arrays{$enum_key})
   {
     my $arrays_line = "static dt_introspection_type_enum_tuple_t f".$linearisation_pos."[] = { ";
     foreach(@enumerator_list)
@@ -984,12 +990,12 @@ sub get_introspection_code
     }
     $arrays_line .= "\n    { NULL, 0 },\n  };";
     push(@arrays, $arrays_line);
-    $enum_arrays{$self->{name}} = $linearisation_pos;
+    $enum_arrays{$enum_key} = $linearisation_pos;
     $_linearisation_pos = $linearisation_pos;
   }
   else
   {
-    $_linearisation_pos = $enum_arrays{$self->{name}};
+    $_linearisation_pos = $enum_arrays{$enum_key};
   }
   push(@assignments, "introspection_linear[$linearisation_pos].Enum.values = f$_linearisation_pos;");
 
