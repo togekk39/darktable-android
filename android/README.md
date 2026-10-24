@@ -5,7 +5,7 @@ Open this `android/` directory in Android Studio. Install Android SDK 35, NDK 27
 
 The Android UI opens one document directly into the editor, with no image browser.
 It now includes controls generated from reviewed desktop scalar parameters,
-dedicated basecurve and RGB curve node editors, white-balance coefficients/settings, a freehand crop editor,
+dedicated basecurve and RGB curve node editors, white-balance temperature/tint and coefficients/settings, a freehand crop editor,
 session undo/redo, and a system document destination for native exports. The current
 Android build still sets `DT_MOBILE_WITH_DARKTABLE_ENGINE=OFF`: the desktop core
 and its plugins depend on GTK and other libraries that have not been ported into
@@ -39,7 +39,13 @@ when available. Manual coefficients use `0.001..8`; native preset values above
 8 remain visible without clipping. Green remains an independent coefficient.
 Three-channel images preserve the inactive fourth value; four-Bayer labels and
 display order come from the native module. True camera-monochrome inputs do not
-offer white balance. Kelvin/tint, spot sampling and camera presets remain pending.
+offer white balance. When the native module can derive temperature/tint from the
+image's camera matrix and active gains, two numeric controls apply Kelvin and tint
+together through the desktop temperature module's shared calculation core. Android
+does not calculate replacement gains. The native module supplies the current values
+and bounds; applying selects user-defined white balance and normalizes green to 1,
+matching the desktop controls. Unavailable conversion keeps the existing coefficient
+and setting controls. Spot sampling and camera presets remain pending.
 
 The crop editor applies four normalized edges together through the original
 crop module, with a rectangle diagram and a reset to the full input area.

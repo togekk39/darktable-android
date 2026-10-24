@@ -10,7 +10,7 @@ by its processing core; it does not imply a browser screen.
 ## Implemented boundary
 
 `dt_mobile.h` exposes module descriptions, numeric parameter changes, dedicated
-curve edits, atomic white-balance gains/settings, freehand cropping, module enable/disable, session undo/redo,
+curve edits, atomic white-balance Kelvin/tint and gains/settings, freehand cropping, module enable/disable, session undo/redo,
 preview, installed export formats and full-resolution export settings.
 The engine adapter uses upstream introspection structures, develop history and
 the imageio pixelpipe. It does not duplicate editing formulas. Parameter bounds,
@@ -73,8 +73,19 @@ Four-Bayer channel names and CYGM display order follow the desktop; the JNI
 array remains in native index order. True camera-monochrome inputs omit/reject
 the editor. Non-RAW inputs retain the desktop's optional manual processing.
 Snapshots retain chroma state, and restore synchronizes it with the actual
-temperature module before subsequent operations. Kelvin/tint, spot sampling
-and camera-database preset selection still need dedicated support.
+temperature module before subsequent operations.
+
+`dt_mobile_set_whitebalance_temperature` applies Kelvin/tint together using the
+desktop temperature module's original spectral integration, camera matrices and
+tint convention through `common/whitebalance`. The desktop GUI uses that same
+extracted core; Kotlin supplies no second formula. The original Y-scaling tint
+convention and blackbody/daylight transition remain unchanged.
+The native description reports current values and original bounds only when
+calibration/current gains are usable. An Apply normalizes native channel 1 (green for RGB) to one, preserves
+the inactive fourth channel, selects user-defined balance and records one undo
+step. Positive native gains above the manual maximum remain intact; a pair that
+produces invalid camera gains fails without changing state. Spot sampling and
+camera-database preset selection still need dedicated support.
 
 `dt_mobile_set_crop` applies a complete normalized left/top/right/bottom
 rectangle through the desktop crop module in one history change. It validates
@@ -192,7 +203,7 @@ With the desktop engine also enabled, `dt_mobile_raw_engine_test` opens each
 original GPR through the public API and RawSpeed, changes exposure, exports a
 full-size PNG, decodes that PNG, and confirms the source GPR remains unchanged.
 `dt_mobile_raw_whitebalance_GPBK7066` additionally uses the original Fusion GPR
-to exercise native white-balance settings/gains, pixel-exact undo/redo and an
+to exercise native white-balance settings/gains and Kelvin/tint, pixel-exact undo/redo and an
 edited full-size PNG round trip. Its CLI equivalent adds `--whitebalance` to
 the existing raw engine test; the other six sample tests keep their original
 behavior. These remain host tests, not Android execution proof.
@@ -209,8 +220,11 @@ crop undo dimensions, the 64-step window, real PNG/TIFF precision and
 compression tags, non-square bounded exports without upscaling, embedded ICC
 selection, JPEG subsampling/DPI, original-source protection and exact temporary
 configuration restoration, including command-line override conflicts.
-White-balance checks cover real gain-dependent pixels, exact undo, named
-setting semantics and inactive-fourth-channel preservation.
+White-balance checks cover gain- and Kelvin/tint-dependent pixels, exact undo,
+named setting semantics and inactive-fourth-channel preservation. With LCMS2
+available, the standalone `dt_mobile_temperature_test` also compares the shared
+spectral core to golden results from the original desktop source, including both
+sides of its 4000 K transition. These tests do not establish Android execution.
 Cancellation after the real PNG encoder has written its temporary file also
 checks that the destination stays absent, the temporary file is removed and
 the original raw configuration is restored.
@@ -227,8 +241,7 @@ commands. This is a desktop host test, not Android device validation.
 * Package and initialize all required runtime data, color profiles, module
   registries, presets and optional codecs. The existing three Android database
   assets are insufficient for the complete desktop runtime.
-* Add purpose-built touch controls and APIs for masks, white-balance Kelvin/tint,
-  spot sampling and camera presets, other curve modules,
+* Add purpose-built touch controls and APIs for masks, white-balance spot sampling and camera presets, other curve modules,
   RGB curve middle-gray compensation, fixed crop proportions, an
   uncropped touch overlay, other geometry operations, blending,
   persistent editing history, presets, multiple module instances and other compound or opaque

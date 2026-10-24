@@ -1,7 +1,7 @@
 name: Android CI and dev release
 on:
   push:
-    branches: [master]
+    branches: [master, feature/android-raw-editor]
     paths: ["android/**", "mobile/**", "src/**", "tools/introspection/**", "tools/module-layout-tests/**", "tools/sidecar-tests/**", "CMakeLists.txt", "cmake/**", ".github/workflows/android-ci.yml"]
   pull_request:
     branches: [master]
@@ -124,6 +124,8 @@ jobs:
       - uses: gradle/actions/wrapper-validation@v4
       - name: Native host test
         run: cmake -S mobile -B build/mobile -DDT_MOBILE_BUILD_TESTS=ON && cmake --build build/mobile && ctest --test-dir build/mobile --output-on-failure
+      - name: Offline Android runtime staging and APK verification tests
+        run: python3 -B -m unittest discover -s mobile/dependencies/tests -v
       - name: Lint, unit tests, and dev release
         working-directory: android
         run: ./gradlew --no-daemon lintDevRelease testDevReleaseUnitTest assembleDevRelease

@@ -33,6 +33,7 @@ cmake -S "$root_dir" -B "$build_dir" -G Ninja \
   -DVCPKG_OVERLAY_TRIPLETS="$root_dir/mobile/dependencies/triplets" \
   -DVCPKG_INSTALLED_DIR="$install_dir" -DVCPKG_MANIFEST_MODE=OFF \
   -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 -DANDROID_STL=c++_shared \
+  -DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON \
   -DBUILD_MOBILE_LIBRARY_ONLY=ON -DDT_MOBILE_ANDROID_DEPENDENCIES=OFF \
   -DDT_MOBILE_WITH_DARKTABLE_ENGINE=ON \
   -DDT_MOBILE_WITH_GPR_SDK=OFF -DDT_MOBILE_BUILD_TESTS=OFF -DBUILD_TESTING=OFF \
@@ -43,6 +44,6 @@ cmake -S "$root_dir" -B "$build_dir" -G Ninja \
   -DUSE_AI=OFF -DUSE_JXL=OFF -DUSE_AVIF=OFF -DUSE_HEIF=OFF -DUSE_OPENJPEG=OFF \
   -DUSE_WEBP=OFF -DUSE_OPENEXR=OFF -DUSE_XCF=OFF -DUSE_ICU=OFF \
   -DUSE_CAMERA_SUPPORT=OFF -DUSE_PORTMIDI=OFF -DUSE_XMLLINT=OFF
-cmake --build "$build_dir" --target dt_mobile --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
+cmake --build "$build_dir" --target dt_mobile_runtime --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
 printf 'Built the experimental native engine graph in %s\n' "$build_dir"
 printf 'APK resource/module packaging and Android execution still require verification.\n'

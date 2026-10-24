@@ -8,8 +8,10 @@ import importlib.util
 import json
 from pathlib import Path
 import shutil
+import stat
 import sys
 import tempfile
+import zipfile
 
 # Import the same ELF/data checks as the staging producer without writing into
 # the source tree. No target code is loaded or executed by this verifier.
@@ -189,6 +191,43 @@ def copy_verified(root: Path, modules: Path, output: Path) -> dict:
     return report
 
 
+def verify_apk(root: Path, modules: Path, apk: Path) -> dict:
+    """Check the final archive after AGP merging/stripping/signing.
+
+    This is a byte-for-byte runtime audit, not APK signature, installation or
+    Android execution validation. Extract only assets and native libraries into
+    a private temporary directory; never load code from the archive.
+    """
+    verify(root, modules)
+    require(apk.is_file() and not apk.is_symlink(), f"APK is missing or not a regular file: {apk}")
+    with zipfile.ZipFile(apk) as archive, tempfile.TemporaryDirectory(prefix="darktable-apk-audit-") as directory:
+        target = Path(directory)
+        names = set()
+        for item in archive.infolist():
+            name = item.filename
+            require(name not in names, f"duplicate APK entry: {name}")
+            names.add(name)
+            # Reject ambiguous archive paths before selecting the runtime tree.
+            # Android's ZIP reader must see the same names as this verifier.
+            relative_asset(name[:-1] if item.is_dir() else name)
+            if not name.startswith(("assets/", "lib/")):
+                continue
+            mode = item.external_attr >> 16
+            require(not stat.S_ISLNK(mode), f"APK runtime entry must not be a symlink: {name}")
+            relative = Path(name)
+            destination = target / ("jniLibs" if relative.parts[0] == "lib" else "assets")
+            destination = destination.joinpath(*relative.parts[1:])
+            if item.is_dir():
+                destination.mkdir(parents=True, exist_ok=True)
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(item) as source, destination.open("xb") as output:
+                shutil.copyfileobj(source, output, length=1024 * 1024)
+        require("AndroidManifest.xml" in names, "archive has no AndroidManifest.xml")
+        report = verify(root, modules, target / "assets", target / "jniLibs")
+    return {**report, "apkSha256": stage.sha256(apk)}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stage", required=True, type=Path)
@@ -196,18 +235,26 @@ def main() -> int:
     parser.add_argument("--output", type=Path, help="copy verified sources into this Gradle-managed generated directory")
     parser.add_argument("--packaged-assets", type=Path, help="verify AGP's actual assets output against the stage manifest")
     parser.add_argument("--packaged-jni", type=Path, help="verify AGP's actual JNI output against the stage manifest")
+    parser.add_argument("--apk", type=Path, help="verify the final APK's exact runtime bytes after packaging/signing")
     args = parser.parse_args()
     if (args.packaged_assets is None) != (args.packaged_jni is None):
         parser.error("--packaged-assets and --packaged-jni must be supplied together")
     if args.output and args.packaged_assets is not None:
         parser.error("--output cannot be combined with packaged-output verification")
+    if args.apk and (args.output or args.packaged_assets is not None):
+        parser.error("--apk cannot be combined with copying or packaged-output verification")
     modules = args.modules or args.stage / "android-runtime-libraries.txt"
     try:
-        report = copy_verified(args.stage, modules, args.output) if args.output else verify(
-            args.stage, modules, args.packaged_assets, args.packaged_jni)
-        print(json.dumps({"status": "verified staged files; Android execution remains unverified", **report}, sort_keys=True))
+        if args.apk:
+            report = verify_apk(args.stage, modules, args.apk)
+        elif args.output:
+            report = copy_verified(args.stage, modules, args.output)
+        else:
+            report = verify(args.stage, modules, args.packaged_assets, args.packaged_jni)
+        print(json.dumps({"status": "verified APK runtime files; Android execution remains unverified" if args.apk
+                          else "verified staged files; Android execution remains unverified", **report}, sort_keys=True))
         return 0
-    except (stage.StageError, OSError, ValueError, TypeError, KeyError) as error:
+    except (stage.StageError, OSError, ValueError, TypeError, KeyError, zipfile.BadZipFile) as error:
         print(f"Prebuilt Android runtime verification failed: {error}", file=sys.stderr)
         return 1
 

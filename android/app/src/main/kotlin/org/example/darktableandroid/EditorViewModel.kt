@@ -179,6 +179,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if(balance.acceptsSetting(setting)) edit { NativeCore.setWhiteBalanceSetting(it, operation, setting) }
     }
 
+    fun setWhiteBalanceTemperature(operation: String, kelvin: Double, tint: Double) {
+        val current = mutableState.value as? EditorState.Ready ?: return
+        val temperature = current.modules.firstOrNull { it.operation == operation }?.whiteBalance?.temperature ?: return
+        if(temperature.accepts(kelvin, tint)) edit { NativeCore.setWhiteBalanceTemperature(it, operation, kelvin, tint) }
+    }
+
     fun undo() {
         if((mutableState.value as? EditorState.Ready)?.history?.canUndo != true) return
         edit { NativeCore.undo(it) }

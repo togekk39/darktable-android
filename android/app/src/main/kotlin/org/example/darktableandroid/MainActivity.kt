@@ -195,7 +195,7 @@ private fun MobileRawApp(sourceIntent: SourceIntent?, onSourceSelected: (Uri, In
                     items(ready.modules, key = { "${ready.sessionId}:${it.operation}" }) { module ->
                         ModuleControls(module, !busy, editor::setModuleEnabled, editor::setParameter,
                             editor::setCurve, editor::setCrop, editor::setRgbCurveOptions,
-                            editor::setWhiteBalanceGains, editor::setWhiteBalanceSetting)
+                            editor::setWhiteBalanceGains, editor::setWhiteBalanceSetting, editor::setWhiteBalanceTemperature)
                     }
                 }
             }
@@ -249,6 +249,7 @@ private fun ModuleControls(
     onRgbCurveOptions: (String, Int, Int) -> Unit,
     onWhiteBalanceGains: (String, FloatArray) -> Unit,
     onWhiteBalanceSetting: (String, Int) -> Unit,
+    onWhiteBalanceTemperature: (String, Double, Double) -> Unit,
 ) {
     var expanded by rememberSaveable(module.operation) { mutableStateOf(false) }
     OutlinedCard(Modifier.fillMaxWidth()) {
@@ -271,7 +272,8 @@ private fun ModuleControls(
                 module.whiteBalance?.let { balance ->
                     WhiteBalanceEditor(balance, editable,
                         { gains -> onWhiteBalanceGains(module.operation, gains) },
-                        { setting -> onWhiteBalanceSetting(module.operation, setting) })
+                        { setting -> onWhiteBalanceSetting(module.operation, setting) },
+                        { kelvin, tint -> onWhiteBalanceTemperature(module.operation, kelvin, tint) })
                 }
                 if(module.curves.isNotEmpty()) ModuleCurves(module.curves, editable) { channel, interpolation, nodes ->
                     onCurve(module.operation, channel, interpolation, nodes)

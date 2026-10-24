@@ -5,6 +5,7 @@
 #include "common/image.h"
 #include "common/history.h"
 #include "common/iop_order.h"
+#include "common/whitebalance.h"
 #include "control/conf.h"
 #include "develop/develop.h"
 #include "develop/imageop.h"
@@ -870,15 +871,73 @@ static gboolean whitebalance_basis(const dt_iop_module_t *module,
   return TRUE;
 }
 
+/* Use the same camera matrices and sRGB fallback as temperature.c. A headless
+ * module has no gui_data, so the shared numerical core accepts matrices rather
+ * than reaching through GUI state. Missing/singular calibration cannot be
+ * advertised as a valid Kelvin editor. */
+static gboolean whitebalance_matrices(dt_iop_module_t *module,
+                                      double XYZ_to_CAM[4][3], double CAM_to_XYZ[3][4])
+{
+  dt_image_t *image = &module->dev->image_storage;
+  if(!dt_image_is_raw(image))
+    dt_whitebalance_srgb_matrices(XYZ_to_CAM, CAM_to_XYZ);
+  else if(!dt_colorspaces_conversion_matrices_xyz(image->adobe_XYZ_to_CAM,
+                                                  image->d65_color_matrix,
+                                                  XYZ_to_CAM, CAM_to_XYZ)) return FALSE;
+  const int channels = image->flags & DT_IMAGE_4BAYER ? 4 : 3;
+  for(int row = 0; row < 4; row++)
+  {
+    gboolean nonzero = FALSE;
+    for(int col = 0; col < 3; col++)
+    {
+      if(!isfinite(XYZ_to_CAM[row][col]) || !isfinite(CAM_to_XYZ[col][row])) return FALSE;
+      if(XYZ_to_CAM[row][col] != 0.0) nonzero = TRUE;
+    }
+    /* A 3x3 embedded calibration has a zero inactive row. It cannot produce
+     * valid four-channel gains for a real four-Bayer image. */
+    if(row < channels && !nonzero) return FALSE;
+  }
+  return TRUE;
+}
+
+static void append_whitebalance_temperature(dt_iop_module_t *module,
+                                            const mobile_whitebalance_layout *layout,
+                                            const float gains[4], GString *json)
+{
+  double XYZ_to_CAM[4][3], CAM_to_XYZ[3][4];
+  if(!whitebalance_matrices(module, XYZ_to_CAM, CAM_to_XYZ)) return;
+  double multipliers[4];
+  for(int channel = 0; channel < 4; channel++)
+  {
+    if(channel < layout->channels && (!isnormal(gains[channel]) || gains[channel] <= 0.0f)) return;
+    /* The desktop inversion reads all four parameter fields. Its shared core
+     * maps an inactive NaN/nonpositive sentinel to zero camera light. */
+    multipliers[channel] = gains[channel];
+  }
+  const cmsCIEXYZ xyz = dt_whitebalance_multipliers_to_XYZ(CAM_to_XYZ, multipliers);
+  if(!isfinite(xyz.X) || !isfinite(xyz.Y) || !isfinite(xyz.Z)
+     || xyz.X <= 0.0 || xyz.Y <= 0.0 || xyz.Z <= 0.0) return;
+  float kelvin, tint;
+  dt_whitebalance_XYZ_to_temperature(xyz, &kelvin, &tint);
+  if(!isfinite(kelvin) || !isfinite(tint)) return;
+  g_string_append(json, ",\"temperature\":{\"kelvin\":"); json_number(json, kelvin);
+  g_string_append(json, ",\"tint\":"); json_number(json, tint);
+  g_string_append_printf(json, ",\"minKelvin\":%d,\"maxKelvin\":%d",
+                         DT_IOP_LOWEST_TEMPERATURE, DT_IOP_HIGHEST_TEMPERATURE);
+  g_string_append(json, ",\"minTint\":"); json_number(json, DT_IOP_LOWEST_TINT);
+  g_string_append(json, ",\"maxTint\":"); json_number(json, DT_IOP_HIGHEST_TINT);
+  g_string_append_c(json, '}');
+}
+
 static void append_whitebalance(dt_iop_module_t *module, GString *json)
 {
   mobile_whitebalance_layout layout;
   if(!whitebalance_layout(module, &layout) || !whitebalance_available(module)) return;
   float gains[4];
-  for(int channel = 0; channel < layout.channels; channel++)
+  for(int channel = 0; channel < 4; channel++)
   {
     memcpy(&gains[channel], (const char *)module->params + layout.gains[channel], sizeof(float));
-    if(!isfinite(gains[channel])) return; /* A complete manual batch can still repair this state. */
+    if(channel < layout.channels && !isfinite(gains[channel])) return; /* Manual batch can repair this state. */
   }
   int setting;
   memcpy(&setting, (const char *)module->params + layout.preset, sizeof(setting));
@@ -913,7 +972,9 @@ static void append_whitebalance(dt_iop_module_t *module, GString *json)
     json_string(json, whitebalance_setting_label(settings[k]));
     g_string_append_c(json, '}');
   }
-  g_string_append(json, "]}");
+  g_string_append_c(json, ']');
+  append_whitebalance_temperature(module, &layout, gains, json);
+  g_string_append_c(json, '}');
 }
 
 static void sync_temperature_chroma(dt_develop_t *dev)
@@ -1224,6 +1285,60 @@ dt_mobile_status dt_mobile_engine_set_whitebalance_gains(dt_mobile_engine *engin
       memcpy((char *)module->params + layout.preset, &user_setting, sizeof(user_setting));
       /* save_module also derives late_correction=FALSE and the enabled
        * temperature coefficients before capturing this single undo step. */
+      save_module(engine, module, TRUE);
+    }
+  }
+  end_operation(engine);
+  return status;
+}
+
+dt_mobile_status dt_mobile_engine_set_whitebalance_temperature(dt_mobile_engine *engine,
+                                                             const char *identifier,
+                                                             double kelvin, double tint,
+                                                             char *error, size_t error_size)
+{
+  dt_mobile_status status = begin_operation(engine, error, error_size);
+  if(status != DT_MOBILE_OK) return status;
+  dt_iop_module_t *module = find_module(engine, identifier);
+  mobile_whitebalance_layout layout;
+  double XYZ_to_CAM[4][3], CAM_to_XYZ[3][4];
+  if(!whitebalance_layout(module, &layout) || !whitebalance_available(module)
+     || !whitebalance_matrices(module, XYZ_to_CAM, CAM_to_XYZ))
+    status = engine_fail(error, error_size, DT_MOBILE_ERROR_UNSUPPORTED,
+                         "this image has no valid white-balance temperature calibration");
+  else if(!isfinite(kelvin) || kelvin < DT_IOP_LOWEST_TEMPERATURE || kelvin > DT_IOP_HIGHEST_TEMPERATURE
+          || !isfinite(tint) || tint < DT_IOP_LOWEST_TINT || tint > DT_IOP_HIGHEST_TINT)
+    status = engine_fail(error, error_size, DT_MOBILE_ERROR_INVALID_ARGUMENT,
+                         "white-balance temperature or tint is outside the desktop range");
+  else
+  {
+    double multipliers[4];
+    dt_whitebalance_XYZ_to_multipliers(XYZ_to_CAM,
+      dt_whitebalance_temperature_tint_to_XYZ(kelvin, tint), multipliers);
+    /* Exactly the desktop callback's green normalization. Validate all active
+     * results before writing; unusual calibrations and extreme tints can yield
+     * nonpositive camera channels. Never partially update the module. */
+    const double green = multipliers[1];
+    float gains[4];
+    for(int channel = 0; channel < layout.channels; channel++)
+    {
+      const double normalized = channel == 1 ? 1.0 : multipliers[channel] / green;
+      if(!isfinite(green) || green <= 0.0 || !isfinite(normalized)
+         || normalized <= 0.0 || normalized > FLT_MAX
+         || !isnormal((float)normalized))
+      {
+        status = engine_fail(error, error_size, DT_MOBILE_ERROR_INVALID_ARGUMENT,
+                             "temperature and tint do not produce valid camera white-balance gains");
+        break;
+      }
+      gains[channel] = (float)normalized;
+    }
+    if(status == DT_MOBILE_OK)
+    {
+      for(int channel = 0; channel < layout.channels; channel++)
+        memcpy((char *)module->params + layout.gains[channel], &gains[channel], sizeof(float));
+      const int user_setting = 2;
+      memcpy((char *)module->params + layout.preset, &user_setting, sizeof(user_setting));
       save_module(engine, module, TRUE);
     }
   }

@@ -165,6 +165,20 @@ dt_mobile_status dt_mobile_engine_set_whitebalance_gains(dt_mobile_engine *engin
   return DT_MOBILE_OK;
 }
 
+dt_mobile_status dt_mobile_engine_set_whitebalance_temperature(dt_mobile_engine *engine,
+                                                             const char *module,
+                                                             double kelvin, double tint,
+                                                             char *error, size_t size)
+{
+  (void)engine;
+  const dt_mobile_status status = called(DT_MOCK_WHITEBALANCE_TEMPERATURE, error, size);
+  if(status != DT_MOBILE_OK) return status;
+  snprintf(dt_mobile_mock.module, sizeof(dt_mobile_mock.module), "%s", module);
+  dt_mobile_mock.whitebalance_kelvin = kelvin;
+  dt_mobile_mock.whitebalance_tint = tint;
+  return DT_MOBILE_OK;
+}
+
 dt_mobile_status dt_mobile_engine_set_whitebalance_setting(dt_mobile_engine *engine,
                                                          const char *module, int setting,
                                                          char *error, size_t size)

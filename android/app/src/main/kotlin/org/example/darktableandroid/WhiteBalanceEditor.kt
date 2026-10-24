@@ -12,13 +12,16 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import org.example.darktableandroid.nativecore.WhiteBalance
+import org.example.darktableandroid.nativecore.WhiteBalanceTemperature
 import org.example.darktableandroid.nativecore.whiteBalanceGains
+import org.example.darktableandroid.nativecore.whiteBalanceTemperature
 
 private val WhiteBalanceInputSaver = listSaver<List<String>, String>(save = { it }, restore = { it.toList() })
 
 @Composable
 internal fun WhiteBalanceEditor(balance: WhiteBalance, editable: Boolean,
-                                onGains: (FloatArray) -> Unit, onSetting: (Int) -> Unit) {
+                                onGains: (FloatArray) -> Unit, onSetting: (Int) -> Unit,
+                                onTemperature: (Double, Double) -> Unit) {
     var input by rememberSaveable(balance.channels, balance.setting, stateSaver = WhiteBalanceInputSaver) {
         mutableStateOf(balance.channels.map { it.value.toString() })
     }
@@ -49,6 +52,11 @@ internal fun WhiteBalanceEditor(balance: WhiteBalance, editable: Boolean,
             TextButton(onClick = { onSetting(setting) }, enabled = editable && balance.acceptsSetting(setting)
                 && setting != balance.setting) { Text(stringResource(R.string.white_balance_apply_setting)) }
         }
+        balance.temperature?.let { temperature ->
+            key(balance.channels, balance.setting) {
+                WhiteBalanceTemperatureEditor(temperature, balance.setting, editable, onTemperature)
+            }
+        }
         Text(stringResource(R.string.white_balance_gains), style = MaterialTheme.typography.titleSmall)
         balance.channels.forEachIndexed { position, channel ->
             val value = input[position].toFloatOrNull()
@@ -64,5 +72,33 @@ internal fun WhiteBalanceEditor(balance: WhiteBalance, editable: Boolean,
         TextButton(onClick = { gains?.let(onGains) }, enabled = editable && gains != null && changed) {
             Text(stringResource(R.string.white_balance_apply_gains))
         }
+    }
+}
+
+@Composable
+private fun WhiteBalanceTemperatureEditor(temperature: WhiteBalanceTemperature, setting: Int, editable: Boolean,
+                                         onTemperature: (Double, Double) -> Unit) {
+    var kelvin by rememberSaveable(temperature, setting) { mutableStateOf(temperature.kelvin.toString()) }
+    var tint by rememberSaveable(temperature, setting) { mutableStateOf(temperature.tint.toString()) }
+    val pair = whiteBalanceTemperature(temperature, kelvin, tint)
+    Text(stringResource(R.string.white_balance_temperature), style = MaterialTheme.typography.titleSmall)
+    OutlinedTextField(value = kelvin, onValueChange = { kelvin = it },
+        label = { Text(stringResource(R.string.white_balance_kelvin)) }, enabled = editable, singleLine = true,
+        modifier = Modifier.fillMaxWidth(), isError = kelvin.toDoubleOrNull()?.let {
+            !it.isFinite() || it !in temperature.minKelvin..temperature.maxKelvin
+        } != false, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii))
+    OutlinedTextField(value = tint, onValueChange = { tint = it },
+        label = { Text(stringResource(R.string.white_balance_tint)) }, enabled = editable, singleLine = true,
+        modifier = Modifier.fillMaxWidth(), isError = tint.toDoubleOrNull()?.let {
+            !it.isFinite() || it !in temperature.minTint..temperature.maxTint
+        } != false, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii))
+    Text(stringResource(R.string.white_balance_temperature_range, temperature.minKelvin.toString(),
+        temperature.maxKelvin.toString(), temperature.minTint.toString(), temperature.maxTint.toString()),
+        style = MaterialTheme.typography.bodySmall)
+    // Arbitrary manual coefficients can have the same derived temperature but
+    // a different green scale. Applying the displayed pair still selects the
+    // desktop temperature representation and its green normalization.
+    TextButton(onClick = { pair?.let { onTemperature(it.first, it.second) } }, enabled = editable && pair != null) {
+        Text(stringResource(R.string.white_balance_apply_temperature))
     }
 }

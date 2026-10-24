@@ -97,3 +97,16 @@ Full engine staging, installer extraction, module discovery and device RAW/GPR
 edit/export validation remain pending until the whole native engine graph is
 available. Third-party license/source distribution obligations
 also remain with the final packaged build; this tool copies runtime files only.
+
+After packaging, audit the exact final APK with the companion verifier:
+
+```sh
+python3 mobile/dependencies/verify-android-runtime-stage.py \
+  --stage "$ANDROID_RUNTIME_STAGE" --apk path/to/app-dev-debug.apk
+```
+
+The [prebuilt Gradle route](../../android/PREBUILT_ENGINE.md) retains staged
+native bytes and runs this audit as part of each variant's assemble task. It
+checks that packaging has retained every dynamic plugin and runtime asset, with
+their original hashes and Android shared-library closure. This step still does
+not validate APK signatures, installation or native execution on a device.

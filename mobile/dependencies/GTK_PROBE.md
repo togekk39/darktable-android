@@ -39,6 +39,18 @@ archives; their hashes are not presented as the original archive hashes:
 | Cairo 1.18.4 | Upstream release tarball mirrored unchanged in Debian's source pool | [Cairo overlay](overlays/cairo/README.md) |
 | Pixman 0.44.2 | Upstream release tarball mirrored by Meson's official WrapDB release | [Pixman overlay](overlays/pixman/README.md) |
 
+The [bzip2 overlay](overlays/bzip2/README.md) additionally supplies Debian's
+official source-pool mirror as a fallback URL. Unlike the archive substitutions
+above, that mirrored release passes the catalog's original SHA-512 unchanged;
+the original patch, CMake build and options are retained. The
+[FreeType overlay](overlays/freetype/README.md) uses FreeType's official GitHub
+`VER-2-13-3` tag archive instead of `gitlab.freedesktop.org`; its original
+catalog SHA-512 also matches unchanged, with the original patches and build
+options retained. The [Fontconfig overlay](overlays/fontconfig/README.md) likewise
+uses the upstream GitHub `2.15.0` archive with the unchanged catalog SHA-512.
+These mirrors still use the configured proxy, TLS checks and HTTP destination
+policy.
+
 These overlays are selected by the separate GTK probe and experimental
 [engine bootstrap](ENGINE_BOOTSTRAP.md). The default dependency bundle continues
 to use the pinned vcpkg catalog ports.

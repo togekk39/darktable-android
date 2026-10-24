@@ -17,6 +17,8 @@ typedef struct wb_test_metadata
   float gains[4], minimum, maximum;
   int setting;
   unsigned settings;
+  int has_temperature;
+  double kelvin, tint;
 } wb_test_metadata;
 
 static int wb_test_read_metadata(const char *json, wb_test_metadata *state)
@@ -63,6 +65,19 @@ static int wb_test_read_metadata(const char *json, wb_test_metadata *state)
       if((id != 0 && id != 3 && id != 4) || (state->settings & (1u << id))
          || !json_object_get_string_member(item, "label")[0]) goto finished;
       state->settings |= 1u << id;
+    }
+    if(json_object_has_member(wb, "temperature"))
+    {
+      JsonObject *temperature = json_object_get_object_member(wb, "temperature");
+      state->kelvin = json_object_get_double_member(temperature, "kelvin");
+      state->tint = json_object_get_double_member(temperature, "tint");
+      if(!isfinite(state->kelvin) || state->kelvin < 1901.0 || state->kelvin > 25000.0
+         || !isfinite(state->tint) || state->tint < 0.135 || state->tint > 2.326
+         || json_object_get_double_member(temperature, "minKelvin") != 1901.0
+         || json_object_get_double_member(temperature, "maxKelvin") != 25000.0
+         || json_object_get_double_member(temperature, "minTint") != 0.135
+         || json_object_get_double_member(temperature, "maxTint") != 2.326) goto finished;
+      state->has_temperature = 1;
     }
     valid = indices == (1u << state->count) - 1u;
     break;
@@ -133,7 +148,7 @@ static int wb_test_gains_equal(const wb_test_metadata *first, const wb_test_meta
 
 /* Small preview-only round trip, suitable for a separately opened real RAW/GPR
  * session too. It restores the entire original history state with one undo. */
-static int wb_test_preview_roundtrip(dt_mobile_session *session)
+static int wb_test_preview_roundtrip(dt_mobile_session *session, int temperature)
 {
   int success = 0, applied = 0;
   char *before = NULL, *after = NULL;
@@ -148,7 +163,12 @@ static int wb_test_preview_roundtrip(dt_mobile_session *session)
   WB_PREVIEW_OK(dt_mobile_modules(session, &before));
   WB_PREVIEW_CHECK(wb_test_read_metadata(before, &state));
   WB_PREVIEW_OK(dt_mobile_render_preview(session, 96, 96, &reference, &w, &h));
-  WB_PREVIEW_OK(dt_mobile_set_whitebalance_gains(session, "temperature", gains, state.count));
+  if(temperature)
+  {
+    WB_PREVIEW_CHECK(state.has_temperature);
+    WB_PREVIEW_OK(dt_mobile_set_whitebalance_temperature(session, "temperature", 6500.0, 1.2));
+  }
+  else WB_PREVIEW_OK(dt_mobile_set_whitebalance_gains(session, "temperature", gains, state.count));
   applied = 1;
   WB_PREVIEW_OK(dt_mobile_render_preview(session, 96, 96, &changed, &cw, &ch));
   WB_PREVIEW_CHECK(reference && changed && w == cw && h == ch);
@@ -171,7 +191,7 @@ finished:
 
 static inline int wb_raw_preview_checks(dt_mobile_session *session)
 {
-  return wb_test_preview_roundtrip(session);
+  return wb_test_preview_roundtrip(session, 0) && wb_test_preview_roundtrip(session, 1);
 }
 
 /* PNG integration coverage. All successful changes, including the optional
@@ -201,7 +221,8 @@ static int wb_checks(dt_mobile_session *session)
   WB_CHECK(original_state.count == 3);
   WB_CHECK(original_state.settings == ((1u << 0) | (1u << 3) | (1u << 4)));
   WB_OK(dt_mobile_render_preview(session, 96, 96, &reference, &width, &height));
-  WB_CHECK(wb_test_preview_roundtrip(session));
+  WB_CHECK(wb_test_preview_roundtrip(session, 0));
+  WB_CHECK(wb_test_preview_roundtrip(session, 1));
 
   WB_APPLY(dt_mobile_set_whitebalance_gains(session, "temperature", gains, 3));
   WB_METADATA(state);
@@ -236,6 +257,28 @@ static int wb_checks(dt_mobile_session *session)
   WB_METADATA(state);
   WB_CHECK(state.count == 3 && state.setting == 2 && wb_test_native_preset(2));
 
+  WB_APPLY(dt_mobile_set_whitebalance_temperature(session, "temperature", 6500.0, 1.2));
+  WB_METADATA(state);
+  WB_CHECK(state.has_temperature && state.setting == 2 && wb_test_native_preset(2));
+  /* Original desktop spectral/matrix result, normalized by green. */
+  WB_CHECK(fabsf(state.gains[0] - 0.5471105667492383f) < 1e-6f);
+  WB_CHECK(state.gains[1] == 1.0f);
+  WB_CHECK(fabsf(state.gains[2] - 0.66505783771296367f) < 1e-6f);
+  WB_CHECK(fabs(state.kelvin - 6500.0) < 1.0 && fabs(state.tint - 1.2) < 0.001);
+  blob = wb_test_native_blob(&blob_size);
+  various = wb_test_field("various", blob_size, DT_INTROSPECTION_TYPE_FLOAT, sizeof(float));
+  WB_CHECK(blob && various);
+  memcpy(&after_bits, (const char *)blob + various->header.offset, sizeof(after_bits));
+  WB_CHECK(after_bits == inactive_bits);
+  g_free(blob); blob = NULL;
+
+  /* Kelvin-derived coefficients use the desktop result, not the manual
+   * editor's [0.001,8] limits. The original 2200 K sRGB blue gain exceeds 8. */
+  WB_APPLY(dt_mobile_set_whitebalance_temperature(session, "temperature", 2200.0, 1.0));
+  WB_METADATA(state);
+  WB_CHECK(state.setting == 2 && state.gains[2] > state.maximum);
+  WB_CHECK(fabsf(state.gains[2] - 10.773649092693217f) < 1e-5f);
+
   gains[0] = state.minimum;
   WB_APPLY(dt_mobile_set_whitebalance_gains(session, "temperature", gains, 3));
   WB_METADATA(state);
@@ -265,6 +308,11 @@ static int wb_checks(dt_mobile_session *session)
   WB_CHECK(dt_mobile_set_whitebalance_setting(session, "temperature", -1) == DT_MOBILE_ERROR_INVALID_ARGUMENT);
   WB_CHECK(dt_mobile_set_whitebalance_setting(session, "temperature", 5) == DT_MOBILE_ERROR_INVALID_ARGUMENT);
   WB_CHECK(dt_mobile_set_whitebalance_setting(session, "exposure", 0) == DT_MOBILE_ERROR_UNSUPPORTED);
+  WB_CHECK(dt_mobile_set_whitebalance_temperature(session, "temperature", 1900.0, 1.0) == DT_MOBILE_ERROR_INVALID_ARGUMENT);
+  WB_CHECK(dt_mobile_set_whitebalance_temperature(session, "temperature", 6500.0, 0.134) == DT_MOBILE_ERROR_INVALID_ARGUMENT);
+  WB_CHECK(dt_mobile_set_whitebalance_temperature(session, "exposure", 6500.0, 1.0) == DT_MOBILE_ERROR_UNSUPPORTED);
+  /* Valid UI bounds can still leave the camera gamut: reject before any write. */
+  WB_CHECK(dt_mobile_set_whitebalance_temperature(session, "temperature", 6500.0, 0.135) == DT_MOBILE_ERROR_INVALID_ARGUMENT);
   WB_METADATA(state);
   WB_OK(dt_mobile_history(session, &after_history));
   WB_CHECK(!strcmp(before_invalid, json) && !strcmp(before_history, after_history));

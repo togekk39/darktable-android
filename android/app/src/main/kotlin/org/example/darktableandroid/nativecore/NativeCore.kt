@@ -17,6 +17,7 @@ object NativeCore {
     external fun setRgbCurveOptions(handle: Long, module: String, mode: Int, preserveColors: Int)
     external fun setWhiteBalanceGains(handle: Long, module: String, gains: FloatArray)
     external fun setWhiteBalanceSetting(handle: Long, module: String, setting: Int)
+    external fun setWhiteBalanceTemperature(handle: Long, module: String, kelvin: Double, tint: Double)
     external fun setCrop(handle: Long, module: String, left: Float, top: Float, right: Float, bottom: Float)
     external fun setModuleEnabled(handle: Long, module: String, enabled: Boolean)
     external fun listExportFormats(handle: Long): String

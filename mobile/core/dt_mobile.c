@@ -248,6 +248,20 @@ dt_mobile_status dt_mobile_set_whitebalance_gains(dt_mobile_session *s, const ch
   return fail(s, DT_MOBILE_ERROR_UNSUPPORTED, "this build does not contain the darktable engine");
 #endif
 }
+dt_mobile_status dt_mobile_set_whitebalance_temperature(dt_mobile_session *s, const char *module,
+                                                       double kelvin, double tint)
+{
+  if(!s || !module || !module[0] || !isfinite(kelvin) || kelvin < 1901.0 || kelvin > 25000.0
+     || !isfinite(tint) || tint < 0.135 || tint > 2.326)
+    return DT_MOBILE_ERROR_INVALID_ARGUMENT;
+  if(atomic_load(&s->cancelled)) return fail(s, DT_MOBILE_ERROR_CANCELLED, "operation cancelled");
+#ifdef DT_MOBILE_HAS_DARKTABLE_ENGINE
+  return dt_mobile_engine_set_whitebalance_temperature(s->engine, module, kelvin, tint,
+                                                       s->error, sizeof(s->error));
+#else
+  return fail(s, DT_MOBILE_ERROR_UNSUPPORTED, "this build does not contain the darktable engine");
+#endif
+}
 dt_mobile_status dt_mobile_set_whitebalance_setting(dt_mobile_session *s, const char *module,
                                                    int setting)
 {

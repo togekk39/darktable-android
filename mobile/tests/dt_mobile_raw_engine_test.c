@@ -11,7 +11,7 @@
  * The SDK is used only to read the expected sensor dimensions, independently
  * of darktable's rendered/exported image. Checks stay active in Release.
  * Optional CLI: INPUT.GPR OUTPUT.PNG --whitebalance also exercises original
- * three-channel RAW white balance and pixel-exact session undo/redo. */
+ * three-channel RAW white balance, Kelvin/tint and pixel-exact session undo/redo. */
 #define CHECK(condition) do { if(!(condition)) { \
   fprintf(stderr, "%s:%d: check failed: %s\n", __FILE__, __LINE__, #condition); \
   goto failed; } } while(0)
@@ -67,7 +67,7 @@ static int whitebalance_metadata(const char *json, int setting)
 
 static int whitebalance_checks(dt_mobile_session *session)
 {
-  uint8_t *neutral = NULL, *changed = NULL, *restored = NULL, *redone = NULL;
+  uint8_t *neutral = NULL, *changed = NULL, *restored = NULL, *redone = NULL, *temperature = NULL;
   char *metadata = NULL;
   int width = 0, height = 0, other_width = 0, other_height = 0;
   int success = 0;
@@ -103,12 +103,31 @@ static int whitebalance_checks(dt_mobile_session *session)
   ENGINE_OK(dt_mobile_render_preview(session, 192, 192, &redone, &other_width, &other_height));
   CHECK(redone && width == other_width && height == other_height);
   CHECK(!memcmp(changed, redone, (size_t)width * height * 4));
-  /* Keep the red-gain edit active for the normal full-resolution export below. */
+  ENGINE_OK(dt_mobile_set_whitebalance_temperature(session, "temperature", 6500.0, 1.1));
+  ENGINE_OK(dt_mobile_modules(session, &metadata));
+  CHECK(whitebalance_metadata(metadata, 2));
+  const char *balance = strstr(metadata, "\"whiteBalance\":{");
+  CHECK(balance && strstr(balance, "\"temperature\":{\"kelvin\":"));
+  dt_mobile_free_buffer(metadata); metadata = NULL;
+  ENGINE_OK(dt_mobile_render_preview(session, 192, 192, &temperature, &other_width, &other_height));
+  CHECK(temperature && width == other_width && height == other_height);
+  CHECK(memcmp(changed, temperature, (size_t)width * height * 4));
+  ENGINE_OK(dt_mobile_undo(session));
+  dt_mobile_free_buffer(restored); restored = NULL;
+  ENGINE_OK(dt_mobile_render_preview(session, 192, 192, &restored, &other_width, &other_height));
+  CHECK(restored && width == other_width && height == other_height);
+  CHECK(!memcmp(changed, restored, (size_t)width * height * 4));
+  ENGINE_OK(dt_mobile_redo(session));
+  dt_mobile_free_buffer(redone); redone = NULL;
+  ENGINE_OK(dt_mobile_render_preview(session, 192, 192, &redone, &other_width, &other_height));
+  CHECK(redone && width == other_width && height == other_height);
+  CHECK(!memcmp(temperature, redone, (size_t)width * height * 4));
+  /* Keep the Kelvin/tint edit active for the normal full-resolution export below. */
   success = 1;
 failed:
   dt_mobile_free_buffer(neutral); dt_mobile_free_buffer(changed);
   dt_mobile_free_buffer(restored); dt_mobile_free_buffer(redone);
-  dt_mobile_free_buffer(metadata);
+  dt_mobile_free_buffer(metadata); dt_mobile_free_buffer(temperature);
   return success;
 }
 

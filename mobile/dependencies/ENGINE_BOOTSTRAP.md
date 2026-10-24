@@ -19,6 +19,17 @@ graph also needs a host `xsltproc` or Saxon XSLT processor for generated files.
 Installing Android libxml2 does not supply that executable. vcpkg supplies the
 other host build tools declared by the pinned ports.
 
+The bootstrap builds `dt_mobile_runtime`, which includes JNI, the core, all
+configured processing/format/storage modules and generated runtime data. When
+resuming an already configured build, use that target before installing it:
+
+```sh
+cmake --build "$DT_MOBILE_ENGINE_BUILD" --target dt_mobile_runtime --parallel 2
+```
+
+The internal `dt_mobile_modules` target builds the dynamically loaded module
+set and data without JNI. It is not a complete runtime for APK staging.
+
 The script uses the vcpkg 2025.06.13 catalog, the API 26 ARM64 static/PIC
 triplet, and the explicit [port overlays](overlays). Build and installed output
 default to `.vcpkg/engine/build` and `.vcpkg/engine/installed`, separate from
@@ -55,6 +66,15 @@ the C++ linker and undefined symbols are disallowed. Processing, format, and
 storage modules use their Android library filenames for eventual installation
 in the APK's extracted native library directory.
 
+The root engine and standalone Gradle native configurations enable NDK r27's
+`ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES`. This removes Bionic's compile-time
+`PAGE_SIZE` macro and links ARM64 shared libraries with 16 KiB `PT_LOAD`
+alignment, retaining compatibility with 4 KiB devices. The pinned NDK's ARM64
+`libc++_shared.so` and `libomp.so` also have 16 KiB load alignment. Static/PIC
+dependency archives retain their existing build configuration; final shared
+libraries must be relinked to apply the setting. Inspect every packaged shared
+library and validate the APK on both page sizes before claiming device support.
+
 This first bootstrap disables optional JPEG XL, AVIF/HEIF, JPEG 2000, WebP,
 OpenEXR and XCF codecs, G'MIC, AI, OpenCL, Lua, camera tethering, and desktop
 integrations. These settings reduce the initial porting graph; they do not
@@ -68,6 +88,17 @@ environments must
 allow those destinations or supply archives that match the source pins.
 Preserve the proxy, certificate checks, and original archive hashes when
 seeding a download cache.
+
+The [bzip2 overlay](overlays/bzip2/README.md) adds Debian's official source-pool
+mirror for the exact pinned 1.0.8 archive. The catalog SHA-512, patch, CMake
+build and options are unchanged, allowing reproducible downloads without manual
+cache seeding when its upstream hosts are unavailable under the network policy.
+The [FreeType overlay](overlays/freetype/README.md) similarly selects the
+official GitHub `VER-2-13-3` tag archive with the original catalog SHA-512 and
+build settings unchanged when `gitlab.freedesktop.org` is not permitted. The
+[Fontconfig overlay](overlays/fontconfig/README.md) selects the corresponding
+upstream GitHub `2.15.0` archive, also with the original SHA-512 unchanged.
+These overlays do not change the executor's network policy or bypass its proxy.
 
 The original LibRaw archive has passed an ARM64/API 26 whole-archive link
 check with DNG deflate, lossy-DNG and OpenMP enabled. That configuration uses

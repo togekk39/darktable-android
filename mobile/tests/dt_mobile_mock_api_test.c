@@ -76,6 +76,17 @@ static void test_invalid_arguments(dt_mobile_session *session)
   const int invalid_settings[] = { -1, 1, 2, 5, INT_MAX };
   for(size_t k = 0; k < sizeof(invalid_settings) / sizeof(invalid_settings[0]); k++)
     INVALID(dt_mobile_set_whitebalance_setting(session, "temperature", invalid_settings[k]));
+  INVALID(dt_mobile_set_whitebalance_temperature(NULL, "temperature", 6500.0, 1.0));
+  INVALID(dt_mobile_set_whitebalance_temperature(session, NULL, 6500.0, 1.0));
+  INVALID(dt_mobile_set_whitebalance_temperature(session, "", 6500.0, 1.0));
+  const double invalid_kelvin[] = { NAN, INFINITY, -INFINITY, 1900.0, 25001.0,
+                                    nextafter(1901.0, 0.0), nextafter(25000.0, INFINITY) };
+  for(size_t k = 0; k < sizeof(invalid_kelvin) / sizeof(invalid_kelvin[0]); k++)
+    INVALID(dt_mobile_set_whitebalance_temperature(session, "temperature", invalid_kelvin[k], 1.0));
+  const double invalid_tint[] = { NAN, INFINITY, -INFINITY, 0.0,
+                                  nextafter(0.135, 0.0), nextafter(2.326, INFINITY) };
+  for(size_t k = 0; k < sizeof(invalid_tint) / sizeof(invalid_tint[0]); k++)
+    INVALID(dt_mobile_set_whitebalance_temperature(session, "temperature", 6500.0, invalid_tint[k]));
   dt_mobile_curve_point curve[] = { { 0.0f, 0.0f }, { 1.0f, 1.0f } };
   INVALID(dt_mobile_set_curve(NULL, "basecurve", 0, 0, curve, 2));
   INVALID(dt_mobile_set_curve(session, NULL, 0, 0, curve, 2));
@@ -298,6 +309,11 @@ static void test_delegation_and_buffers(dt_mobile_session *session)
   CHECK(dt_mobile_mock.whitebalance_count == 4 && !memcmp(dt_mobile_mock.whitebalance_gains, gains, sizeof(gains)));
   gains[0] = 1.0f;
   CHECK(dt_mobile_mock.whitebalance_gains[0] == 0.001f);
+  CHECK(dt_mobile_set_whitebalance_temperature(session, "temperature@2", 6504.5, 1.234) == DT_MOBILE_OK);
+  CHECK(!strcmp(dt_mobile_mock.module, "temperature@2"));
+  CHECK(dt_mobile_mock.whitebalance_kelvin == 6504.5 && dt_mobile_mock.whitebalance_tint == 1.234);
+  CHECK(dt_mobile_set_whitebalance_temperature(session, "temperature", 1901.0, 0.135) == DT_MOBILE_OK);
+  CHECK(dt_mobile_set_whitebalance_temperature(session, "temperature", 25000.0, 2.326) == DT_MOBILE_OK);
   const int settings[] = { 0, 3, 4 };
   for(size_t k = 0; k < sizeof(settings) / sizeof(settings[0]); k++)
   {
@@ -400,6 +416,9 @@ static void test_engine_errors(dt_mobile_session *session)
   dt_mobile_mock_fail_next(DT_MOCK_WHITEBALANCE_GAINS, DT_MOBILE_ERROR_UNSUPPORTED);
   CHECK(dt_mobile_set_whitebalance_gains(session, "unknown@2", gains, 3) == DT_MOBILE_ERROR_UNSUPPORTED);
   check_error(session, DT_MOCK_WHITEBALANCE_GAINS);
+  dt_mobile_mock_fail_next(DT_MOCK_WHITEBALANCE_TEMPERATURE, DT_MOBILE_ERROR_UNSUPPORTED);
+  CHECK(dt_mobile_set_whitebalance_temperature(session, "temperature", 6500.0, 1.0) == DT_MOBILE_ERROR_UNSUPPORTED);
+  check_error(session, DT_MOCK_WHITEBALANCE_TEMPERATURE);
   dt_mobile_mock_fail_next(DT_MOCK_WHITEBALANCE_SETTING, DT_MOBILE_ERROR_PROCESSING);
   CHECK(dt_mobile_set_whitebalance_setting(session, "temperature", 3) == DT_MOBILE_ERROR_PROCESSING);
   check_error(session, DT_MOCK_WHITEBALANCE_SETTING);
@@ -456,6 +475,7 @@ static void test_cancel(dt_mobile_session *session)
   const float gains[] = { 1.0f, 1.0f, 1.0f };
   CHECK(dt_mobile_set_whitebalance_gains(session, "temperature", gains, 3) == DT_MOBILE_ERROR_CANCELLED);
   CHECK(dt_mobile_set_whitebalance_setting(session, "temperature", 4) == DT_MOBILE_ERROR_CANCELLED);
+  CHECK(dt_mobile_set_whitebalance_temperature(session, "temperature", 6500.0, 1.0) == DT_MOBILE_ERROR_CANCELLED);
   CHECK(dt_mobile_set_crop(session, "crop", 0.0f, 0.0f, 1.0f, 1.0f) == DT_MOBILE_ERROR_CANCELLED);
   const int params = 123;
   CHECK(dt_mobile_set_module_params(session, "exposure", &params, sizeof(params)) == DT_MOBILE_ERROR_CANCELLED);

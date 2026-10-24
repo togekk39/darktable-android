@@ -6,6 +6,7 @@ import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.tasks.InputFile
 import org.gradle.api.tasks.InputDirectory
 import org.gradle.api.tasks.Input
+import org.gradle.api.tasks.Internal
 import org.gradle.api.tasks.OutputDirectory
 import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
@@ -14,6 +15,8 @@ import org.gradle.api.provider.Property
 import org.gradle.process.ExecOperations
 import java.io.File
 import javax.inject.Inject
+import com.android.build.api.artifact.SingleArtifact
+import com.android.build.api.variant.BuiltArtifactsLoader
 
 abstract class PrepareMobileAssetsTask @Inject constructor(
     private val fileSystemOperations: FileSystemOperations,
@@ -102,6 +105,51 @@ abstract class PreparePrebuiltRuntimeTask @Inject constructor(
     }
 }
 
+abstract class VerifyPrebuiltRuntimeApkTask @Inject constructor(
+    private val execOperations: ExecOperations,
+) : DefaultTask() {
+    @get:InputDirectory
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val apkDirectory: DirectoryProperty
+
+    @get:InputDirectory
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val stageDirectory: DirectoryProperty
+
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val moduleManifest: RegularFileProperty
+
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val verifierScript: RegularFileProperty
+
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val elfParserScript: RegularFileProperty
+
+    @get:Input
+    abstract val pythonExecutable: Property<String>
+
+    @get:Internal
+    abstract val builtArtifactsLoader: Property<BuiltArtifactsLoader>
+
+    @TaskAction
+    fun verify() {
+        val artifacts = builtArtifactsLoader.get().load(apkDirectory.get())
+            ?: throw GradleException("Cannot read the final APK output metadata")
+        if(artifacts.elements.isEmpty()) throw GradleException("No final APK was produced for runtime verification")
+        artifacts.elements.forEach { artifact ->
+            execOperations.exec {
+                commandLine(pythonExecutable.get(), verifierScript.get().asFile.absolutePath,
+                    "--stage", stageDirectory.get().asFile.absolutePath,
+                    "--modules", moduleManifest.get().asFile.absolutePath,
+                    "--apk", artifact.outputFile)
+            }
+        }
+    }
+}
+
 plugins { id("com.android.application"); id("org.jetbrains.kotlin.android"); id("org.jetbrains.kotlin.plugin.compose") }
 
 val persistentSigningConfigured = listOf(
@@ -169,6 +217,7 @@ android {
                 "-DCMAKE_ANDROID_ARCH_ABI=arm64-v8a",
                 "-DCMAKE_ANDROID_ARCH=aarch64",
                 "-DANDROID_STL=c++_shared",
+                "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON",
                 "-DCMAKE_TOOLCHAIN_FILE=${vcpkgRoot.resolve("scripts/buildsystems/vcpkg.cmake")}",
                 "-DVCPKG_CHAINLOAD_TOOLCHAIN_FILE=${pinnedNdk.get().resolve("build/cmake/android.toolchain.cmake")}",
                 "-DVCPKG_TARGET_TRIPLET=arm64-android",
@@ -228,7 +277,9 @@ android {
     buildFeatures { compose = true; buildConfig = true }
     packaging {
         jniLibs {
-            keepDebugSymbols += "**/libdt_mobile.so"
+            // The prebuilt manifest records exact, previously verified bytes.
+            // AGP stripping must not silently replace them after verification.
+            keepDebugSymbols += if(prebuiltStage != null) "**/*.so" else "**/libdt_mobile.so"
             // The desktop plugin registry enumerates nativeLibraryDir. Ask
             // Android's installer to extract code into that trusted directory
             // so processing modules can be discovered by their category prefix.
@@ -252,6 +303,18 @@ androidComponents.onVariants { variant ->
         }
         variant.sources.assets?.addGeneratedSourceDirectory(prepareRuntime, PreparePrebuiltRuntimeTask::assetsDirectory)
         variant.sources.jniLibs?.addGeneratedSourceDirectory(prepareRuntime, PreparePrebuiltRuntimeTask::jniLibsDirectory)
+        val verifyRuntimeApk = tasks.register<VerifyPrebuiltRuntimeApkTask>("verify${variantName}PrebuiltRuntimeApk") {
+            apkDirectory.set(variant.artifacts.get(SingleArtifact.APK))
+            builtArtifactsLoader.set(variant.artifacts.getBuiltArtifactsLoader())
+            stageDirectory.set(prebuiltStage)
+            moduleManifest.set(checkNotNull(prebuiltModules))
+            verifierScript.set(repositoryRoot.resolve("mobile/dependencies/verify-android-runtime-stage.py"))
+            elfParserScript.set(repositoryRoot.resolve("mobile/dependencies/stage-android-runtime.py"))
+            pythonExecutable.set(providers.gradleProperty("darktablePython").orElse("python3"))
+        }
+        tasks.matching { it.name == "assemble$variantName" }.configureEach {
+            dependsOn(verifyRuntimeApk)
+        }
     } else {
         val prepareMobileAssets = tasks.register<PrepareMobileAssetsTask>(
             "prepare${variantName}MobileAssets",

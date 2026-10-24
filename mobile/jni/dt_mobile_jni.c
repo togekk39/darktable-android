@@ -198,6 +198,18 @@ JNIEXPORT void JNICALL Java_org_example_darktableandroid_nativecore_NativeCore_s
   (*env)->ReleaseStringUTFChars(env, module, operation);
   throw_status(env, session, status);
 }
+JNIEXPORT void JNICALL Java_org_example_darktableandroid_nativecore_NativeCore_setWhiteBalanceTemperature(JNIEnv *env, jobject self,
+    jlong handle, jstring module, jdouble kelvin, jdouble tint)
+{
+  (void)self;
+  if(!handle || !module) { throw_io(env, "an image and white-balance module are required"); return; }
+  const char *operation = (*env)->GetStringUTFChars(env, module, NULL);
+  if(!operation) return;
+  dt_mobile_session *session = (dt_mobile_session *)(intptr_t)handle;
+  const dt_mobile_status status = dt_mobile_set_whitebalance_temperature(session, operation, kelvin, tint);
+  (*env)->ReleaseStringUTFChars(env, module, operation);
+  throw_status(env, session, status);
+}
 JNIEXPORT void JNICALL Java_org_example_darktableandroid_nativecore_NativeCore_setCrop(JNIEnv *env, jobject self,
     jlong handle, jstring module, jfloat left, jfloat top, jfloat right, jfloat bottom)
 {

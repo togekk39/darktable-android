@@ -61,6 +61,36 @@ python3 ../mobile/dependencies/verify-android-runtime-stage.py \
   --stage /absolute/path/to/android-runtime-stage
 ```
 
+Prebuilt builds retain every native library's exact staged bytes instead of
+letting AGP strip them. Each `assemble<Variant>` also runs
+`verify<Variant>PrebuiltRuntimeApk` against the final APK reported by AGP. This
+checks the archive after merging, packaging and signing, including the complete
+native/data file lists, hashes, configured modules and dependency closure. It
+rejects extra ABIs, missing dynamically loaded plugins, changed libraries/data,
+duplicate ZIP entries and ambiguous runtime paths. Keeping symbols can increase
+APK size; produce stripped libraries before staging if a smaller artifact is
+needed, then recreate the stage and its hashes from those exact inputs.
+
+The same final-artifact check can run on a copied APK or after an external
+signing step:
+
+```sh
+python3 ../mobile/dependencies/verify-android-runtime-stage.py \
+  --stage /absolute/path/to/android-runtime-stage \
+  --apk app/build/outputs/apk/dev/debug/app-dev-debug.apk
+```
+
+The verifier reports the APK SHA-256 for the audited artifact. It checks runtime
+contents, not the APK signature, installability or Android execution. Use the SDK's
+`apksigner verify --verbose` for signature verification. Install that same audited
+APK on an ARM64 Android API 26+ device and exercise open/edit/undo/export/cancel/close
+with original RAW and GPR inputs; compare full-resolution outputs with the matching
+desktop build. An x86_64-only emulator without an ARM64 native bridge cannot
+load this package. An emulator must provide ARM64 execution (or separately
+validated ARM64 translation), and API 26 linker
+compatibility must also be checked on a matching runtime. Host ELF parsing or
+packaging tests do not replace those checks.
+
 Direct asset/native merge tasks use the same verified producer, rather than
 copying unchecked source directories. Generated files are build outputs; do not
 edit them or place them in source control. Remove the property to return to the
@@ -72,3 +102,10 @@ linking, APK contents, native loader behavior and RAW/GPR edit/export/cancel on
 real devices still require verification. The configured manifest covers only
 the selected native build; optional codecs and unported editing controls remain
 separate work.
+
+Offline producer/verifier regression tests use synthetic ELF headers and ZIP
+fixtures, without loading or simulating the processing engine:
+
+```sh
+python3 -B -m unittest discover -s ../mobile/dependencies/tests -v
+```

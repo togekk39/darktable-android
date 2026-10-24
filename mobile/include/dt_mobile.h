@@ -74,6 +74,18 @@ dt_mobile_status dt_mobile_set_rgb_curve_options(dt_mobile_session *session,
 dt_mobile_status dt_mobile_set_whitebalance_gains(dt_mobile_session *session,
                                                  const char *module,
                                                  const float *gains, size_t count);
+/* Atomic Kelvin/tint edit using the desktop temperature module's original
+ * spectral integration, camera matrices and tint convention. Finite Kelvin
+ * values are in [1901,25000] and tint in [0.135,2.326]. The native metadata
+ * advertises this editor only when the current image has a usable calibration.
+ * Generated active gains must be positive, finite floats; they retain desktop
+ * values above the manual-gain maximum. Native channel 1 (green for RGB)
+ * is normalized to 1; inactive
+ * channel bytes are preserved. This selects user-defined white balance and
+ * records one undo step. */
+dt_mobile_status dt_mobile_set_whitebalance_temperature(dt_mobile_session *session,
+                                                       const char *module,
+                                                       double kelvin, double tint);
 /* Original built-in settings: 0 as-shot, 3 camera reference, 4 as-shot to
  * reference. Gains come from the current image's original native basis.
  * Named settings retain valid original coefficients above the manual maximum;

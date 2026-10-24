@@ -57,6 +57,7 @@ static void test_arguments(void)
   CHECK(dt_mobile_set_rgb_curve_options(NULL, "rgbcurve", 0, 1) == DT_MOBILE_ERROR_INVALID_ARGUMENT);
   const float whitebalance[] = { 1.0f, 1.0f, 1.0f };
   CHECK(dt_mobile_set_whitebalance_gains(NULL, "temperature", whitebalance, 3) == DT_MOBILE_ERROR_INVALID_ARGUMENT);
+  CHECK(dt_mobile_set_whitebalance_temperature(NULL, "temperature", 6500.0, 1.0) == DT_MOBILE_ERROR_INVALID_ARGUMENT);
   CHECK(dt_mobile_set_whitebalance_setting(NULL, "temperature", 0) == DT_MOBILE_ERROR_INVALID_ARGUMENT);
   CHECK(dt_mobile_set_crop(NULL, "crop", 0.0f, 0.0f, 1.0f, 1.0f) == DT_MOBILE_ERROR_INVALID_ARGUMENT);
   const int params = 1;

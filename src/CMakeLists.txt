@@ -97,6 +97,7 @@ FILE(GLOB SOURCE_FILES
   "common/utility.c"
   "common/variables.c"
   "common/wb_presets.c"
+  "common/whitebalance.c"
   "control/conf.c"
   "control/control.c"
   "control/crawler.c"

@@ -30,6 +30,10 @@ dt_mobile_status dt_mobile_engine_set_whitebalance_gains(dt_mobile_engine *engin
                                                        const char *module,
                                                        const float *gains, size_t count,
                                                        char *error, size_t error_size);
+dt_mobile_status dt_mobile_engine_set_whitebalance_temperature(dt_mobile_engine *engine,
+                                                             const char *module,
+                                                             double kelvin, double tint,
+                                                             char *error, size_t error_size);
 dt_mobile_status dt_mobile_engine_set_whitebalance_setting(dt_mobile_engine *engine,
                                                          const char *module, int setting,
                                                          char *error, size_t error_size);

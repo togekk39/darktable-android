@@ -104,10 +104,17 @@ private fun JSONObject.readWhiteBalance(): WhiteBalance? = try {
         getString("settingLabel"), List(settings.length()) { index ->
             val choice = settings.getJSONObject(index)
             WhiteBalanceSetting(choice.curveOptionInt("id"), choice.getString("label"))
-        })
+        }, optJSONObject("temperature")?.readWhiteBalanceTemperature())
 } catch(_: org.json.JSONException) {
     null
 } catch(_: IllegalArgumentException) {
+    null
+}
+
+private fun JSONObject.readWhiteBalanceTemperature(): WhiteBalanceTemperature? = try {
+    checkedWhiteBalanceTemperature(getDouble("kelvin"), getDouble("tint"), getDouble("minKelvin"),
+        getDouble("maxKelvin"), getDouble("minTint"), getDouble("maxTint"))
+} catch(_: org.json.JSONException) {
     null
 }
 

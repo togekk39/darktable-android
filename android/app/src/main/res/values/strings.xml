@@ -6,7 +6,7 @@
   <string name="unofficial_notice">This is an unofficial Android application based on darktable.\nIt is not affiliated with or endorsed by the darktable project.</string>
   <string name="engine_unavailable">Opening photos, editing and exporting are not yet available in this build.</string>
   <string name="edit_tools">Editing tools</string>
-  <string name="tool_limitations">Exposure, selected color controls, crop, base curve and RGB curve nodes are available. Masks and additional tool settings are not yet available on mobile.</string>
+  <string name="tool_limitations">Exposure, white balance, selected color controls, crop, base curve and RGB curve nodes are available. Masks and additional tool settings are not yet available on mobile.</string>
   <string name="no_numeric_parameters">Controls for this tool are not yet available on mobile.</string>
   <string name="preview_description">Processed RAW preview</string>
   <string name="full_resolution_export">Export uses the original image.</string>
@@ -69,6 +69,11 @@
   <string name="white_balance_gain_range">Custom coefficients: %1$s–%2$s. Applying them selects user-defined white balance.</string>
   <string name="white_balance_apply_gains">Apply coefficients</string>
   <string name="white_balance_apply_setting">Apply white balance</string>
+  <string name="white_balance_temperature">Temperature and tint</string>
+  <string name="white_balance_kelvin">Temperature (K)</string>
+  <string name="white_balance_tint">Tint</string>
+  <string name="white_balance_temperature_range">Temperature: %1$s–%2$s K; tint: %3$s–%4$s. Applying selects user-defined white balance and normalizes green to 1.</string>
+  <string name="white_balance_apply_temperature">Apply temperature and tint</string>
   <string name="curve_applied">Solid line: applied curve. Drag a point or enter its coordinates.</string>
   <string name="curve_pending">Dashed line: pending control points. Apply to update the curve and photo.</string>
   <string name="curve_read_only">This channel cannot be edited in the current curve mode.</string>

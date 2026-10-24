@@ -8,7 +8,7 @@
 enum dt_mobile_mock_call {
   DT_MOCK_OPEN, DT_MOCK_MODULES, DT_MOCK_HISTORY, DT_MOCK_UNDO, DT_MOCK_REDO, DT_MOCK_PARAMS, DT_MOCK_PARAMETER,
   DT_MOCK_ENABLED, DT_MOCK_CURVE, DT_MOCK_RGB_CURVE_OPTIONS, DT_MOCK_WHITEBALANCE_GAINS,
-  DT_MOCK_WHITEBALANCE_SETTING, DT_MOCK_CROP, DT_MOCK_RENDER, DT_MOCK_FORMATS,
+  DT_MOCK_WHITEBALANCE_TEMPERATURE, DT_MOCK_WHITEBALANCE_SETTING, DT_MOCK_CROP, DT_MOCK_RENDER, DT_MOCK_FORMATS,
   DT_MOCK_EXPORT_SETTINGS, DT_MOCK_EXPORT,
   DT_MOCK_CANCEL, DT_MOCK_CLOSE, DT_MOCK_CONFIGURE, DT_MOCK_CALL_COUNT
 };
@@ -29,6 +29,7 @@ struct dt_mobile_mock_observations {
   float whitebalance_gains[4];
   size_t whitebalance_count;
   int whitebalance_setting;
+  double whitebalance_kelvin, whitebalance_tint;
   dt_mobile_curve_point curve_points[20];
   size_t curve_count;
   float crop_coordinates[4];
