@@ -9,7 +9,9 @@ processing engine disabled; this script does not change that setting.
 The configured ARM64/API 26 graph has now been built, linked, installed and
 staged in a fresh environment. An experimental engine-enabled development APK
 has also passed packaging and final runtime byte verification. Android device
-execution is not yet verified. See the dated [port status](PORTING_STATUS.md)
+installation, JNI/core loading and one Fusion GPR open have run on an ARM64/API
+26 emulator; first preview crashes, so editing/export execution has not passed.
+See the dated [port status](PORTING_STATUS.md)
 for the exact configuration, test results and remaining work.
 
 ```sh

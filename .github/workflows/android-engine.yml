@@ -187,7 +187,7 @@ jobs:
           # includes verifyDevDebugPrebuiltRuntimeApk on the final signed APK.
           android/gradlew --no-daemon --console=plain --max-workers=2 \
             --project-cache-dir "$task_root/gradle-project-cache" -p android \
-            :app:testDevDebugUnitTest :app:assembleDevDebug \
+            :app:testDevDebugUnitTest :app:assembleDevDebug :app:assembleDevDebugAndroidTest \
             -PdarktableRuntimeStage="$task_root/runtime-stage" \
             2>&1 | tee "$task_root/logs/gradle-build.log"
       - name: Collect audited APK, signature and matching runtime manifests
@@ -196,23 +196,31 @@ jobs:
           set -euo pipefail
           task_root="$RUNNER_TEMP/darktable-android-engine"
           apk=android/app/build/outputs/apk/dev/debug/app-dev-debug.apk
+          test_apk=android/app/build/outputs/apk/androidTest/dev/debug/app-dev-debug-androidTest.apk
           test -s "$apk"
+          test -s "$test_apk"
           # Gradle may add pinned application dependencies beyond the engine
           # stage. Inspect the final APK itself rather than inferring its layout.
           python3 "$task_root/check-native-alignment.py" --apk "$apk" \
             --output "$task_root/artifacts/apk-native-load-alignment.json"
           apksigner verify --verbose --min-sdk-version 26 "$apk" \
             | tee "$task_root/artifacts/apk-signature.txt"
+          apksigner verify --verbose --min-sdk-version 26 "$test_apk" \
+            | tee "$task_root/artifacts/test-apk-signature.txt"
           cp "$apk" "$task_root/artifacts/"
+          cp "$test_apk" "$task_root/artifacts/"
+          cp android/NATIVE_ENGINE_TESTS.md "$task_root/artifacts/"
           cp "$task_root/runtime-stage/manifest.json" "$task_root/artifacts/"
           cp "$task_root/runtime-stage/android-runtime-libraries.txt" "$task_root/artifacts/"
           git rev-parse HEAD > "$task_root/artifacts/source-commit.txt"
-          (cd "$task_root/artifacts" && sha256sum app-dev-debug.apk > app-dev-debug.apk.sha256)
+          (cd "$task_root/artifacts" && sha256sum app-dev-debug.apk app-dev-debug-androidTest.apk > APK-SHA256SUMS)
           cat > "$task_root/artifacts/VALIDATION.txt" <<'TEXT'
           Experimental ARM64/API 26 engine APK, built from the recorded source commit.
           Native build, staged dependency closure, 16 KiB ELF load alignment, final
           APK runtime hashes and APK signature were checked. No Android device
           installation, native loading, RAW/GPR editing or export was executed.
+          The accompanying instrumentation APK can run the separate device test
+          described in NATIVE_ENGINE_TESTS.md with an original RAW/GPR fixture.
           The bootstrap disables optional codecs and integrations; this artifact
           does not establish complete desktop RAW/format or editing feature parity.
           TEXT

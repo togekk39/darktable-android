@@ -151,6 +151,7 @@ def verify(root: Path, modules_path: Path, assets_root: Path | None = None,
     require(any(path.suffix == ".xml" and path.stat().st_size > 0
                 for path in paths if path.is_relative_to(runtime / "lensfun/version_1")),
             "stage has no nonempty Lensfun version_1 calibration XML")
+    stage.translation_files(runtime / "locale")
     return {"libraries": len(libraries), "configuredLibraries": len(configured), "assets": len(paths),
             "moduleManifestSha256": stage.sha256(modules_path)}
 

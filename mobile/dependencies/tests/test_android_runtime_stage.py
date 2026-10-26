@@ -68,7 +68,8 @@ class RuntimeStageTest(unittest.TestCase):
             libraries[name] = {"sha256": stage.sha256(path), "soname": elf.soname,
                                "needed": list(elf.needed), "searchPaths": elf.search_paths}
         assets = {}
-        for name in [*(f"data/{name}" for name in stage.REQUIRED_DATA), "lensfun/version_1/test.xml"]:
+        for name in [*(f"data/{name}" for name in stage.REQUIRED_DATA), "lensfun/version_1/test.xml",
+                     "locale/test/LC_MESSAGES/darktable.mo"]:
             path = self.runtime / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("test fixture\n")
@@ -104,7 +105,7 @@ class RuntimeStageTest(unittest.TestCase):
         output = self.directory / "generated"
         report = verifier.copy_verified(self.root, self.modules, output)
         self.assertEqual(report["libraries"], 5)
-        self.assertEqual(report["assets"], 5)
+        self.assertEqual(report["assets"], 6)
         self.assertEqual(verifier.copy_verified(self.root, self.modules, output), report)
         apk = self.apk()
         report = verifier.verify_apk(self.root, self.modules, apk)
@@ -124,6 +125,30 @@ class RuntimeStageTest(unittest.TestCase):
         apk = self.apk(transform=lambda name, data: None if name.endswith("cameras.xml") else data)
         with self.assertRaisesRegex(stage.StageError, "runtime assets do not match"):
             verifier.verify_apk(self.root, self.modules, apk)
+
+    def test_stage_missing_translations_fails_even_with_matching_manifest(self):
+        name = "locale/test/LC_MESSAGES/darktable.mo"
+        (self.runtime / name).unlink()
+        del self.manifest["assets"][name]
+        self.write_manifest()
+        with self.assertRaisesRegex(stage.StageError, "no nonempty LC_MESSAGES/darktable.mo"):
+            verifier.verify(self.root, self.modules)
+
+    def test_apk_missing_translation_fails(self):
+        apk = self.apk(transform=lambda name, data: None if name.endswith("darktable.mo") else data)
+        with self.assertRaisesRegex(stage.StageError, "runtime assets do not match"):
+            verifier.verify_apk(self.root, self.modules, apk)
+
+    def test_translation_must_have_the_language_directory_layout(self):
+        original = "locale/test/LC_MESSAGES/darktable.mo"
+        incorrect = "locale/LC_MESSAGES/darktable.mo"
+        path = self.runtime / incorrect
+        path.parent.mkdir(parents=True)
+        (self.runtime / original).rename(path)
+        self.manifest["assets"][incorrect] = self.manifest["assets"].pop(original)
+        self.write_manifest()
+        with self.assertRaisesRegex(stage.StageError, "no nonempty LC_MESSAGES/darktable.mo"):
+            verifier.verify(self.root, self.modules)
 
     def test_apk_extra_abi_fails(self):
         apk = self.apk(extra=[("lib/x86_64/libdarktable.so", b"wrong ABI")])

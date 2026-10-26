@@ -261,6 +261,14 @@ def manifest_seeds(prefix: Path) -> tuple[list[Path], list[str]]:
     return installed, names
 
 
+def translation_files(root: Path) -> list[Path]:
+    files = data_files(root)
+    if not any(path.relative_to(root).parts[1:] == ("LC_MESSAGES", "darktable.mo")
+               and path.stat().st_size > 0 for path in files):
+        raise StageError(f"runtime translations contain no nonempty LC_MESSAGES/darktable.mo: {root}")
+    return files
+
+
 def stage(args, closure: Closure):
     prefix = args.prefix.resolve(strict=True)
     output = args.output.absolute()
@@ -283,6 +291,8 @@ def stage(args, closure: Closure):
         raise StageError(f"Lensfun version_1 contains no nonempty XML calibration files: {lensfun}")
     asset_sources = [(path, Path("data") / path.relative_to(data)) for path in data_paths]
     asset_sources += [(path, Path("lensfun/version_1") / path.relative_to(lensfun)) for path in lensfun_paths]
+    locale = prefix / "share/locale"
+    asset_sources += [(path, Path("locale") / path.relative_to(locale)) for path in translation_files(locale)]
     report = {"abi": "arm64-v8a", "minimumApi": 26, "libraries": libraries,
               "configuredLibraries": configured_libraries,
               "systemLibraries": sorted(closure.system), "systemAllowlist": sorted(SYSTEM_LIBRARIES),

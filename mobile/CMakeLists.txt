@@ -179,6 +179,25 @@ if(DT_MOBILE_BUILD_TESTS)
     endforeach()
   endif()
   if(DT_MOBILE_WITH_DARKTABLE_ENGINE)
+    if(NOT ANDROID)
+      # Exercise the actual resolver with both desktop and Android data layouts
+      # without treating a host platform-macro test as device execution proof.
+      foreach(_dt_location_platform IN ITEMS desktop android)
+        set(_dt_location_target "dt_mobile_locations_${_dt_location_platform}_test")
+        add_executable(${_dt_location_target} tests/dt_mobile_locations_test.c ../src/common/file_location.c)
+        target_include_directories(${_dt_location_target} PRIVATE
+          "$<TARGET_PROPERTY:dt_mobile_core,INCLUDE_DIRECTORIES>")
+        target_compile_definitions(${_dt_location_target} PRIVATE
+          "$<TARGET_PROPERTY:dt_mobile_core,COMPILE_DEFINITIONS>")
+        target_compile_options(${_dt_location_target} PRIVATE
+          "$<TARGET_PROPERTY:dt_mobile_core,COMPILE_OPTIONS>")
+        target_link_libraries(${_dt_location_target} PRIVATE lib_darktable)
+        if(_dt_location_platform STREQUAL "android")
+          target_compile_definitions(${_dt_location_target} PRIVATE __ANDROID__)
+        endif()
+        add_test(NAME ${_dt_location_target} COMMAND ${_dt_location_target})
+      endforeach()
+    endif()
     add_executable(dt_mobile_engine_test tests/dt_mobile_engine_test.c)
     target_link_libraries(dt_mobile_engine_test PRIVATE dt_mobile_core)
     # The headless mask-ownership fixture uses real internal develop structs.

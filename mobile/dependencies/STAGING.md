@@ -29,6 +29,8 @@ copied into a temporary sibling and the complete directory is renamed into
 place after validation. The result contains:
 
 * `assets/darktable-runtime/data/`: the installed `share/darktable/` tree.
+* `assets/darktable-runtime/locale/`: the installed `share/locale/` tree,
+  including the original compiled darktable translation catalogs.
 * `assets/darktable-runtime/lensfun/version_1/`: the matching Lensfun calibration
   directory. When it is installed in the engine prefix, `--lensfun-data` can be
   omitted.
@@ -76,10 +78,13 @@ that proof.
 
 Runtime assets must contain the nonempty generated `darktablerc`,
 `rawspeed/cameras.xml`, `noiseprofiles.json` and `wb_presets.json`, as well as
-nonempty Lensfun calibration XML. All other installed darktable data is retained.
+nonempty Lensfun calibration XML and at least one nonempty
+`locale/*/LC_MESSAGES/darktable.mo` catalog. All installed darktable data and
+translations are retained. Rebuild stages produced before locale staging was
+added; they do not contain the complete Android bootstrap resources.
 ELF content, `.so` names and symlinks are rejected in data assets. Executable
 code stays in Android's extracted `nativeLibraryDir`, matching `RuntimeAssets`.
-No files from `prefix/bin/` are copied. Four required data files and an XML file
+No files from `prefix/bin/` are copied. Required data files, XML and catalogs
 are necessary checks, not proof of complete optional runtime data.
 
 For an isolated audit of an existing real Android probe and its shared closure,

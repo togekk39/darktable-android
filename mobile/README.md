@@ -11,7 +11,9 @@ The experimental Android ARM64/API 26 core, JNI and configured modules now
 build and link with real GTK3 Broadway, and their installed runtime has been
 staged and verified. An experimental engine-enabled APK has passed final
 runtime byte/hash verification. The default Gradle engine remains disabled;
-device loading and RAW/GPR execution are still pending.
+installation, JNI/core loading and one Fusion GPR open have run on an ARM64/API
+26 emulator. Its first native preview crashes, so Android editing/export has
+not passed.
 See [port status](dependencies/PORTING_STATUS.md) for the dated evidence and
 remaining limits.
 

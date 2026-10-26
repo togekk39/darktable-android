@@ -16,7 +16,10 @@ has no separate entry in RawSpeed's `cameras.xml`.
 
 The current Android dependency-only build still excludes the desktop engine.
 Shipping RawSpeed in that APK does not make it a working RAW/GPR editor. The
-complete native processing runtime and Android device validation remain needed.
+experimental complete configured runtime has now been packaged and installed
+separately, and one original Fusion GPR opened on an ARM64/API 26 emulator.
+Its first native preview crashes; Android GPR editing/export has not passed.
+See [port status](PORTING_STATUS.md) for current evidence and limits.
 
 ## Optional SDK reference and fallback utility
 

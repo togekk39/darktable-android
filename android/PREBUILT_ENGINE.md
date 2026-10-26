@@ -21,6 +21,7 @@ plugins and complete runtime data. The resulting stage must include:
 manifest.json
 android-runtime-libraries.txt
 assets/darktable-runtime/data/...
+assets/darktable-runtime/locale/...
 assets/darktable-runtime/lensfun/version_1/...
 jniLibs/arm64-v8a/*.so
 ```
@@ -51,7 +52,7 @@ the actual files AGP will package against the same manifest:
   `DT_NEEDED` closure. JNI must depend on `libdarktable.so`; a dependency-only
   JNI probe is rejected.
 * API 26 system-stub verification recorded by the staging producer, required
-  nonempty runtime data and Lensfun calibration XML.
+  nonempty runtime data, original translation catalogs and Lensfun calibration XML.
 * Native code only in the flat JNI directory, with no ELF or `.so` files in data
   assets, symlinks, extra ABIs or unexpected asset roots.
 

@@ -150,6 +150,38 @@ static gboolean has_runtime_data(const char *directory, char *error, size_t erro
       return FALSE;
     }
   }
+#ifdef __ANDROID__
+  /* Android cannot fall back to translations beside the system app_process
+   * executable. Reject an incomplete private installation before dt_init,
+   * whose desktop path resolver exits the process on missing directories. */
+  char canonical_data[PATH_MAX];
+  if(!realpath(directory, canonical_data))
+  {
+    if(error && error_size) snprintf(error, error_size, "unable to resolve runtime data directory");
+    return FALSE;
+  }
+  gchar *runtime_root = g_path_get_dirname(canonical_data);
+  gchar *localedir = g_build_filename(runtime_root, "locale", NULL);
+  g_free(runtime_root);
+  GDir *locales = g_dir_open(localedir, 0, NULL);
+  gboolean has_catalog = FALSE;
+  const char *locale;
+  while(locales && !has_catalog && (locale = g_dir_read_name(locales)))
+  {
+    gchar *catalog = g_build_filename(localedir, locale, "LC_MESSAGES", "darktable.mo", NULL);
+    GStatBuf info;
+    has_catalog = !g_stat(catalog, &info) && S_ISREG(info.st_mode)
+                  && info.st_size > 0 && !g_access(catalog, R_OK);
+    g_free(catalog);
+  }
+  if(locales) g_dir_close(locales);
+  g_free(localedir);
+  if(!has_catalog)
+  {
+    if(error && error_size) snprintf(error, error_size, "runtime locale directory has no readable darktable catalog");
+    return FALSE;
+  }
+#endif
   return TRUE;
 }
 

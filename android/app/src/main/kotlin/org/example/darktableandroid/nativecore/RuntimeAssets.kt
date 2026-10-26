@@ -46,6 +46,12 @@ object RuntimeAssets {
                 )
             }
         }
+        val hasTranslations = assets.list("$ASSET_ROOT/locale").orEmpty().any { language ->
+            runCatching {
+                assets.open("$ASSET_ROOT/locale/$language/LC_MESSAGES/darktable.mo").use { it.read() >= 0 }
+            }.getOrDefault(false)
+        }
+        if(!hasTranslations) throw IOException("Complete darktable runtime translations are missing from assets/$ASSET_ROOT/locale")
 
         val moduleDir = File(application.applicationInfo.nativeLibraryDir).canonicalFile
         if(!moduleDir.isDirectory) {
@@ -81,8 +87,7 @@ object RuntimeAssets {
             // Keep data's sibling resources too: Lensfun discovers its database
             // relative to the parent of datadir, rather than inside data/.
             copyTree(assets, ASSET_ROOT, staging)
-            val dataDir = checkedChild(staging, "data")
-            validateData(dataDir)
+            validateRuntime(staging)
             File(staging, COMPLETE).writeText(stamp)
             if(!staging.renameTo(destination)) throw IOException("Unable to commit complete runtime data")
         } finally {
@@ -94,14 +99,20 @@ object RuntimeAssets {
     private fun isComplete(directory: File, stamp: String): Boolean =
         runCatching {
             directory.isDirectory && File(directory, COMPLETE).readText() == stamp &&
-                validateData(File(directory, "data"))
+                validateRuntime(directory)
         }.getOrDefault(false)
 
-    private fun validateData(dataDir: File): Boolean {
+    private fun validateRuntime(directory: File): Boolean {
+        val dataDir = checkedChild(directory, "data")
         requiredFiles.forEach { relative ->
             val file = relative.split('/').fold(dataDir) { parent, name -> checkedChild(parent, name) }
             if(!file.isFile || file.length() == 0L) throw IOException("Required runtime data is missing or empty: $relative")
         }
+        val localeDir = checkedChild(directory, "locale")
+        if(localeDir.listFiles().orEmpty().none { language ->
+                val catalog = File(language, "LC_MESSAGES/darktable.mo")
+                language.isDirectory && catalog.isFile && catalog.length() > 0
+            }) throw IOException("Required runtime translations are missing or empty: locale")
         return true
     }
 

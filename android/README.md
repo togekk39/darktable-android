@@ -13,7 +13,9 @@ The experimental ARM64/API 26 core, JNI and configured modules now build/link
 with real GTK3 Broadway, and their runtime has been installed and staged.
 The explicit [prebuilt route](PREBUILT_ENGINE.md) packages that stage, and an
 experimental engine-enabled APK has passed final runtime byte/hash verification.
-Device loading and RAW editing remain unverified; see
+Installation, JNI/core loading and one original Fusion GPR open have run on an
+ARM64/API 26 emulator, but its first native preview crashes and editing/export
+has not passed; see
 [port status](../mobile/dependencies/PORTING_STATUS.md). This is not yet a verified
 standalone Android RAW editor or full desktop feature parity.
 
