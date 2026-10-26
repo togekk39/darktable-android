@@ -318,7 +318,12 @@ find_package(GTK3 3.24.15 REQUIRED)
 add_definitions("-DGDK_VERSION_MIN_REQUIRED=GDK_VERSION_3_24")
 #add_definitions("-DGDK_VERSION_MAX_ALLOWED=GDK_VERSION_MIN_REQUIRED")
 include_directories(SYSTEM ${GTK3_INCLUDE_DIRS})
-list(APPEND LIBS ${GTK3_LIBRARIES})
+if(NOT ANDROID OR NOT TARGET PkgConfig::DT_ANDROID_ENGINE)
+  list(APPEND LIBS ${GTK3_LIBRARIES})
+endif()
+# The Android engine links the complete, target-only imported pkg-config chain
+# below. Legacy GTK3_LIBRARIES contains bare jpeg/tiff names which CMake would
+# resolve to darktable's export plugin targets, creating a core/plugin cycle.
 
 # Check for libxml2 / broken cmake module can't be included in the foreach() below
 find_package(LibXml2 2.6 REQUIRED)

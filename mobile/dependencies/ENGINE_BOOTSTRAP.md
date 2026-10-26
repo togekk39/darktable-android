@@ -6,6 +6,12 @@ operation and export modules, runtime data, and JNI adapter without desktop
 applications or the image browser. The production Gradle build still has its
 processing engine disabled; this script does not change that setting.
 
+The configured ARM64/API 26 graph has now been built, linked, installed and
+staged in a fresh environment. An experimental engine-enabled development APK
+has also passed packaging and final runtime byte verification. Android device
+execution is not yet verified. See the dated [port status](PORTING_STATUS.md)
+for the exact configuration, test results and remaining work.
+
 ```sh
 git submodule update --init --recursive
 export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/27.2.12479018"
@@ -81,8 +87,8 @@ integrations. These settings reduce the initial porting graph; they do not
 meet the requested desktop feature and format parity. They must be revisited
 after the initial Android runtime works.
 
-Build verification is still incomplete. Source hosts required by the current
-graph include `ftp.gnu.org`, `gitlab.gnome.org`, `download.gnome.org`,
+Source hosts required by the current graph include `ftp.gnu.org`,
+`gitlab.gnome.org`, `download.gnome.org`,
 `sqlite.org`, and the SourceForge mirror selected for libuuid. Restricted build
 environments must
 allow those destinations or supply archives that match the source pins.
@@ -106,14 +112,21 @@ the NDK's shared `libomp.so`, which must be packaged alongside
 `libc++_shared.so` if the complete engine selects that runtime. A standalone
 archive/link check does not prove decoding or execution in the Android app.
 
-Before enabling the production engine, finish the Android core and module
-link, inspect every ELF dependency, stage the complete runtime data including
-Lensfun's database, package the extracted native libraries, and exercise JNI
-open/edit/export/cancel/close on Android with real RAW and GPR files. Host
-pipeline tests and standalone Android dependency link probes do not establish
-that the APK can perform those operations.
+The configured core/modules and JNI now link successfully, and the real stage
+includes their checked shared-library closure, runtime data and Lensfun database.
+The experimental APK has passed the final runtime-content checks. Before
+enabling the default Gradle engine, exercise JNI open/edit/export/cancel/close
+on Android with real RAW and GPR files. Host pipeline tests, native linking,
+staging and APK byte verification do not establish those Android operations or
+complete desktop feature parity.
 
 After a complete native build, use the offline [runtime staging tool](STAGING.md)
 to check the configured module manifest, shared-library closure and data before
 integrating the result into an APK. It retains native modules in a flat
 `jniLibs/arm64-v8a` directory and data in `assets/darktable-runtime`.
+
+The opt-in [engine APK workflow](../../.github/workflows/android-engine.yml)
+records these steps without enabling the default Gradle engine. It runs only
+through `workflow_dispatch`; it is not a push/PR build. See the
+[status notes](PORTING_STATUS.md) for its validation and GitHub's default-branch
+indexing requirement for the manual entry.

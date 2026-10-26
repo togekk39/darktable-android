@@ -7,6 +7,14 @@ export capabilities. A lighttable, gallery scan, and image browser are outside
 this interface. Darktable's internal image/history database is still required
 by its processing core; it does not imply a browser screen.
 
+The experimental Android ARM64/API 26 core, JNI and configured modules now
+build and link with real GTK3 Broadway, and their installed runtime has been
+staged and verified. An experimental engine-enabled APK has passed final
+runtime byte/hash verification. The default Gradle engine remains disabled;
+device loading and RAW/GPR execution are still pending.
+See [port status](dependencies/PORTING_STATUS.md) for the dated evidence and
+remaining limits.
+
 ## Implemented boundary
 
 `dt_mobile.h` exposes module descriptions, numeric parameter changes, dedicated
@@ -234,13 +242,15 @@ commands. This is a desktop host test, not Android device validation.
 
 ## Work still required for the complete target
 
-* Port the desktop core and dynamically loaded processing/format modules into
-  the Android build. Core and processing headers still depend on GTK, and iop
-  source files contain GUI and processing functions together. Setting the engine
-  flag alone cannot resolve this.
-* Package and initialize all required runtime data, color profiles, module
-  registries, presets and optional codecs. The existing three Android database
-  assets are insufficient for the complete desktop runtime.
+* Validate Android native loading, module discovery and runtime initialization
+  using the built/staged and APK-verified core, JNI and configured
+  processing/format/storage modules. Enabling the default Gradle engine still
+  requires device proof.
+* Complete runtime data and initialization for remaining desktop capabilities,
+  including Android font discovery/Fontconfig, text watermarks, optional codecs
+  and integrations. The verified stage retains the configured darktable data
+  and Lensfun database; the default three flat Android database assets alone
+  remain insufficient.
 * Add purpose-built touch controls and APIs for masks, white-balance spot sampling and camera presets, other curve modules,
   RGB curve middle-gray compensation, fixed crop proportions, an
   uncropped touch overlay, other geometry operations, blending,

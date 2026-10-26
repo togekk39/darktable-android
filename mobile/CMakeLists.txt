@@ -58,6 +58,10 @@ if(DT_MOBILE_WITH_DARKTABLE_ENGINE)
   add_dependencies(dt_mobile_modules lib_darktable
     ${_dt_mobile_runtime_iops} ${_dt_mobile_runtime_formats} ${_dt_mobile_runtime_storages}
     deploy darktablerc_file)
+  if(TARGET locales)
+    # The normal installation also installs these generated runtime files.
+    add_dependencies(dt_mobile_modules locales)
+  endif()
   add_dependencies(dt_mobile_core dt_mobile_modules)
   # Keep the public runtime target complete without making the core depend on
   # the JNI library which in turn links the core.

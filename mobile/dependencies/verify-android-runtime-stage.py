@@ -25,6 +25,16 @@ _spec.loader.exec_module(stage)
 
 MANAGED_MARKER = "verified-prebuilt-stage.json"
 
+# Compose uses the native path implementation from the strictly pinned
+# androidx.graphics:graphics-path:1.0.1 AAR. It is an application dependency,
+# not part of the independently staged desktop engine. Only its original ARM64
+# bytes may accompany the engine; unknown or changed native files still fail.
+# Official AAR SHA-256:
+# 8ca4032b6d79b351f0b59ad4b580eddbb9423e1652f7c958830687f1eee2ec03
+APP_NATIVE_LIBRARIES = {
+    "libandroidx.graphics.path.so": "41e9a793c43a0f4fddb19e33f346bace464f30f888ba7b9eaf96294ea115bfb6",
+}
+
 
 def require(condition: bool, message: str) -> None:
     if not condition:
@@ -199,10 +209,12 @@ def verify_apk(root: Path, modules: Path, apk: Path) -> dict:
     a private temporary directory; never load code from the archive.
     """
     verify(root, modules)
+    engine_libraries = set(read_manifest(root / "manifest.json")["libraries"])
     require(apk.is_file() and not apk.is_symlink(), f"APK is missing or not a regular file: {apk}")
     with zipfile.ZipFile(apk) as archive, tempfile.TemporaryDirectory(prefix="darktable-apk-audit-") as directory:
         target = Path(directory)
         names = set()
+        app_libraries = []
         for item in archive.infolist():
             name = item.filename
             require(name not in names, f"duplicate APK entry: {name}")
@@ -223,9 +235,26 @@ def verify_apk(root: Path, modules: Path, apk: Path) -> dict:
             destination.parent.mkdir(parents=True, exist_ok=True)
             with archive.open(item) as source, destination.open("xb") as output:
                 shutil.copyfileobj(source, output, length=1024 * 1024)
+            if name.startswith("lib/arm64-v8a/") and len(relative.parts) == 3:
+                library = relative.name
+                if library in APP_NATIVE_LIBRARIES:
+                    require(library not in engine_libraries,
+                            f"application native library collides with the engine: {library}")
+                    require(stage.sha256(destination) == APP_NATIVE_LIBRARIES[library],
+                            f"application native library hash changed: {library}")
+                    elf = stage.read_elf(destination)
+                    require(elf.soname is None or elf.soname == library,
+                            f"application native SONAME does not match filename: {library}")
+                    for needed in elf.needed:
+                        require(needed in engine_libraries or needed in stage.SYSTEM_LIBRARIES,
+                                f"unresolved application native dependency: {library} needs {needed}")
+                    app_directory = target / "app-native"
+                    app_directory.mkdir(exist_ok=True)
+                    destination.rename(app_directory / library)
+                    app_libraries.append(library)
         require("AndroidManifest.xml" in names, "archive has no AndroidManifest.xml")
         report = verify(root, modules, target / "assets", target / "jniLibs")
-    return {**report, "apkSha256": stage.sha256(apk)}
+    return {**report, "appNativeLibraries": len(app_libraries), "apkSha256": stage.sha256(apk)}
 
 
 def main() -> int:

@@ -6,6 +6,12 @@ the processing engine disabled. A complete native Android engine can instead be
 supplied explicitly as a verified prebuilt stage. This does not make an
 incomplete dependency probe into an editor or establish device support.
 
+The configured ARM64/API 26 engine has now been built, installed and staged.
+An experimental engine-enabled development APK has passed assembly and final
+runtime byte/hash verification. Device loading/execution remains unverified.
+The dated [port status](../mobile/dependencies/PORTING_STATUS.md) records the
+exact build and validation boundary.
+
 First finish the ARM64/API 26 [engine build](../mobile/dependencies/ENGINE_BOOTSTRAP.md),
 install it, and run the current [staging tool](../mobile/dependencies/STAGING.md)
 with `--ndk`. Use one matching engine version/configuration for the core, JNI,
@@ -71,6 +77,16 @@ duplicate ZIP entries and ambiguous runtime paths. Keeping symbols can increase
 APK size; produce stripped libraries before staging if a smaller artifact is
 needed, then recreate the stage and its hashes from those exact inputs.
 
+Compose also contributes `libandroidx.graphics.path.so` from the strictly pinned
+`androidx.graphics:graphics-path:1.0.1` dependency. It remains separate from the
+engine stage. APK verification accepts only its original ARM64 SHA-256
+`41e9a793c43a0f4fddb19e33f346bace464f30f888ba7b9eaf96294ea115bfb6`, validates
+its ELF/SONAME/search paths and dependency closure, and reports it separately as
+`appNativeLibraries`. Unknown or changed application native libraries still fail.
+The official Google Maven AAR has SHA-256
+`8ca4032b6d79b351f0b59ad4b580eddbb9423e1652f7c958830687f1eee2ec03`.
+Stage and generated-source verification retain their exact engine-only file list.
+
 The same final-artifact check can run on a copied APK or after an external
 signing step:
 
@@ -97,11 +113,15 @@ edit them or place them in source control. Remove the property to return to the
 default dependency-only route. A missing/incomplete stage fails explicitly and
 does not fall back to an engine-disabled APK.
 
-There is not yet a complete engine stage validated on Android. Full core/module
-linking, APK contents, native loader behavior and RAW/GPR edit/export/cancel on
-real devices still require verification. The configured manifest covers only
-the selected native build; optional codecs and unported editing controls remain
-separate work.
+The real stage contains the configured core, JNI, modules, matching runtime data
+and checked shared-library closure. The experimental APK's final runtime
+contents have passed verification; native loader behavior and RAW/GPR
+edit/export/cancel on real devices remain unverified. The configured manifest
+covers only the selected native build; optional codecs and
+unported editing controls remain separate work. The opt-in
+[engine workflow](../.github/workflows/android-engine.yml) records this route;
+it has not been executed, and its manual entry is subject to GitHub's
+default-branch indexing requirement described in the [status notes](../mobile/dependencies/PORTING_STATUS.md).
 
 Offline producer/verifier regression tests use synthetic ELF headers and ZIP
 fixtures, without loading or simulating the processing engine:

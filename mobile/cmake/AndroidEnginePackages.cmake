@@ -3,7 +3,18 @@
 if(NOT ANDROID OR NOT BUILD_MOBILE_LIBRARY_ONLY)
   message(FATAL_ERROR "AndroidEnginePackages is for the Android library-only engine build")
 endif()
-if(NOT ANDROID_ABI STREQUAL "arm64-v8a" OR NOT CMAKE_SYSTEM_VERSION STREQUAL "26"
+# The NDK's default legacy toolchain deliberately sets CMAKE_SYSTEM_VERSION=1
+# to disable CMake's separate NDK handling. Check the resolved Android API,
+# rather than confusing that sentinel with the compiler's target API.
+set(_dt_engine_android_api "${CMAKE_SYSTEM_VERSION}")
+if(DEFINED ANDROID_PLATFORM_LEVEL)
+  set(_dt_engine_android_api "${ANDROID_PLATFORM_LEVEL}")
+elseif(DEFINED CMAKE_ANDROID_API)
+  set(_dt_engine_android_api "${CMAKE_ANDROID_API}")
+elseif(DEFINED ANDROID_NATIVE_API_LEVEL)
+  set(_dt_engine_android_api "${ANDROID_NATIVE_API_LEVEL}")
+endif()
+if(NOT ANDROID_ABI STREQUAL "arm64-v8a" OR NOT _dt_engine_android_api STREQUAL "26"
    OR NOT VCPKG_TARGET_TRIPLET STREQUAL "arm64-android")
   message(FATAL_ERROR "The engine bootstrap requires the pinned Android ARM64/API 26 triplet")
 endif()

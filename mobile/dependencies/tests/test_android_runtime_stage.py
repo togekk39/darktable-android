@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import stat
@@ -10,6 +11,7 @@ import struct
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import warnings
 import zipfile
 
@@ -22,13 +24,16 @@ _spec.loader.exec_module(verifier)
 stage = verifier.stage
 
 
-def elf_bytes(soname: str, needed: tuple[str, ...] = ()) -> bytes:
+def elf_bytes(soname: str, needed: tuple[str, ...] = (), search_path: str | None = None) -> bytes:
     """Only headers/dynamic strings required by read_elf; not executable code."""
     strings = bytearray(b"\0")
     entries = []
     for name, tag in [(soname, 14), *((name, 1) for name in needed)]:
         entries.append((tag, len(strings)))
         strings.extend(name.encode("ascii") + b"\0")
+    if search_path is not None:
+        entries.append((29, len(strings)))
+        strings.extend(search_path.encode("ascii") + b"\0")
     dynamic_offset = 64 + 2 * 56
     string_offset = dynamic_offset + (len(entries) + 3) * 16
     entries.extend(((5, string_offset), (10, len(strings)), (0, 0)))
@@ -124,6 +129,69 @@ class RuntimeStageTest(unittest.TestCase):
         apk = self.apk(extra=[("lib/x86_64/libdarktable.so", b"wrong ABI")])
         with self.assertRaisesRegex(stage.StageError, "only the arm64-v8a ABI"):
             verifier.verify_apk(self.root, self.modules, apk)
+
+    def app_native(self, data=None):
+        name = "libandroidx.graphics.path.so"
+        if data is None:
+            data = elf_bytes(name, ("libc.so", "libdarktable.so"))
+        self.app_pin = patch.dict(verifier.APP_NATIVE_LIBRARIES,
+                                  {name: hashlib.sha256(data).hexdigest()}, clear=True)
+        self.app_pin.start()
+        self.addCleanup(self.app_pin.stop)
+        return (f"lib/arm64-v8a/{name}", data)
+
+    def test_pinned_application_native_library_is_verified_separately(self):
+        apk = self.apk(extra=[self.app_native()])
+        report = verifier.verify_apk(self.root, self.modules, apk)
+        self.assertEqual(report["libraries"], 5)
+        self.assertEqual(report["appNativeLibraries"], 1)
+
+    def test_application_native_library_changed_bytes_fail(self):
+        name, data = self.app_native()
+        apk = self.apk(extra=[(name, data + b"changed")])
+        with self.assertRaisesRegex(stage.StageError, "application native library hash changed"):
+            verifier.verify_apk(self.root, self.modules, apk)
+
+    def test_application_native_library_unresolved_dependency_fails(self):
+        entry = self.app_native(elf_bytes("libandroidx.graphics.path.so", ("libmissing.so",)))
+        apk = self.apk(extra=[entry])
+        with self.assertRaisesRegex(stage.StageError, "unresolved application native dependency"):
+            verifier.verify_apk(self.root, self.modules, apk)
+
+    def test_application_native_library_wrong_machine_fails(self):
+        data = bytearray(elf_bytes("libandroidx.graphics.path.so"))
+        struct.pack_into("<H", data, 18, 62)  # x86_64, despite its ARM64 ZIP path.
+        apk = self.apk(extra=[self.app_native(bytes(data))])
+        with self.assertRaisesRegex(stage.StageError, "expected an AArch64 ET_DYN library"):
+            verifier.verify_apk(self.root, self.modules, apk)
+
+    def test_application_native_library_wrong_abi_directory_fails(self):
+        name, data = self.app_native()
+        apk = self.apk(extra=[(name.replace("arm64-v8a", "x86_64"), data)])
+        with self.assertRaisesRegex(stage.StageError, "only the arm64-v8a ABI"):
+            verifier.verify_apk(self.root, self.modules, apk)
+
+    def test_application_native_library_wrong_soname_fails(self):
+        apk = self.apk(extra=[self.app_native(elf_bytes("libwrong.so"))])
+        with self.assertRaisesRegex(stage.StageError, "application native SONAME"):
+            verifier.verify_apk(self.root, self.modules, apk)
+
+    def test_application_native_library_unsafe_search_path_fails(self):
+        entry = self.app_native(elf_bytes("libandroidx.graphics.path.so", search_path="/host/libs"))
+        apk = self.apk(extra=[entry])
+        with self.assertRaisesRegex(stage.StageError, "incompatible with a flat nativeLibraryDir"):
+            verifier.verify_apk(self.root, self.modules, apk)
+
+    def test_unknown_application_native_library_fails(self):
+        apk = self.apk(extra=[("lib/arm64-v8a/libunknown.so", elf_bytes("libunknown.so"))])
+        with self.assertRaisesRegex(stage.StageError, "native files do not match"):
+            verifier.verify_apk(self.root, self.modules, apk)
+
+    def test_application_native_allowlist_does_not_relax_stage_verification(self):
+        name, data = self.app_native()
+        (self.native / Path(name).name).write_bytes(data)
+        with self.assertRaisesRegex(stage.StageError, "native files do not match"):
+            verifier.verify(self.root, self.modules)
 
     def test_apk_duplicate_native_entry_fails(self):
         with warnings.catch_warnings():

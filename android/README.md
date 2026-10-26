@@ -6,11 +6,16 @@ Open this `android/` directory in Android Studio. Install Android SDK 35, NDK 27
 The Android UI opens one document directly into the editor, with no image browser.
 It now includes controls generated from reviewed desktop scalar parameters,
 dedicated basecurve and RGB curve node editors, white-balance temperature/tint and coefficients/settings, a freehand crop editor,
-session undo/redo, and a system document destination for native exports. The current
-Android build still sets `DT_MOBILE_WITH_DARKTABLE_ENGINE=OFF`: the desktop core
-and its plugins depend on GTK and other libraries that have not been ported into
-the Android build. This APK therefore reports that processing is unavailable and
-disables opening images. It is not a functioning standalone RAW editor yet.
+session undo/redo, and a system document destination for native exports. The
+default Gradle build still sets `DT_MOBILE_WITH_DARKTABLE_ENGINE=OFF`; that
+dependency-only route reports processing unavailable and disables image opening.
+The experimental ARM64/API 26 core, JNI and configured modules now build/link
+with real GTK3 Broadway, and their runtime has been installed and staged.
+The explicit [prebuilt route](PREBUILT_ENGINE.md) packages that stage, and an
+experimental engine-enabled APK has passed final runtime byte/hash verification.
+Device loading and RAW editing remain unverified; see
+[port status](../mobile/dependencies/PORTING_STATUS.md). This is not yet a verified
+standalone Android RAW editor or full desktop feature parity.
 
 The numeric bridge deliberately exposes an audited subset: exposure/black
 correction and compensation switches, Velvia strength/bias, Lab color contrast,
@@ -72,7 +77,7 @@ actually be built and initialized on the device.
 
 ## Native runtime data
 
-`RuntimeAssets.initializeNative` prepares and configures a future engine-enabled
+`RuntimeAssets.initializeNative` prepares and configures an explicit engine-enabled
 build. It requires the complete matching runtime tree under APK assets
 `darktable-runtime/`, recursively extracts it into a private, installation
 version-specific directory beneath `filesDir/darktable-runtime/`, and commits
@@ -107,8 +112,11 @@ still goes through native validation and cannot replace an active session's data
 The experimental [runtime staging tool](../mobile/dependencies/STAGING.md)
 prepares this tree and its native-library closure from a complete installed
 Android engine. The explicit [prebuilt engine route](PREBUILT_ENGINE.md)
-consumes a complete verified stage when selected by a project property. The full
-engine build, APK packaging and device execution still need verification.
+consumes the verified stage when selected by a project property. Native
+build/link, staging and final APK runtime-content validation have passed for the
+configured bootstrap. Installer extraction, native loading and device execution
+remain pending. Disabled optional codecs and unported controls remain separate
+work.
 
 ## Restoring the Gradle Wrapper binary
 

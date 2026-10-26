@@ -5,8 +5,10 @@
 **previously built and installed** ARM64
 Android library-only engine. It does not build missing dependencies, modify ELF
 files, enable the Gradle engine flag, build an APK, or prove Android execution.
-The complete Android core/GTK graph still needs to build successfully before a
-full engine installation can be staged and tested.
+The configured Android core/GTK graph has now been built and installed, and a
+real stage has passed these checks. An experimental engine-enabled APK has
+also passed final runtime-content validation. Android loading/execution remain
+unverified; see [port status](PORTING_STATUS.md).
 
 After the experimental root engine build succeeds, install that exact build to
 a fresh private prefix. Use the same build configuration throughout:
@@ -67,9 +69,10 @@ are treated as Android API 26 system libraries. With `--ndk`, the tool also
 checks their AArch64 API 26 stubs. Other libraries must be packaged; specifically,
 `libc++_shared.so` and `libomp.so` are resolved from the NDK and copied when
 needed. Linux names such as `libc.so.6`, X11 libraries and host executables are
-not allowed to pass as Android system dependencies. Native symbol resolution,
-Android API use, platform library namespaces and loading still need the actual
-NDK link checks and device execution; a DT_NEEDED closure is not that proof.
+not allowed to pass as Android system dependencies. Native link checks validate
+compiled symbol references; Android API behavior, platform library namespaces
+and loading still require device execution. A DT_NEEDED closure alone is not
+that proof.
 
 Runtime assets must contain the nonempty generated `darktablerc`,
 `rawspeed/cameras.xml`, `noiseprofiles.json` and `wb_presets.json`, as well as
@@ -93,9 +96,10 @@ This mode prints a JSON report and does not create assets or a staging directory
 The actual LibRaw parity and Lensfun ARM64/API 26 probes can be audited this way.
 The optional [prebuilt Gradle route](../../android/PREBUILT_ENGINE.md) consumes
 these verified sources without configuring a second dependency-only JNI build.
-Full engine staging, installer extraction, module discovery and device RAW/GPR
-edit/export validation remain pending until the whole native engine graph is
-available. Third-party license/source distribution obligations
+The real engine stage is available for the configured bootstrap graph. Installer
+extraction, module discovery and RAW/GPR edit/export still need Android device
+validation. Disabled optional codecs and runtime features are not added by
+staging. Third-party license/source distribution obligations
 also remain with the final packaged build; this tool copies runtime files only.
 
 After packaging, audit the exact final APK with the companion verifier:
