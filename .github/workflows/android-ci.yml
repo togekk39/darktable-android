@@ -70,7 +70,7 @@ jobs:
         run: |
           cmake --build build/mobile-engine --parallel 2 --target \
             dt_mobile_engine_test dt_mobile_raw_engine_test dt_mobile_rawspeed_gpr_test dt_mobile_api_test \
-            dt_mobile_mock_api_test dt_mobile_gpr_test \
+            dt_mobile_mock_api_test dt_mobile_gpr_test dt_mobile_temperature_test \
             dt_mobile_locations_desktop_test dt_mobile_locations_android_test
           ctest --test-dir build/mobile-engine -R '^dt_mobile_' --output-on-failure
       - uses: actions/upload-artifact@v4
@@ -88,6 +88,8 @@ jobs:
       - uses: actions/setup-java@v4
         with: {distribution: temurin, java-version: "17"}
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
       - name: Install pinned Android tools
         run: |
           sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
