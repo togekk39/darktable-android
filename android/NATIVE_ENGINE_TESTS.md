@@ -61,11 +61,14 @@ private files directory. No original input is overwritten.
 The single execution test checks the real engine and VC-5 capability bits,
 runtime extraction/configuration, original RAW open, actual preview pixels,
 exposure changes, Kelvin/tint through the shared desktop calculation core,
-pixel-exact undo/redo, native full-size PNG export and Android PNG decoding,
+pixel-exact undo/redo, new default exposure instances with independent settings,
+topology undo/redo and retired-selector rejection, native full-size PNG export and Android PNG decoding,
 source SHA-256 protection, and close/reopen with the original pixels restored.
 The PNG check establishes full dimensions and decodability; it does not compare
 that export against a second unedited full-resolution export. Preview edit
 changes are compared separately.
+The current test requires the native `canCreateInstance` capability and fails an
+older engine instead of skipping those checks. Use a matching main/test APK pair.
 
 `files/engine-smoke/result.json` records the device/API/ABI, current phase,
 completed phase durations, preview hashes, original-source hashes and completed

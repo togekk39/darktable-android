@@ -33,6 +33,7 @@ actual Android execution; they do not all establish the same scope:
 | Real runtime stage | 109 native libraries and 805 data files verified | Adds NDK `libc++_shared.so` and `libomp.so`; matching darktable data, 36 original translation catalogs and Lensfun database retained |
 | Final development APK | Assemble and final runtime verifier passed | 109 engine/runtime libraries, 107 configured targets, 805 data files and one separately pinned AndroidX application native library; 110 native libraries in total |
 | Compact installation APK | 40,413,700 bytes; signature and final runtime verifier passed | Fresh CMake `--strip` installation reduces configured libraries from 241,128,512 to 45,914,616 bytes. All allocated sections, including `.text` and `.rodata`, and all load-segment fields match the original 107 libraries exactly |
+| New default-instance APK at local `e084d6f085` | 40,423,928 bytes; build, signature and final runtime verifier passed | Fresh rebuilt 107 targets, 109 staged libraries, 805 data files and 110 final APK libraries; all 2,311 allocated sections and load/dynamic metadata retained exactly through stripping. Paired instrumentation APK contains the new instance checks; their Android execution remains pending |
 | APK signature and manifest | SDK signature verification passed using v2 signing; ARM64, minimum API 26, target API 35 | Development/debug certificate; signature and manifest checks do not establish installation or native execution |
 | Native load alignment | Every staged library and all 110 final APK libraries have 16 KiB `PT_LOAD` alignment | This is ELF validation, not execution on a 4 KiB or 16 KiB Android device |
 | Android installation and JNI/core loading | Passed on ARM64/API 26 emulator | Signed APK installation, real native capability mask 3 and private runtime extraction/configuration |
@@ -40,18 +41,26 @@ actual Android execution; they do not all establish the same scope:
 | Initial API 26 JNI preview/edit/export run | Failed at first preview | SIGSEGV in `lowpass.c` brightness LUT's OpenMP outlined loop; that run stopped before exposure, Kelvin/tint, undo/redo and full-size export |
 | API 28 instruction diagnostic | Passed with host `singlestep on`; failed in normal host mode | Same original executable and Android image; all 65,536 values exact, allocation canaries intact, exit 0 in single-step mode. This is not the JNI engine test |
 | API 28 framework boot | Completed with host `singlestep on` | `sys.boot_completed=1`, boot animation exited successfully and SELinux remained enforcing; full engine JNI execution in this mode is still pending |
+| API 28 JNI original preview and exposure | Passed in the preserved compact APK run | Fixed host instruction timing and single-step mode; actual original Fusion GPR preview returned, exposure changed pixels, and undo/redo restored exact previews. Kelvin/tint, export and final close/reopen checks are still running |
 
 The compact installation APK has SHA-256
 `b4ebf6195869ae0f80f42dffda21839c66271a3d841ef67b725cc3327ed7ce72`.
-It is retained at `work/android-build/_app/outputs/apk/dev/debug/app-dev-debug.apk`
-and `work/deliverables/darktable-android-engine-stripped-dev-debug.apk`, with a
-matching checksum and build audit. The full-symbol APK
+It is retained at `work/deliverables/darktable-android-engine-stripped-dev-debug.apk`,
+with a matching checksum and build audit. The full-symbol APK
 (`e6f045f7a07b2851f775b96ab91330b87576b985cc617264d3ca42731cedfaaf`)
 remains separately at `work/deliverables/darktable-android-engine-dev-debug.apk`;
 its matching runtime manifest and native audit also remain there. Original
 build libraries retain their debug symbols. The older pre-resource-fix APK is
 `darktable-android-engine-before-private-path-fix.apk`. Generated binaries and
 build/test caches are not committed to Git.
+
+The newer default-instance APK is
+`work/deliverables/darktable-android-engine-instances-dev-debug.apk`, SHA-256
+`734cfbdafff4cbac0f69cd7fb00f6ff5e0d25f61dd0044d80ad441be4840d225`.
+Its paired test APK has SHA-256
+`228022cacd52d795d5e36002d184883dfb1bb5594e04e16fb32545a50f289b20`.
+Both signatures, the exact runtime bytes and native alignment were verified;
+the new instance feature has not yet run on Android.
 
 Its separate application native dependency is the pinned AndroidX
 `graphics-path:1.0.1` library described in the
@@ -105,6 +114,16 @@ the original API 28 Bionic linker/libc/libdl files; user-mode execution is not
 Android guest or darktable execution proof. Together these results narrow the
 investigation to execution-context differences without proving a specific
 translation fault. No production algorithm or vectorization flags were changed.
+A subsequent cold boot using host `-singlestep` and fixed instruction timing
+`-icount shift=0,align=off,sleep=on` reached framework boot completion and
+SELinux enforcing. The original vector diagnostic passed again, both earlier
+compact APKs installed successfully, and the real JNI test reached native
+capabilities, runtime extraction/configuration and the original GPR open phase.
+The run is still in progress; it is using the preserved earlier APK pair, not
+the new instance APK. Earlier single-step installation attempts timed out;
+the host timing settings must accompany any eventual result. They do not alter
+guest image bytes or production processing algorithms and establish no device
+performance claim.
 See
 [NATIVE_ENGINE_TESTS.md](../../android/NATIVE_ENGINE_TESTS.md) for the actual
 JNI test, required original fixture and pass criteria. Building the test APK
