@@ -20,9 +20,10 @@ actual Android execution; they do not all establish the same scope:
 | Check | Result | Scope |
 | --- | --- | --- |
 | Network policy | Enforced, including the five requested source hosts; all five returned proxy CONNECT 200 on fresh 2026-10-27 HEAD checks | Four source responses were HTTP 200; SourceForge returned HTTP 301 without following the redirect. Earlier dependency downloads retained proxy/TLS checks and pinned archive hashes |
-| Android unit tests | 42 passed, no failures/errors/skips | Kotlin/Compose and adapter boundaries; not native Android execution |
+| Android unit tests | 47 passed, no failures/errors/skips | Includes five new instance capability/selector/selection regressions; Kotlin/Compose and adapter boundaries, not native Android execution |
 | Android lint | 0 errors, 10 existing warnings | `lintDevDebug` |
-| Desktop-backed mobile engine tests | 25 passed | Six original official GPR samples through RawSpeed, full-resolution PNG export/redecode, Kelvin/tint pixels and undo/redo; adds desktop/Android resource resolver fixtures, with final core/modules rebuilt |
+| Desktop-backed mobile engine tests | 25 passed in 165.67 seconds after the instance changes | Six original official GPR samples through RawSpeed, full-resolution PNG export/redecode, Kelvin/tint pixels and undo/redo; desktop/Android resource resolver fixtures and original core/modules rebuilt |
+| New default module instances | Native host regression passed | Original creation/order/default helpers; independent parameters, exact pixels and topology undo/redo, stable IDs, stale-ID rejection and 64-step history. Linux cleanup instrumentation preserves retained redo objects and confirms reclamation of 1 + 80 abandoned instances; Android execution remains pending |
 | Offline staging/APK verifier tests | 23 passed | Synthetic ELF/ZIP fixtures exercise validation, including pinned application native libraries and required original translation catalogs; they do not simulate the engine |
 | GitHub CI at `80bb9d3` | All three jobs passed | Desktop Release 25/25, Debug 25/25, standalone host 2/2, runtime tooling 23/23, Android lint/unit tasks and dev APK assembly; the CI APK uses the default dependency-only route |
 | Shared white-balance calculation | 35,057 Kelvin/tint pairs match the original desktop calculations | XYZ values are byte-identical and the inverse float results match; Kotlin contains no replacement formula |
@@ -126,13 +127,20 @@ full-engine GitHub Actions build has not yet been verified. Branch push events
 avoid depending on indexing a manual entry on the default branch. This does
 not modify the default branch or enable the normal dependency-only Gradle
 engine. Documentation-only changes are excluded from this expensive build.
+The updated workflow is currently committed locally. GitHub reads remain working,
+but `create_tree` and then a narrower `create_blob` call produced no response and
+were interrupted; neither produced its expected object. No commit/ref write was
+attempted, no rejection reason was returned, and the remote remains `80bb9d38`.
+The new full-engine workflow has therefore not been triggered remotely.
 
 The configured bootstrap still disables JPEG XL, AVIF/HEIF, JPEG 2000, WebP,
 OpenEXR, XCF, G'MIC, AI, OpenCL, Lua, camera tethering and desktop integrations.
 The counts above describe that configuration, not all desktop capabilities.
 Android font discovery/Fontconfig setup and SVG text watermark rendering also
-need runtime integration and validation. Masks/blending controls, multiple
-instances, styles, persistent histories, other compound editors and remaining
+need runtime integration and validation. Creating default module instances is
+implemented with host-tested topology undo/redo; copying current settings/masks,
+deleting and reordering instances remain unavailable. Masks/blending controls,
+styles, persistent histories, other compound editors and remaining
 export settings are still incomplete. A complete camera/format comparison
 matrix and device lifecycle, memory, cancellation and RAW-to-export checks
 remain required before claiming full desktop parity or a working standalone

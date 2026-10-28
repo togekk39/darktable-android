@@ -6,7 +6,9 @@
 #include "dt_mobile_export_engine_checks.h"
 #include "dt_mobile_rgb_curve_options_checks.h"
 #include "dt_mobile_whitebalance_checks.h"
+#include "develop/imageop.h"
 #include <dirent.h>
+#include <limits.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -21,6 +23,16 @@
 #define ENGINE_OK(call) do { dt_mobile_status status = (call); \
   if(status != DT_MOBILE_OK) { fprintf(stderr, "%s: %s\n", #call, \
     session ? dt_mobile_last_error(session) : dt_mobile_open_error()); goto failed; } } while(0)
+
+#ifdef DT_MOBILE_TEST_INSTANCE_RECLAMATION
+static size_t reclaimed_instances;
+void __real_dt_iop_cleanup_module(dt_iop_module_t *module);
+void __wrap_dt_iop_cleanup_module(dt_iop_module_t *module)
+{
+  reclaimed_instances++;
+  __real_dt_iop_cleanup_module(module);
+}
+#endif
 
 static uint32_t read_be32(const unsigned char *p)
 {
@@ -80,6 +92,190 @@ static int parameter_equals(const char *json, const char *operation, const char 
   char *end;
   const double actual = strtod(value + strlen(",\"value\":"), &end);
   return end != value + strlen(",\"value\":") && isfinite(actual) && actual == expected;
+}
+
+static int instance_checks(dt_mobile_session *session)
+{
+  char *baseline = NULL, *metadata = NULL, *history = NULL, *after_failure = NULL;
+  char *first = NULL, *second = NULL, *branch = NULL, *previous = NULL, *next = NULL;
+  uint8_t *original = NULL, *created = NULL, *edited = NULL, *restored = NULL;
+  int width = 0, height = 0, other_width = 0, other_height = 0;
+  int success = 0;
+  ENGINE_OK(dt_mobile_set_parameter(session, "exposure", "exposure", 0.25));
+  ENGINE_OK(dt_mobile_modules(session, &baseline));
+  CHECK(module_has(baseline, "exposure", "\"canCreateInstance\":true"));
+  CHECK(module_has(baseline, "temperature", "\"canCreateInstance\":false"));
+  ENGINE_OK(dt_mobile_render_preview(session, 96, 96, &original, &width, &height));
+  ENGINE_OK(dt_mobile_history(session, &history));
+  first = (char *)1;
+  CHECK(dt_mobile_new_instance(session, "temperature", &first) == DT_MOBILE_ERROR_UNSUPPORTED);
+  CHECK(first == NULL);
+  first = (char *)1;
+  CHECK(dt_mobile_new_instance(session, "exposure@2147483647", &first) == DT_MOBILE_ERROR_UNSUPPORTED);
+  CHECK(first == NULL);
+  ENGINE_OK(dt_mobile_history(session, &after_failure));
+  CHECK(!strcmp(history, after_failure));
+  dt_mobile_free_buffer(after_failure); after_failure = NULL;
+  dt_mobile_free_buffer(history); history = NULL;
+  ENGINE_OK(dt_mobile_modules(session, &metadata));
+  CHECK(!strcmp(baseline, metadata));
+  dt_mobile_free_buffer(metadata); metadata = NULL;
+
+#ifdef DT_MOBILE_TEST_INSTANCE_RECLAMATION
+  const size_t retained_before = reclaimed_instances;
+#endif
+  ENGINE_OK(dt_mobile_new_instance(session, "exposure", &first));
+  CHECK(first && !strcmp(first, "exposure@1"));
+  ENGINE_OK(dt_mobile_modules(session, &metadata));
+  CHECK(module_has(metadata, first, "\"enabled\":true"));
+  CHECK(parameter_equals(metadata, first, "exposure", 0.0));
+  CHECK(parameter_equals(metadata, "exposure", "exposure", 0.25));
+  dt_mobile_free_buffer(metadata); metadata = NULL;
+  ENGINE_OK(dt_mobile_render_preview(session, 96, 96, &created, &other_width, &other_height));
+  CHECK(width == other_width && height == other_height);
+  ENGINE_OK(dt_mobile_set_parameter(session, first, "exposure", 1.0));
+  ENGINE_OK(dt_mobile_render_preview(session, 96, 96, &edited, &other_width, &other_height));
+  CHECK(width == other_width && height == other_height);
+  CHECK(memcmp(created, edited, (size_t)width * height * 4));
+  ENGINE_OK(dt_mobile_undo(session));
+  ENGINE_OK(dt_mobile_render_preview(session, 96, 96, &restored, &other_width, &other_height));
+  CHECK(width == other_width && height == other_height);
+  CHECK(!memcmp(created, restored, (size_t)width * height * 4));
+  dt_mobile_free_buffer(restored); restored = NULL;
+  ENGINE_OK(dt_mobile_undo(session));
+  ENGINE_OK(dt_mobile_modules(session, &metadata));
+  CHECK(!strcmp(baseline, metadata));
+  dt_mobile_free_buffer(metadata); metadata = NULL;
+  ENGINE_OK(dt_mobile_render_preview(session, 96, 96, &restored, &other_width, &other_height));
+  CHECK(width == other_width && height == other_height);
+  CHECK(!memcmp(original, restored, (size_t)width * height * 4));
+  dt_mobile_free_buffer(restored); restored = NULL;
+  ENGINE_OK(dt_mobile_redo(session));
+  ENGINE_OK(dt_mobile_render_preview(session, 96, 96, &restored, &other_width, &other_height));
+  CHECK(width == other_width && height == other_height);
+  CHECK(!memcmp(created, restored, (size_t)width * height * 4));
+  dt_mobile_free_buffer(restored); restored = NULL;
+  ENGINE_OK(dt_mobile_redo(session));
+  ENGINE_OK(dt_mobile_modules(session, &metadata));
+  CHECK(parameter_equals(metadata, first, "exposure", 1.0));
+  dt_mobile_free_buffer(metadata); metadata = NULL;
+  ENGINE_OK(dt_mobile_render_preview(session, 96, 96, &restored, &other_width, &other_height));
+  CHECK(width == other_width && height == other_height);
+  CHECK(!memcmp(edited, restored, (size_t)width * height * 4));
+  dt_mobile_free_buffer(restored); restored = NULL;
+#ifdef DT_MOBILE_TEST_INSTANCE_RECLAMATION
+  CHECK(reclaimed_instances == retained_before); /* undo/redo owns the object */
+#endif
+
+  ENGINE_OK(dt_mobile_undo(session));
+  ENGINE_OK(dt_mobile_undo(session));
+  ENGINE_OK(dt_mobile_new_instance(session, "exposure", &branch));
+  CHECK(strcmp(first, branch));
+#ifdef DT_MOBILE_TEST_INSTANCE_RECLAMATION
+  CHECK(reclaimed_instances == retained_before + 1); /* discarded first branch */
+#endif
+  ENGINE_OK(dt_mobile_history(session, &history));
+  CHECK(dt_mobile_set_parameter(session, first, "exposure", 1.0) == DT_MOBILE_ERROR_UNSUPPORTED);
+  CHECK(dt_mobile_set_enabled(session, first, 1) == DT_MOBILE_ERROR_UNSUPPORTED);
+  next = (char *)1;
+  CHECK(dt_mobile_new_instance(session, first, &next) == DT_MOBILE_ERROR_UNSUPPORTED && next == NULL);
+  ENGINE_OK(dt_mobile_history(session, &after_failure));
+  CHECK(!strcmp(history, after_failure));
+  dt_mobile_free_buffer(after_failure); after_failure = NULL;
+  dt_mobile_free_buffer(history); history = NULL;
+  ENGINE_OK(dt_mobile_undo(session));
+  previous = branch; branch = NULL;
+  /* Repeated redo-branch replacement checks stale identifiers and the complete
+   * visible topology. On Linux the linker wrapper also counts original module
+   * cleanup calls, so visibility alone cannot conceal accumulated retirements. */
+#ifdef DT_MOBILE_TEST_INSTANCE_RECLAMATION
+  const size_t reclaimed_before = reclaimed_instances;
+#endif
+  for(int iteration = 0; iteration < 80; iteration++)
+  {
+    ENGINE_OK(dt_mobile_new_instance(session, "exposure", &next));
+    CHECK(next && previous && strchr(next, '@') && strchr(previous, '@'));
+    CHECK(strtol(strchr(next, '@') + 1, NULL, 10) > strtol(strchr(previous, '@') + 1, NULL, 10));
+    CHECK(dt_mobile_set_enabled(session, previous, 1) == DT_MOBILE_ERROR_UNSUPPORTED);
+    ENGINE_OK(dt_mobile_undo(session));
+    ENGINE_OK(dt_mobile_modules(session, &metadata));
+    CHECK(!strcmp(baseline, metadata));
+    dt_mobile_free_buffer(metadata); metadata = NULL;
+    dt_mobile_free_buffer(previous); previous = next; next = NULL;
+  }
+#ifdef DT_MOBILE_TEST_INSTANCE_RECLAMATION
+  CHECK(reclaimed_instances - reclaimed_before == 80);
+#endif
+  for(int iteration = 0; iteration < 70; iteration++)
+    ENGINE_OK(dt_mobile_set_parameter(session, "exposure", "exposure", iteration % 2 ? 0.5 : 0.25));
+  ENGINE_OK(dt_mobile_history(session, &history));
+  CHECK(strstr(history, "\"position\":64,\"length\":64,\"limit\":64"));
+  dt_mobile_free_buffer(history); history = NULL;
+  for(int iteration = 0; iteration < 64; iteration++) ENGINE_OK(dt_mobile_undo(session));
+  CHECK(dt_mobile_undo(session) == DT_MOBILE_ERROR_INVALID_ARGUMENT);
+  for(int iteration = 0; iteration < 64; iteration++) ENGINE_OK(dt_mobile_redo(session));
+  CHECK(dt_mobile_set_enabled(session, previous, 1) == DT_MOBILE_ERROR_UNSUPPORTED);
+  ENGINE_OK(dt_mobile_new_instance(session, "exposure", &branch));
+  ENGINE_OK(dt_mobile_set_parameter(session, branch, "exposure", 0.75));
+  ENGINE_OK(dt_mobile_new_instance(session, branch, &second));
+  CHECK(strcmp(branch, second));
+  ENGINE_OK(dt_mobile_modules(session, &metadata));
+  CHECK(module_has(metadata, branch, "\"enabled\":true"));
+  CHECK(module_has(metadata, second, "\"enabled\":true"));
+  CHECK(parameter_equals(metadata, branch, "exposure", 0.75));
+  CHECK(parameter_equals(metadata, "exposure", "exposure", 0.5));
+  CHECK(parameter_equals(metadata, second, "exposure", 0.0));
+  dt_mobile_free_buffer(metadata); metadata = NULL;
+  ENGINE_OK(dt_mobile_undo(session));
+  ENGINE_OK(dt_mobile_undo(session));
+  ENGINE_OK(dt_mobile_undo(session));
+  ENGINE_OK(dt_mobile_modules(session, &metadata));
+  CHECK(!module_has(metadata, branch, "\"enabled\":"));
+  CHECK(!module_has(metadata, second, "\"enabled\":"));
+  dt_mobile_free_buffer(metadata); metadata = NULL;
+  ENGINE_OK(dt_mobile_redo(session));
+  ENGINE_OK(dt_mobile_redo(session));
+  ENGINE_OK(dt_mobile_redo(session));
+  ENGINE_OK(dt_mobile_modules(session, &metadata));
+  CHECK(module_has(metadata, branch, "\"enabled\":true"));
+  CHECK(module_has(metadata, second, "\"enabled\":true"));
+  success = 1;
+failed:
+  dt_mobile_free_buffer(baseline); dt_mobile_free_buffer(metadata);
+  dt_mobile_free_buffer(history); dt_mobile_free_buffer(after_failure);
+  if(first != (char *)1) dt_mobile_free_buffer(first);
+  dt_mobile_free_buffer(second); dt_mobile_free_buffer(branch);
+  dt_mobile_free_buffer(previous);
+  if(next != (char *)1) dt_mobile_free_buffer(next);
+  dt_mobile_free_buffer(original); dt_mobile_free_buffer(created);
+  dt_mobile_free_buffer(edited); dt_mobile_free_buffer(restored);
+  return success;
+}
+
+static int instance_priority_range_fixture(void)
+{
+  /* Check the original helper's overflow/rejection path before module loading
+   * or any topology/history allocation. No synthetic image processing occurs. */
+  dt_develop_t dev;
+  dt_iop_module_t base = { 0 };
+  int success = 0;
+  dt_dev_init(&dev, FALSE);
+  base.dev = &dev;
+  base.instance = 17;
+  base.multi_priority = INT_MAX;
+  dev.iop = g_list_append(NULL, &base);
+  GList *const original = dev.iop;
+  CHECK(dt_dev_module_duplicate_at_priority(&dev, &base, TRUE, 0) == NULL);
+  CHECK(dev.iop == original && dev.iop->data == &base && !dev.iop->next);
+  CHECK(!dev.history && !dev.iop_order_list && !dev.alliop);
+  base.multi_priority = 0;
+  CHECK(dt_dev_module_duplicate_at_priority(&dev, &base, TRUE, -1) == NULL);
+  CHECK(dev.iop == original && !dev.history && !dev.iop_order_list && !dev.alliop);
+  success = 1;
+failed:
+  g_list_free(dev.iop); dev.iop = NULL; /* stack-owned guard fixture */
+  dt_dev_cleanup(&dev);
+  return success;
 }
 
 static int history_checks(dt_mobile_session *session, const char *output,
@@ -206,6 +402,7 @@ int main(int argc, char **argv)
         == DT_MOBILE_ERROR_IO);
   ENGINE_OK(dt_mobile_open(argv[1], &session));
   CHECK(dt_mobile_headless_masks_fixture());
+  CHECK(instance_priority_range_fixture());
   ENGINE_OK(dt_mobile_history(session, &curve_json));
   CHECK(strstr(curve_json, "\"canUndo\":false,\"canRedo\":false,\"position\":0,\"length\":0"));
   dt_mobile_free_buffer(curve_json); curve_json = NULL;
@@ -432,6 +629,7 @@ int main(int argc, char **argv)
   CHECK(output_width == source_width && output_height == source_height);
   CHECK(export_settings_checks(session, argv[1], argv[2], source_width, source_height));
   CHECK(history_checks(session, argv[2], source_width, source_height));
+  CHECK(instance_checks(session));
   CHECK(export_midstream_cancel_checks(session, argv[2]));
   dt_mobile_cancel(session);
   CHECK(export_cancelled_settings_checks(session, argv[2]));

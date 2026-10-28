@@ -33,15 +33,17 @@ enum { MOBILE_HISTORY_LIMIT = 64 };
 typedef struct mobile_history_state {
   GList *history;
   GList *iop_order;
+  GList *active_modules;
   int history_end, iop_order_version;
-  /* Original chroma arrays are value-owned; module pointers remain stable
-   * throughout this adapter's single-instance develop lifetime. */
+  /* Original chroma arrays are value-owned. Module pointers are retained while
+   * any reachable snapshot owns their active topology or history. */
   dt_dev_chroma_t chroma;
 } mobile_history_state;
 struct dt_mobile_engine { dt_imgid_t image_id; dt_develop_t develop; atomic_bool cancelled; pthread_mutex_t operation_lock;
   dt_imageio_preview_cancel_t *preview_cancel;
   GPtrArray *history_states;
   guint history_position;
+  GHashTable *instance_priorities;
 };
 static pthread_mutex_t runtime_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t engine_work_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -59,21 +61,67 @@ static void free_history_state(gpointer data)
   if(!state) return;
   g_list_free_full(state->history, dt_dev_free_history_item);
   g_list_free_full(state->iop_order, free);
+  g_list_free(state->active_modules);
   g_free(state);
 }
 
 static mobile_history_state *capture_history_state(dt_develop_t *dev)
 {
   /* Use the same deep-copy helpers as the desktop history undo recorder.
-   * Module pointers refer to this develop's instances, whose lifetime remains
-   * stable: this adapter currently does not create/remove module instances. */
+   * Copy the active topology separately: history alone omits default modules.
+   * Retired module objects stay alive until no snapshot can reactivate them. */
   mobile_history_state *state = g_new0(mobile_history_state, 1);
   state->history = dt_history_duplicate(dev->history);
   state->history_end = dev->history_end;
   state->iop_order = dt_ioppr_iop_order_copy_deep(dev->iop_order_list);
   state->iop_order_version = dev->iop_order_version;
+  state->active_modules = g_list_copy(dev->iop);
   state->chroma = dev->chroma;
   return state;
+}
+
+static void retain_history_modules(GHashTable *reachable, const GList *history)
+{
+  for(const GList *item = history; item; item = item->next)
+  {
+    const dt_dev_history_item_t *entry = item->data;
+    if(entry->module) g_hash_table_add(reachable, entry->module);
+  }
+}
+
+static void reclaim_retired_instances(dt_mobile_engine *engine)
+{
+  dt_develop_t *dev = &engine->develop;
+  /* This adapter's develop has no pipeline pieces. Render/export build and
+   * destroy their separate upstream develops before releasing engine_work_lock.
+   * If a future adapter adds persistent pipes, retirement must wait for them. */
+  if(dev->full.pipe || dev->preview_pipe || dev->preview2.pipe || !dev->alliop) return;
+  GHashTable *reachable = g_hash_table_new(g_direct_hash, g_direct_equal);
+  for(const GList *item = dev->iop; item; item = item->next)
+    g_hash_table_add(reachable, item->data);
+  retain_history_modules(reachable, dev->history);
+  for(guint k = 0; engine->history_states && k < engine->history_states->len; k++)
+  {
+    const mobile_history_state *state = g_ptr_array_index(engine->history_states, k);
+    for(const GList *item = state->active_modules; item; item = item->next)
+      g_hash_table_add(reachable, item->data);
+    retain_history_modules(reachable, state->history);
+    if(state->chroma.temperature) g_hash_table_add(reachable, state->chroma.temperature);
+  }
+  if(dev->chroma.temperature) g_hash_table_add(reachable, dev->chroma.temperature);
+  for(GList *item = dev->alliop; item; )
+  {
+    GList *next = item->next;
+    dt_iop_module_t *module = item->data;
+    if(!g_hash_table_contains(reachable, module))
+    {
+      dev->alliop = g_list_delete_link(dev->alliop, item);
+      dt_iop_cleanup_module(module);
+      free(module);
+    }
+    item = next;
+  }
+  g_hash_table_unref(reachable);
 }
 
 static void record_history_state(dt_mobile_engine *engine)
@@ -89,6 +137,7 @@ static void record_history_state(dt_mobile_engine *engine)
   if(engine->history_states->len > MOBILE_HISTORY_LIMIT + 1)
     g_ptr_array_remove_index(engine->history_states, 0);
   engine->history_position = engine->history_states->len - 1;
+  reclaim_retired_instances(engine);
 }
 
 static void remove_runtime_directory(const char *path)
@@ -374,6 +423,24 @@ static dt_iop_module_t *find_module(dt_mobile_engine *engine, const char *identi
     if(!strcmp(current, identifier)) return module;
   }
   return NULL;
+}
+
+static int highest_instance_priority(const dt_mobile_engine *engine, const dt_iop_module_t *base)
+{
+  int maximum = engine->instance_priorities
+    ? GPOINTER_TO_INT(g_hash_table_lookup(engine->instance_priorities, base->op)) : 0;
+  for(const GList *item = engine->develop.iop; item; item = item->next)
+  {
+    const dt_iop_module_t *module = item->data;
+    if(module->instance == base->instance) maximum = MAX(maximum, module->multi_priority);
+  }
+  return maximum;
+}
+
+static gboolean can_create_instance(const dt_mobile_engine *engine, const dt_iop_module_t *module)
+{
+  return module && !dt_iop_is_hidden(module) && !(module->flags() & IOP_FLAGS_ONE_INSTANCE)
+         && highest_instance_priority(engine, module) < INT_MAX;
 }
 
 static size_t enum_entry_count(const dt_introspection_field_t *field)
@@ -1080,9 +1147,10 @@ dt_mobile_status dt_mobile_engine_modules(dt_mobile_engine *engine, char **json,
       ? g_strdup_printf("%s · %s", module->name(), module->multi_name) : g_strdup(module->name());
     json_string(description, label);
     g_free(label);
-    g_string_append_printf(description, ",\"enabled\":%s,\"canDisable\":%s,\"parameters\":[",
+    g_string_append_printf(description, ",\"enabled\":%s,\"canDisable\":%s,\"canCreateInstance\":%s,\"parameters\":[",
                            module->enabled ? "true" : "false",
-                           module->hide_enable_button ? "false" : "true");
+                           module->hide_enable_button ? "false" : "true",
+                           can_create_instance(engine, module) ? "true" : "false");
     parameter_json fields = { description, TRUE };
     if(module->have_introspection && module->get_introspection())
       visit_fields(module, module->get_introspection()->field, 0, "", 0, append_parameter, &fields);
@@ -1107,6 +1175,79 @@ static void save_module(dt_mobile_engine *engine, dt_iop_module_t *module, gbool
   sync_temperature_chroma(&engine->develop);
   dt_dev_write_history(&engine->develop);
   record_history_state(engine);
+}
+
+dt_mobile_status dt_mobile_engine_new_instance(dt_mobile_engine *engine, const char *identifier,
+                                               char **new_identifier, char *error, size_t error_size)
+{
+  *new_identifier = NULL;
+  dt_mobile_status status = begin_operation(engine, error, error_size);
+  if(status != DT_MOBILE_OK) return status;
+  dt_iop_module_t *base = find_module(engine, identifier);
+  if(!can_create_instance(engine, base))
+    status = engine_fail(error, error_size, DT_MOBILE_ERROR_UNSUPPORTED,
+                         "unknown module or this module cannot create another instance");
+  else if(!dt_ioppr_get_iop_order_link(engine->develop.iop_order_list, base->op, base->multi_priority))
+    status = engine_fail(error, error_size, DT_MOBILE_ERROR_ENGINE,
+                         "the source instance has no valid pipeline position");
+  else
+  {
+    const int priority = highest_instance_priority(engine, base) + 1;
+    char result[128];
+    const int length = snprintf(result, sizeof(result), "%s@%d", base->op, priority);
+    char *owned_identifier = length > 0 && (size_t)length < sizeof(result) ? malloc((size_t)length + 1) : NULL;
+    if(!owned_identifier)
+      status = engine_fail(error, error_size, DT_MOBILE_ERROR_OUT_OF_MEMORY,
+                           "unable to allocate the instance identifier");
+    else
+    {
+      memcpy(owned_identifier, result, (size_t)length + 1);
+      /* This is the original desktop creation/order helper. Its ordinary
+       * wrappers keep their original priority policy; the floor prevents an
+       * identifier from being reused after a mobile redo branch is discarded. */
+      dt_iop_module_t *module = dt_dev_module_duplicate_at_priority(&engine->develop, base, TRUE, priority);
+      if(!module)
+      {
+        free(owned_identifier);
+        status = engine_fail(error, error_size, DT_MOBILE_ERROR_ENGINE,
+                             "the original engine could not create another instance");
+      }
+      else
+      {
+        dt_iop_reload_defaults(module);
+        if(!engine->instance_priorities)
+          engine->instance_priorities = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+        g_hash_table_replace(engine->instance_priorities, g_strdup(module->op), GINT_TO_POINTER(priority));
+        save_module(engine, module, TRUE);
+        *new_identifier = owned_identifier;
+      }
+    }
+  }
+  end_operation(engine);
+  return status;
+}
+
+static void restore_active_modules(dt_develop_t *dev, const mobile_history_state *state)
+{
+  /* Reset cross-module raster registrations before changing topology. History
+   * replay below rebuilds the active registrations through the original blend
+   * commit helper. Retired modules must not retain pointers into a later branch. */
+  const GList *lists[] = { dev->iop, dev->alliop };
+  for(size_t k = 0; k < sizeof(lists) / sizeof(lists[0]); k++)
+    for(const GList *item = lists[k]; item; item = item->next)
+    {
+      dt_iop_module_t *module = item->data;
+      g_hash_table_remove_all(module->raster_mask.source.users);
+      module->raster_mask.sink.source = NULL;
+      module->raster_mask.sink.id = INVALID_MASKID;
+    }
+  for(const GList *item = dev->iop; item; item = item->next)
+    if(!g_list_find(state->active_modules, item->data))
+      dev->alliop = g_list_append(dev->alliop, item->data);
+  for(const GList *item = state->active_modules; item; item = item->next)
+    dev->alliop = g_list_remove(dev->alliop, item->data);
+  g_list_free(dev->iop);
+  dev->iop = g_list_copy(state->active_modules);
 }
 
 dt_mobile_status dt_mobile_engine_history(dt_mobile_engine *engine, char **json,
@@ -1147,6 +1288,7 @@ static dt_mobile_status move_history(dt_mobile_engine *engine, int direction,
     GList *order = dt_ioppr_iop_order_copy_deep(state->iop_order);
     dt_develop_t *dev = &engine->develop;
     dt_pthread_mutex_lock(&dev->history_mutex);
+    restore_active_modules(dev, state);
     g_list_free_full(dev->history, dt_dev_free_history_item);
     g_list_free_full(dev->iop_order_list, free);
     dev->history = history;
@@ -1648,6 +1790,7 @@ void dt_mobile_engine_close(dt_mobile_engine *engine)
   pthread_mutex_lock(&engine_work_lock);
   /* History snapshots borrow module pointers and must go before module cleanup. */
   g_clear_pointer(&engine->history_states, g_ptr_array_unref);
+  g_clear_pointer(&engine->instance_priorities, g_hash_table_unref);
   dt_dev_cleanup(&engine->develop);
   pthread_mutex_unlock(&engine_work_lock);
   pthread_mutex_unlock(&engine->operation_lock);

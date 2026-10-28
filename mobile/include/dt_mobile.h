@@ -45,6 +45,15 @@ dt_mobile_status dt_mobile_modules(dt_mobile_session *session, char **json);
 dt_mobile_status dt_mobile_history(dt_mobile_session *session, char **json);
 dt_mobile_status dt_mobile_undo(dt_mobile_session *session);
 dt_mobile_status dt_mobile_redo(dt_mobile_session *session);
+/* Create an enabled instance with the original module's image-specific default
+ * parameters and default blending. Only modules advertising canCreateInstance
+ * support this operation. This creates one undo step; undo removes the instance
+ * from the active pipeline, and redo restores its stable identifier/settings.
+ * Identifiers are not reused during a session, including discarded redo branches.
+ * On success new_identifier is caller-owned (dt_mobile_free_buffer); all failures
+ * set it to NULL and leave the active history and instances unchanged. */
+dt_mobile_status dt_mobile_new_instance(dt_mobile_session *session, const char *module,
+                                        char **new_identifier);
 dt_mobile_status dt_mobile_set_parameter(dt_mobile_session *session, const char *module,
                                           const char *parameter, double value);
 typedef struct dt_mobile_curve_point { float x, y; } dt_mobile_curve_point;

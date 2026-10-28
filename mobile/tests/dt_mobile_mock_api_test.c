@@ -29,6 +29,13 @@ static void test_invalid_arguments(dt_mobile_session *session)
   INVALID(dt_mobile_undo(NULL));
   INVALID(dt_mobile_redo(NULL));
   json = (char *)1;
+  INVALID(dt_mobile_new_instance(NULL, "exposure", &json)); CHECK(json == NULL);
+  json = (char *)1;
+  INVALID(dt_mobile_new_instance(session, NULL, &json)); CHECK(json == NULL);
+  json = (char *)1;
+  INVALID(dt_mobile_new_instance(session, "", &json)); CHECK(json == NULL);
+  INVALID(dt_mobile_new_instance(session, "exposure", NULL));
+  json = (char *)1;
   INVALID(dt_mobile_export_formats(NULL, &json)); CHECK(json == NULL);
   INVALID(dt_mobile_export_formats(session, NULL));
   INVALID(dt_mobile_set_parameter(NULL, "exposure", "exposure", 1));
@@ -294,6 +301,18 @@ static void test_delegation_and_buffers(dt_mobile_session *session)
   CHECK(dt_mobile_undo(session) == DT_MOBILE_OK);
   CHECK(dt_mobile_redo(session) == DT_MOBILE_OK);
   CHECK(dt_mobile_mock.calls[DT_MOCK_UNDO] == 1 && dt_mobile_mock.calls[DT_MOCK_REDO] == 1);
+  char operation[] = "exposure@2";
+  char *instance = (char *)1, *other_instance = NULL;
+  CHECK(dt_mobile_new_instance(session, operation, &instance) == DT_MOBILE_OK);
+  CHECK(!strcmp(dt_mobile_mock.module, "exposure@2"));
+  CHECK(instance && !strcmp(instance, "mock_exposure@1"));
+  operation[0] = 'x';
+  CHECK(!strcmp(dt_mobile_mock.module, "exposure@2"));
+  CHECK(dt_mobile_new_instance(session, "exposure", &other_instance) == DT_MOBILE_OK);
+  CHECK(instance != other_instance && !strcmp(instance, other_instance));
+  instance[0] = 'x';
+  CHECK(!strcmp(other_instance, "mock_exposure@1"));
+  dt_mobile_free_buffer(instance); dt_mobile_free_buffer(other_instance);
   CHECK(dt_mobile_set_parameter(session, "exposure", "exposure", -2.75) == DT_MOBILE_OK);
   CHECK(strcmp(dt_mobile_mock.module, "exposure") == 0);
   CHECK(strcmp(dt_mobile_mock.parameter, "exposure") == 0 && dt_mobile_mock.value == -2.75);
@@ -395,6 +414,17 @@ static void test_engine_errors(dt_mobile_session *session)
   dt_mobile_mock_fail_next(DT_MOCK_REDO, DT_MOBILE_ERROR_INVALID_ARGUMENT);
   CHECK(dt_mobile_redo(session) == DT_MOBILE_ERROR_INVALID_ARGUMENT);
   check_error(session, DT_MOCK_REDO);
+  const dt_mobile_status instance_errors[] = {
+    DT_MOBILE_ERROR_INVALID_ARGUMENT, DT_MOBILE_ERROR_UNSUPPORTED, DT_MOBILE_ERROR_ENGINE,
+    DT_MOBILE_ERROR_OUT_OF_MEMORY, DT_MOBILE_ERROR_CANCELLED
+  };
+  for(size_t k = 0; k < sizeof(instance_errors) / sizeof(instance_errors[0]); k++)
+  {
+    json = (char *)1;
+    dt_mobile_mock_fail_next(DT_MOCK_NEW_INSTANCE, instance_errors[k]);
+    CHECK(dt_mobile_new_instance(session, "exposure@2", &json) == instance_errors[k]);
+    CHECK(json == NULL); check_error(session, DT_MOCK_NEW_INSTANCE);
+  }
   json = (char *)1;
   dt_mobile_mock_fail_next(DT_MOCK_FORMATS, DT_MOBILE_ERROR_OUT_OF_MEMORY);
   CHECK(dt_mobile_export_formats(session, &json) == DT_MOBILE_ERROR_OUT_OF_MEMORY);
@@ -466,6 +496,9 @@ static void test_cancel(dt_mobile_session *session)
   CHECK(dt_mobile_undo(session) == DT_MOBILE_ERROR_CANCELLED);
   CHECK(dt_mobile_redo(session) == DT_MOBILE_ERROR_CANCELLED);
   json = (char *)1;
+  CHECK(dt_mobile_new_instance(session, "exposure", &json) == DT_MOBILE_ERROR_CANCELLED);
+  CHECK(json == NULL);
+  json = (char *)1;
   CHECK(dt_mobile_export_formats(session, &json) == DT_MOBILE_ERROR_CANCELLED); CHECK(json == NULL);
   CHECK(dt_mobile_set_parameter(session, "exposure", "exposure", 0) == DT_MOBILE_ERROR_CANCELLED);
   CHECK(dt_mobile_set_enabled(session, "exposure", 1) == DT_MOBILE_ERROR_CANCELLED);
@@ -531,6 +564,8 @@ int main(void)
   CHECK(dt_mobile_modules(session, &retained_json) == DT_MOBILE_OK);
   char *retained_formats = NULL;
   CHECK(dt_mobile_export_formats(session, &retained_formats) == DT_MOBILE_OK);
+  char *retained_instance = NULL;
+  CHECK(dt_mobile_new_instance(session, "exposure", &retained_instance) == DT_MOBILE_OK);
   uint8_t *retained_pixels = NULL;
   int width = 0, height = 0;
   CHECK(dt_mobile_render_preview(session, 1, 1, &retained_pixels, &width, &height) == DT_MOBILE_OK);
@@ -539,9 +574,11 @@ int main(void)
   CHECK(dt_mobile_mock.calls[DT_MOCK_CLOSE] == 1 && dt_mobile_mock.live_engines == 0);
   CHECK(strstr(retained_json, "mock_exposure") != NULL);
   CHECK(strstr(retained_formats, "mock_format") != NULL);
+  CHECK(retained_instance && !strcmp(retained_instance, "mock_exposure@1"));
   CHECK(retained_pixels[0] == 11 && retained_pixels[3] == 255);
   dt_mobile_free_buffer(retained_json);
   dt_mobile_free_buffer(retained_formats);
+  dt_mobile_free_buffer(retained_instance);
   dt_mobile_free_buffer(retained_pixels);
   /* Cancellation belongs to the closed session, not the next one. */
   CHECK(dt_mobile_open(path, &session) == DT_MOBILE_OK);

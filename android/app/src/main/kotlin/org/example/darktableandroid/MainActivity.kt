@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -187,13 +188,20 @@ private fun MobileRawApp(sourceIntent: SourceIntent?, onSourceSelected: (Uri, In
             }
         }
         if(tools && ready != null) ModalBottomSheet(onDismissRequest = { tools = false }) {
+            val moduleList = rememberLazyListState()
+            LaunchedEffect(ready.sessionId, ready.selectedModule) {
+                val index = ready.modules.indexOfFirst { it.operation == ready.selectedModule }
+                if(index >= 0 && moduleList.layoutInfo.visibleItemsInfo.none { it.index == index })
+                    moduleList.animateScrollToItem(index)
+            }
             Column(Modifier.fillMaxHeight(0.8f).padding(horizontal = 24.dp)) {
                 Text(stringResource(R.string.edit_tools), style = MaterialTheme.typography.titleLarge)
                 Text(stringResource(R.string.tool_limitations), style = MaterialTheme.typography.bodySmall)
                 ready.notice?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                LazyColumn(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                LazyColumn(Modifier.fillMaxWidth(), state = moduleList, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(ready.modules, key = { "${ready.sessionId}:${it.operation}" }) { module ->
-                        ModuleControls(module, !busy, editor::setModuleEnabled, editor::setParameter,
+                        ModuleControls(module, !busy, ready.selectedModule == module.operation,
+                            editor::selectModule, editor::newInstance, editor::setModuleEnabled, editor::setParameter,
                             editor::setCurve, editor::setCrop, editor::setRgbCurveOptions,
                             editor::setWhiteBalanceGains, editor::setWhiteBalanceSetting, editor::setWhiteBalanceTemperature)
                     }
@@ -242,6 +250,9 @@ private fun MobileRawApp(sourceIntent: SourceIntent?, onSourceSelected: (Uri, In
 private fun ModuleControls(
     module: EditorModule,
     editable: Boolean,
+    selected: Boolean,
+    onSelected: (String?) -> Unit,
+    onNewInstance: (String) -> Unit,
     onEnabled: (String, Boolean) -> Unit,
     onParameter: (String, String, Double) -> Unit,
     onCurve: (String, Int, Int, List<CurvePoint>) -> Unit,
@@ -252,13 +263,24 @@ private fun ModuleControls(
     onWhiteBalanceTemperature: (String, Double, Double) -> Unit,
 ) {
     var expanded by rememberSaveable(module.operation) { mutableStateOf(false) }
+    LaunchedEffect(selected) { if(selected) expanded = true }
     OutlinedCard(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = { expanded = !expanded }, modifier = Modifier.weight(1f)) { Text(module.name) }
+                TextButton(onClick = {
+                    expanded = !expanded
+                    if(expanded) onSelected(module.operation) else if(selected) onSelected(null)
+                },
+                    enabled = editable, modifier = Modifier.weight(1f)) { Text(module.name) }
                 Switch(checked = module.enabled, onCheckedChange = { onEnabled(module.operation, it) }, enabled = editable && module.canDisable)
             }
             if(expanded) {
+                if(module.canCreateInstance) {
+                    TextButton(onClick = { onNewInstance(module.operation) }, enabled = editable) {
+                        Text(stringResource(R.string.module_new_instance))
+                    }
+                    Text(stringResource(R.string.module_new_instance_hint), style = MaterialTheme.typography.bodySmall)
+                }
                 if(module.parameters.isEmpty() && module.curves.isEmpty() && module.crop == null && module.rgbCurveOptions == null && module.whiteBalance == null)
                     Text(stringResource(R.string.no_numeric_parameters))
                 module.crop?.let { crop ->

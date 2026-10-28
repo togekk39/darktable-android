@@ -21,7 +21,7 @@ remaining limits.
 
 `dt_mobile.h` exposes module descriptions, numeric parameter changes, dedicated
 curve edits, atomic white-balance Kelvin/tint and gains/settings, freehand cropping, module enable/disable, session undo/redo,
-preview, installed export formats and full-resolution export settings.
+new default module instances, preview, installed export formats and full-resolution export settings.
 The engine adapter uses upstream introspection structures, develop history and
 the imageio pixelpipe. It does not duplicate editing formulas. Parameter bounds,
 integer types and enum choices are checked before changes are committed. Numeric
@@ -32,7 +32,7 @@ The reviewed exposure controls additionally reject combinations where the black
 point reaches or exceeds the exposure-derived white point, matching the relation
 maintained by the desktop widget without silently changing another control.
 
-JSON module descriptions contain `operation`, `name`, `enabled`, `canDisable`,
+JSON module descriptions contain `operation`, `name`, `enabled`, `canDisable`, `canCreateInstance`,
 `parameters`, `curves` and optional `crop`/`rgbCurveOptions`/`whiteBalance` descriptions. Parameters contain `name`, `label`, `type`, `value`, `min`,
 `max` and optional `choices` (`value`, `label`). The current reviewed scalar subset
 includes exposure/black correction and compensation switches, Velvia strength/bias,
@@ -118,6 +118,19 @@ parameters and database history used by the preview/export pixelpipes. These
 steps do not persist after closing the image and do not expose automatic startup
 history as user edits. The Android toolbar disables unavailable actions and
 serializes history changes with editing and rendering.
+
+`dt_mobile_new_instance` creates an enabled instance using the original desktop
+creation/order and image-specific default-parameter helpers. It returns a
+caller-owned `operation@priority` identifier. Only modules advertising
+`canCreateInstance` support it; single-instance and hidden modules reject the
+operation. The new instance uses default blending and does not copy the source
+instance's edits or masks. Undo removes it from the active topology, redo restores
+its identifier and settings, and discarded redo branches do not reuse identifiers.
+Snapshots retain retired instances only while reachable; abandoned instances are
+reclaimed. The Android editor focuses the returned instance and routes its controls
+through the same native APIs. Copying current settings/masks and deleting or
+reordering instances still need separate support. Native host regressions cover
+pixel-exact restoration and actual cleanup; Android execution remains unverified.
 
 `dt_mobile_set_module_params` is a low-level interface for trusted native
 integrations that already own a validated upstream parameter struct for the exact

@@ -96,6 +96,14 @@ dt_mobile_status dt_mobile_engine_undo(dt_mobile_engine *engine, char *error, si
 dt_mobile_status dt_mobile_engine_redo(dt_mobile_engine *engine, char *error, size_t size)
 { (void)engine; return called(DT_MOCK_REDO, error, size); }
 
+dt_mobile_status dt_mobile_engine_new_instance(dt_mobile_engine *engine, const char *module,
+                                              char **identifier, char *error, size_t size)
+{
+  (void)engine;
+  snprintf(dt_mobile_mock.module, sizeof(dt_mobile_mock.module), "%s", module);
+  return json_result(DT_MOCK_NEW_INSTANCE, "mock_exposure@1", identifier, error, size);
+}
+
 dt_mobile_status dt_mobile_engine_set_parameter(dt_mobile_engine *engine, const char *module,
                                                const char *parameter, double value,
                                                char *error, size_t size)

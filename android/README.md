@@ -26,6 +26,14 @@ and sharpen amount/threshold. Other modules can still be listed and
 enabled, but internal counts, arrays and unreviewed fields require dedicated
 editors that maintain the same parameter invariants as the desktop widgets.
 
+Modules advertising native instance support offer **New default instance**.
+The original engine creates image-specific default parameters and blending;
+the editor focuses the returned instance and edits its independent settings.
+One undo removes the instance, and redo restores its stable identifier and settings.
+This does not copy the source instance's edits or masks. Copying current settings,
+deleting and reordering instances remain pending. Host native tests and Android JVM
+tests pass; this feature still requires a newly built engine APK and Android execution.
+
 The curve editors support 2–20 nodes through dragging or numeric coordinates,
 adding/deleting nodes, resetting to identity, and choosing the upstream cubic
 spline, Catmull-Rom or monotone Hermite interpolation. Applying a curve submits
@@ -116,9 +124,9 @@ prepares this tree and its native-library closure from a complete installed
 Android engine. The explicit [prebuilt engine route](PREBUILT_ENGINE.md)
 consumes the verified stage when selected by a project property. Native
 build/link, staging and final APK runtime-content validation have passed for the
-configured bootstrap. Installer extraction, native loading and device execution
-remain pending. Disabled optional codecs and unported controls remain separate
-work.
+configured bootstrap. Installation, native loading and one Fusion GPR open have
+run on an ARM64/API 26 emulator; its first preview failed, and Android editing/export
+remains unverified. Disabled optional codecs and unported controls remain separate work.
 
 ## Restoring the Gradle Wrapper binary
 

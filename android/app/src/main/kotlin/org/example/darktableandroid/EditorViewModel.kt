@@ -34,6 +34,8 @@ import org.example.darktableandroid.nativecore.RuntimeAssets
 import org.example.darktableandroid.nativecore.parseExportFormats
 import org.example.darktableandroid.nativecore.parseEditHistory
 import org.example.darktableandroid.nativecore.parseModules
+import org.example.darktableandroid.nativecore.instanceSource
+import org.example.darktableandroid.nativecore.retainModuleSelection
 import org.example.darktableandroid.nativecore.previewArgbPixels
 import org.example.darktableandroid.storage.UriCache
 
@@ -48,6 +50,7 @@ sealed interface EditorState {
         val exportFormats: List<ExportFormat>,
         val notice: String? = null,
         val history: EditHistory? = null,
+        val selectedModule: String? = null,
     ) : EditorState
     data class Failed(val source: Uri?, val message: String) : EditorState
     enum class Stage { COPYING, DECODING, RENDERING, EDITING, EXPORTING, CANCELLING }
@@ -151,6 +154,19 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         edit { NativeCore.setModuleEnabled(it, operation, enabled) }
     }
 
+    fun selectModule(operation: String?) {
+        val current = mutableState.value as? EditorState.Ready ?: return
+        val selected = retainModuleSelection(current.modules, operation)
+        if(operation != null && selected == null) return
+        mutableState.value = current.copy(selectedModule = selected)
+    }
+
+    fun newInstance(operation: String) {
+        val current = mutableState.value as? EditorState.Ready ?: return
+        if(current.modules.instanceSource(operation) == null) return
+        editWithSelection { NativeCore.newInstance(it, operation) }
+    }
+
     fun setCurve(operation: String, channel: Int, interpolation: Int, nodes: List<CurvePoint>) {
         val coordinates = curveCoordinates(nodes)
         edit { NativeCore.setCurve(it, operation, channel, interpolation, coordinates) }
@@ -195,18 +211,23 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         edit { NativeCore.redo(it) }
     }
 
-    private fun edit(change: (Long) -> Unit) {
+    private fun edit(change: (Long) -> Unit) = editWithSelection { handle -> change(handle); null }
+
+    private fun editWithSelection(change: (Long) -> String?) {
         val current = mutableState.value as? EditorState.Ready ?: return
         val currentSession = session ?: return
         val request = generation.get()
         mutableState.value = EditorState.Working(EditorState.Stage.EDITING, current)
         work = engineScope.launch {
+            var preferredSelection: String? = null
             try {
                 val updated = withContext(nativeDispatcher) {
                     val handle = currentSession.handle()
-                    change(handle)
-                    current.copy(preview = render(handle), modules = parseModules(NativeCore.listModules(handle)),
-                        history = parseEditHistory(NativeCore.history(handle)), notice = null)
+                    preferredSelection = change(handle)
+                    val modules = parseModules(NativeCore.listModules(handle))
+                    current.copy(preview = render(handle), modules = modules,
+                        history = parseEditHistory(NativeCore.history(handle)), notice = null,
+                        selectedModule = retainModuleSelection(modules, preferredSelection ?: current.selectedModule))
                 }
                 if(request == generation.get()) mutableState.value = updated
             } catch(_: CancellationException) {
@@ -217,8 +238,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     val recovered = withContext(nativeDispatcher) {
                         runCatching {
                             val handle = currentSession.handle()
-                            current.copy(modules = parseModules(NativeCore.listModules(handle)),
-                                history = parseEditHistory(NativeCore.history(handle)))
+                            val modules = parseModules(NativeCore.listModules(handle))
+                            current.copy(modules = modules, history = parseEditHistory(NativeCore.history(handle)),
+                                selectedModule = retainModuleSelection(modules, preferredSelection ?: current.selectedModule))
                         }.getOrElse { current.copy(history = null) }
                     }
                     if(request == generation.get()) mutableState.value = recovered.copy(notice = errorMessage(failure))

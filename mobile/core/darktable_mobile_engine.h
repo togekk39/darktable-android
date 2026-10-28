@@ -12,6 +12,8 @@ dt_mobile_status dt_mobile_engine_history(dt_mobile_engine *engine, char **json,
                                          char *error, size_t error_size);
 dt_mobile_status dt_mobile_engine_undo(dt_mobile_engine *engine, char *error, size_t error_size);
 dt_mobile_status dt_mobile_engine_redo(dt_mobile_engine *engine, char *error, size_t error_size);
+dt_mobile_status dt_mobile_engine_new_instance(dt_mobile_engine *engine, const char *module,
+                                               char **new_identifier, char *error, size_t error_size);
 dt_mobile_status dt_mobile_engine_set_module_params(dt_mobile_engine *engine, const char *module,
                                                    const void *params, size_t size,
                                                    char *error, size_t error_size);

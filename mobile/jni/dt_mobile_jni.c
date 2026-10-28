@@ -109,6 +109,25 @@ JNIEXPORT void JNICALL Java_org_example_darktableandroid_nativecore_NativeCore_r
   dt_mobile_session *session = (dt_mobile_session *)(intptr_t)handle;
   throw_status(env, session, dt_mobile_redo(session));
 }
+JNIEXPORT jstring JNICALL Java_org_example_darktableandroid_nativecore_NativeCore_newInstance(JNIEnv *env, jobject self,
+    jlong handle, jstring module)
+{
+  (void)self;
+  if(!handle || !module) { throw_io(env, "an image and source module are required"); return NULL; }
+  const char *operation = (*env)->GetStringUTFChars(env, module, NULL);
+  if(!operation) return NULL;
+  dt_mobile_session *session = (dt_mobile_session *)(intptr_t)handle;
+  char *identifier = NULL;
+  const dt_mobile_status status = dt_mobile_new_instance(session, operation, &identifier);
+  (*env)->ReleaseStringUTFChars(env, module, operation);
+  if(status != DT_MOBILE_OK)
+  { dt_mobile_free_buffer(identifier); throw_status(env, session, status); return NULL; }
+  if(!identifier || !identifier[0])
+  { dt_mobile_free_buffer(identifier); throw_io(env, "the new module identifier is missing"); return NULL; }
+  jstring result = (*env)->NewStringUTF(env, identifier);
+  dt_mobile_free_buffer(identifier);
+  return result;
+}
 JNIEXPORT void JNICALL Java_org_example_darktableandroid_nativecore_NativeCore_setParameter(JNIEnv *env, jobject self, jlong handle, jstring module, jstring parameter, jdouble value)
 {
   (void)self;

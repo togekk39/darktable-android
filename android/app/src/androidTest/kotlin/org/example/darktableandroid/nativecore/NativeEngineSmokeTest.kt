@@ -9,6 +9,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.filters.LargeTest
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
+import java.io.IOException
 import java.security.MessageDigest
 import java.util.UUID
 import org.json.JSONArray
@@ -98,6 +99,8 @@ class NativeEngineSmokeTest {
             phase("redo-exposure") { NativeCore.redo(handle) }
             assertSame("Redo must restore the edited pixels", exposed, phase("preview-exposure-redo") { preview(handle) })
             phase("restore-exposure-baseline") { NativeCore.undo(handle) }
+
+            verifyNewDefaultInstance(handle, baseline)
 
             val balance = module(handle, "temperature").getJSONObject("whiteBalance")
             val originalTemperature = balance.getJSONObject("temperature")
@@ -200,8 +203,72 @@ class NativeEngineSmokeTest {
     }
 
     private fun module(handle: Long, operation: String): JSONObject {
-        val modules = JSONArray(NativeCore.listModules(handle))
-        return (0 until modules.length()).map(modules::getJSONObject).single { it.getString("operation") == operation }
+        return modules(handle).single { it.getString("operation") == operation }
+    }
+
+    private fun modules(handle: Long): List<JSONObject> {
+        val items = JSONArray(NativeCore.listModules(handle))
+        return (0 until items.length()).map(items::getJSONObject)
+    }
+
+    private fun parameter(module: JSONObject, name: String): JSONObject {
+        val items = module.getJSONArray("parameters")
+        return (0 until items.length()).map(items::getJSONObject).single { it.getString("name") == name }
+    }
+
+    private fun verifyNewDefaultInstance(handle: Long, baseline: Preview) {
+        val before = modules(handle)
+        val originalIds = before.map { it.getString("operation") }
+        val source = before.single { it.getString("operation") == "exposure" }
+        phase("require-default-instance-capability") {
+            assertTrue("This smoke test requires a new-instance-capable native engine",
+                source.opt("canCreateInstance") == true)
+        }
+        val sourceExposure = parameter(source, "exposure").getDouble("value")
+        val identifier = phase("create-default-exposure-instance") { NativeCore.newInstance(handle, "exposure") }
+        assertTrue("The native owner must return a distinct instance identifier",
+            identifier.isNotEmpty() && identifier !in originalIds)
+        val created = module(handle, identifier)
+        assertEquals(before.size + 1, modules(handle).size)
+        assertTrue("A new default instance follows desktop enabled semantics", created.getBoolean("enabled"))
+        val defaults = parameter(created, "exposure")
+        val defaultExposure = defaults.getDouble("value")
+        report.put("newDefaultInstance", JSONObject().put("identifier", identifier)
+            .put("defaultExposure", defaultExposure).put("module", created))
+        val createdPreview = phase("preview-default-exposure-instance") { preview(handle) }
+        val editedExposure = if(defaultExposure + 1.0 <= defaults.getDouble("max"))
+            defaultExposure + 1.0 else defaultExposure - 1.0
+        assertTrue(editedExposure >= defaults.getDouble("min"))
+        phase("edit-default-exposure-instance") {
+            NativeCore.setParameter(handle, identifier, "exposure", editedExposure)
+        }
+        assertEquals("Editing an additional instance must leave the source instance unchanged",
+            sourceExposure, parameter(module(handle, "exposure"), "exposure").getDouble("value"), 0.0)
+        val editedPreview = phase("preview-edited-exposure-instance") { preview(handle) }
+        assertDifferent("Editing the new instance must change actual RAW pixels", createdPreview, editedPreview)
+        report.getJSONObject("newDefaultInstance").put("defaultPreview", createdPreview.json())
+            .put("editedPreview", editedPreview.json())
+        phase("undo-additional-instance-edit") { NativeCore.undo(handle) }
+        assertSame("Undo must restore the new instance's default pixels", createdPreview,
+            phase("preview-additional-instance-edit-undo") { preview(handle) })
+        phase("undo-additional-instance-creation") { NativeCore.undo(handle) }
+        assertEquals("Undo must restore the original active module topology", originalIds,
+            modules(handle).map { it.getString("operation") })
+        assertSame("Undoing creation must restore the original pixels", baseline,
+            phase("preview-additional-instance-creation-undo") { preview(handle) })
+        phase("reject-retired-instance-selector") {
+            val history = NativeCore.history(handle)
+            val failure = runCatching { NativeCore.newInstance(handle, identifier) }.exceptionOrNull()
+            assertTrue("JNI must reject a retired instance selector with an IO error", failure is IOException)
+            assertEquals("A rejected selector must not alter native undo/redo", history, NativeCore.history(handle))
+        }
+        phase("redo-additional-instance-creation") { NativeCore.redo(handle) }
+        assertEquals("Redo must restore the same stable instance ID", before.size + 1, modules(handle).size)
+        assertEquals(defaultExposure, parameter(module(handle, identifier), "exposure").getDouble("value"), 0.0)
+        assertSame("Redoing creation must restore the default instance pixels", createdPreview,
+            phase("preview-additional-instance-creation-redo") { preview(handle) })
+        phase("restore-before-additional-instance") { NativeCore.undo(handle) }
+        assertEquals(originalIds, modules(handle).map { it.getString("operation") })
     }
 
     private fun assertSame(message: String, expected: Preview, actual: Preview) {

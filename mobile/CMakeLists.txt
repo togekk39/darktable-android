@@ -211,6 +211,13 @@ if(DT_MOBILE_BUILD_TESTS)
     if(USE_OPENMP)
       target_link_libraries(dt_mobile_engine_test PRIVATE OpenMP::OpenMP_C)
     endif()
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+      # Count actual adapter reclamation without a production test hook. Calls
+      # inside lib_darktable remain untouched; only the static adapter's calls
+      # are wrapped, and the wrapper still invokes the original cleanup.
+      target_link_options(dt_mobile_engine_test PRIVATE "LINKER:--wrap=dt_iop_cleanup_module")
+      target_compile_definitions(dt_mobile_engine_test PRIVATE DT_MOBILE_TEST_INSTANCE_RECLAMATION=1)
+    endif()
     # These modules are loaded dynamically, so the linker cannot express this
     # dependency. Building the smoke test must also build its actual pixelpipe.
     get_property(_dt_mobile_iops GLOBAL PROPERTY DT_PLUGIN_IOPS)

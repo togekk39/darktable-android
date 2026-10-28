@@ -24,6 +24,7 @@ data class EditorModule(
     val crop: ModuleCrop? = null,
     val rgbCurveOptions: RgbCurveOptions? = null,
     val whiteBalance: WhiteBalance? = null,
+    val canCreateInstance: Boolean = false,
 )
 data class ModuleCrop(val bounds: CropRect, val minSize: Float, val freehand: Boolean)
 data class ModuleCurve(
@@ -72,9 +73,18 @@ internal fun parseModules(json: String): List<EditorModule> = JSONArray(json).le
             module.optJSONObject("crop")?.readCrop(),
             module.optJSONObject("rgbCurveOptions")?.readRgbCurveOptions(),
             module.optJSONObject("whiteBalance")?.readWhiteBalance(),
+            // Older runtimes and malformed optional capabilities stay unavailable.
+            module.opt("canCreateInstance") == true,
         )
     }
 }
+
+/** Match native instance IDs exactly; a retired instance must not target its base module. */
+internal fun List<EditorModule>.instanceSource(identifier: String): EditorModule? =
+    singleOrNull { it.operation == identifier }?.takeIf { it.canCreateInstance }
+
+internal fun retainModuleSelection(modules: List<EditorModule>, identifier: String?): String? =
+    identifier?.takeIf { id -> modules.count { it.operation == id } == 1 }
 
 internal fun parseExportFormats(json: String): List<ExportFormat> = JSONArray(json).let { formats ->
     List(formats.length()) { index ->

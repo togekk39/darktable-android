@@ -48,6 +48,10 @@ static void test_arguments(void)
   CHECK(dt_mobile_history(NULL, NULL) == DT_MOBILE_ERROR_INVALID_ARGUMENT);
   CHECK(dt_mobile_undo(NULL) == DT_MOBILE_ERROR_INVALID_ARGUMENT);
   CHECK(dt_mobile_redo(NULL) == DT_MOBILE_ERROR_INVALID_ARGUMENT);
+  json = (char *)1;
+  CHECK(dt_mobile_new_instance(NULL, "exposure", &json) == DT_MOBILE_ERROR_INVALID_ARGUMENT);
+  CHECK(json == NULL);
+  CHECK(dt_mobile_new_instance(NULL, "exposure", NULL) == DT_MOBILE_ERROR_INVALID_ARGUMENT);
   CHECK(dt_mobile_export_formats(NULL, NULL) == DT_MOBILE_ERROR_INVALID_ARGUMENT);
   CHECK(dt_mobile_set_parameter(NULL, "exposure", "exposure", 1.0) == DT_MOBILE_ERROR_INVALID_ARGUMENT);
   CHECK(dt_mobile_set_parameter(NULL, "exposure", "exposure", NAN) == DT_MOBILE_ERROR_INVALID_ARGUMENT);
