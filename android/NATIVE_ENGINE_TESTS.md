@@ -84,6 +84,66 @@ establish all RAW/camera types, hardware/driver behavior, every desktop editing
 tool, all optional codecs, UI interaction, lifecycle interruption or complete
 desktop feature parity.
 
+## XCF precision and independent pixel validation
+
+`NativeXcfExportTest` separately exercises the original XCF writer through JNI.
+Use a matching main/test APK pair built from an XCF-enabled runtime. This test
+requires the original official Fusion `GPBK7066.GPR`, with SHA-256
+`c03eccdc334dc5b35cf6385799b219f4c9a0bc18ccbe70fe433237d98f352247`.
+The supplied path must resolve inside the target application's private files
+directory; the preceding fixture-copy example can be reused.
+
+```sh
+"$ADB_BIN" -s "$TEST_SERIAL" shell am instrument -w -r \
+  -e class org.example.darktableandroid.nativecore.NativeXcfExportTest \
+  -e requireXcf true \
+  -e inputFile "$APP_DATA_DIR/files/engine-smoke/input.GPR" \
+  -e timeout_msec 3600000 \
+  "$APP_PACKAGE.test/androidx.test.runner.AndroidJUnitRunner"
+
+"$ADB_BIN" -s "$TEST_SERIAL" exec-out run-as "$APP_PACKAGE" \
+  cat files/engine-xcf/result.json > android-xcf-result.json
+python3 -c 'import json; r=json.load(open("android-xcf-result.json")); assert r["status"] == "passed" and r["phase"] == "complete" and len(r["exports"]) == 3, r'
+```
+
+`requireXcf=true` makes a missing real engine, VC-5 decoder or XCF module fail
+the test. Without this argument, unavailable capabilities can produce an
+explicit skipped result; a skipped result is not validation. Require both the
+instrumentation runner's successful test result and the completed JSON report.
+
+The test opens that original GPR, applies exposure through the desktop module,
+and exports three XCF/TIFF pairs with the same settings: 8-bit unsigned,
+16-bit unsigned and 32-bit float, sRGB output, source metadata excluded, and
+both dimensions bounded to 128 pixels. It checks XCF v012, RGB dimensions and
+the requested gamma precision codes (`150`, `250`, `650`). Source SHA-256 is
+checked before opening, after all exports and after closing the native session.
+The existing 41-phase smoke test remains a separate execution test.
+
+`files/engine-xcf/result.json` is updated atomically before every named native
+phase and records completed phases, device details, settings, source hashes and
+each output's private path, byte count and SHA-256. Exports remain under a
+unique `files/engine-xcf/run-*` directory. Pull each XCF and its `referenceTiff`
+from those recorded paths using `exec-out run-as`, then verify their hashes.
+The `NativeXcfExport` logcat tag identifies live phases.
+
+The instrumentation checks container headers; it does not decode XCF pixels.
+Independent host GIMP loading and pixel comparison against each paired TIFF
+must preserve the requested precision, especially 32-bit float. Keep that
+separate evidence with the report. Successful XCF export does not establish XCF
+import, mask/channel export or complete format parity.
+
+The pair built from local source `d866419cb5` passed all 18 phases on the official
+ARM64/API 28 guest with host single-step emulation and fixed virtual timing.
+Main APK SHA-256 is `8a564200bb31a006d2b93b685d3635841c379cc5913484336a838575492b4d90`;
+test APK is `a1a9b993d24d9750995c7186984face0a33662802c4d766b647ef86a0792c515`.
+GIMP 3.0.4 independently loaded all three pulled 128x123 XCF/TIFF pairs and
+compared complete native RGB bytes without reducing precision. Pixels and
+embedded sRGB ICC profiles matched exactly at all three precisions; float values
+were finite. Source hashes matched before/after exports and after close. This
+is one fixture under the recorded emulator mode, not physical-device or
+performance evidence. The work-only reports are `work/xcf-validation/android-result.json`
+and `android-gimp-report.json` in that directory.
+
 ## Optional ARM64 emulator instruction diagnostic
 
 The standalone sources in

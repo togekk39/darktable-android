@@ -88,9 +88,17 @@ GIMP 3.0.4 independently loaded real Fusion GPR exports at 192x185 in all three
 precisions. Native RGB bytes and embedded sRGB ICC profiles matched the paired
 same-settings TIFF outputs exactly, including finite 32-bit floats. This is host
 evidence, not Android execution, full-resolution XCF or mask-channel validation.
-The separate `NativeXcfExportTest` requires `requireXcf=true` for mandatory Android
-coverage, exports XCF/TIFF pairs and checks the unchanged official source hash.
-Its Android run and independent output decoding remain to be verified.
+The separate `NativeXcfExportTest` passed all 18 phases with `requireXcf=true`
+on the same official ARM64/API 28 guest under host single-step emulation and
+fixed virtual timing. It opened original Fusion GPR, changed native exposure,
+exported all three 128x123 XCF/TIFF pairs, closed the session and verified the
+unchanged official source hash. GIMP 3.0.4 independently decoded the pulled,
+SHA-256-verified Android outputs: complete native RGB bytes and sRGB ICC profiles
+matched each paired TIFF exactly for UINT8, UINT16 and FLOAT32. No source EXIF/XMP
+parasites were present under the requested source-metadata exclusion policy.
+This does not establish full-resolution XCF, mask-channel export, XCF import,
+physical-device behavior or performance. The APK source commit is local
+`d866419cb5`; build/output hashes are recorded in PORTING_STATUS.md.
 
 Next small dependency candidates are OpenJPEG/WebP. Imath can
 precede OpenEXR. These are source-audit candidates, not successful Android ports.

@@ -15,6 +15,50 @@ APK also passed its complete 41-phase run. This is one original fixture/runtime,
 format/feature parity, physical-device validation or performance evidence.
 The default Gradle engine remains disabled.
 
+## XCF export increment after `90ce43520f`
+
+Local source `d866419cb5` enables the original pinned libxcf export module and
+exposes its original 8-bit unsigned, 16-bit unsigned and 32-bit float settings
+through native metadata and the existing Android export controls. No replacement
+pixel or compression algorithm is used. LibRaw, RawSpeed and libxcf gitlinks are
+unchanged. A build-generated copy fixes libxcf error cleanup/buffered-close
+status, and the original format module propagates failures. The host engine
+regression passed with XCF presence required, including real kernel-enforced
+write failure, exact configuration restoration and destination preservation.
+The host Release/Debug CI configuration now enables XCF for this regression;
+the successful `90ce43520f` CI results below predate this change.
+
+The ARM64/API 26 native build, fresh stripped install and prebuilt Gradle APK
+passed. There are now 108 configured libraries, 110 staged libraries, 805 data
+files and 111 final APK libraries. All final native libraries have 16 KiB load
+alignment; both APKs passed v2 signature verification and final runtime hashes.
+The compact APK has no unused ZIP holes. The actual tested pair is:
+
+* Main APK: 40,440,735 bytes, SHA-256
+  `8a564200bb31a006d2b93b685d3635841c379cc5913484336a838575492b4d90`.
+* Test APK: 395,503 bytes, SHA-256
+  `a1a9b993d24d9750995c7186984face0a33662802c4d766b647ef86a0792c515`.
+
+`NativeXcfExportTest` passed all 18 phases on the official ARM64/API 28 guest
+under host single-step/fixed-clock emulation. It opened official Fusion
+`GPBK7066.GPR`, changed native exposure, exported three 128x123 XCF/TIFF pairs
+and closed the session. Source SHA-256 remained
+`c03eccdc334dc5b35cf6385799b219f4c9a0bc18ccbe70fe433237d98f352247`.
+GIMP 3.0.4 independently decoded all six pulled/hash-verified outputs. Complete
+native RGB bytes and embedded sRGB profiles matched each pair exactly at 8-bit,
+16-bit and float32 precision; all floats were finite. Native RGB SHA-256 values:
+
+* UINT8 (47,232 bytes): `0726832947204304c1ff2a60382cdb5bcfd018d638785f370d1d8bb27f34804c`.
+* UINT16 (94,464 bytes): `964b6bfbff1060600e73c9d579eb3100e2fff0ced69ef2fd655ef1a55275980b`.
+* FLOAT32 (188,928 bytes): `62a98e440cf102e8c320f8d3fad7da7811d0d7f7b8c71257425fabd942278bb7`.
+
+Independent host exports at 192x185 also matched paired TIFF pixels/ICC in GIMP
+at all three precisions. Work-only evidence includes `work/logs/xcf-android-jni-run.log`,
+`work/xcf-validation/{android-result,android-gimp-report,host-gimp-report}.json`
+and `work/logs/xcf-android-apk-audit.json`. The older table below records the
+pre-XCF configurations. Full-resolution XCF, XCF import, masks/channels,
+physical devices and complete desktop parity remain unverified.
+
 The following recorded results distinguish local build checks, GitHub CI and
 actual Android execution; they do not all establish the same scope:
 
