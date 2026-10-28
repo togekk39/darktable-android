@@ -85,7 +85,7 @@ dependency archives retain their existing build configuration; final shared
 libraries must be relinked to apply the setting. Inspect every packaged shared
 library and validate the APK on both page sizes before claiming device support.
 
-This first bootstrap disables optional JPEG XL, AVIF/HEIF, JPEG 2000, WebP,
+The recorded `90ce43520f` bootstrap disables optional JPEG XL, AVIF/HEIF, JPEG 2000, WebP,
 OpenEXR and XCF codecs, G'MIC, AI, OpenCL, Lua, camera tethering, and desktop
 integrations. These settings reduce the initial porting graph; they do not
 meet the requested desktop feature and format parity. They must be revisited
@@ -118,11 +118,13 @@ archive/link check does not prove decoding or execution in the Android app.
 
 The configured core/modules and JNI now link successfully, and the real stage
 includes their checked shared-library closure, runtime data and Lensfun database.
-The experimental APK has passed the final runtime-content checks. Before
-enabling the default Gradle engine, exercise JNI open/edit/export/cancel/close
-on Android with real RAW and GPR files. Host pipeline tests, native linking,
-staging and APK byte verification do not establish those Android operations or
-complete desktop feature parity.
+The experimental APK has passed the final runtime-content checks. The separate
+API 28 Fusion run above also passed JNI open/edit/undo/export/close/reopen,
+including source preservation and default-instance topology. Before enabling
+the default Gradle engine, extend that evidence to physical devices, other
+original RAW/GPR files, cancellation and lifecycle behavior. Host pipeline tests,
+native linking, staging and APK byte verification alone do not establish those
+Android operations or complete desktop feature parity.
 
 After a complete native build, use the offline [runtime staging tool](STAGING.md)
 to check the configured module manifest, shared-library closure and data before
@@ -130,7 +132,11 @@ integrating the result into an APK. It retains native modules in a flat
 `jniLibs/arm64-v8a` directory and data in `assets/darktable-runtime`.
 
 The opt-in [engine APK workflow](../../.github/workflows/android-engine.yml)
-records these steps without enabling the default Gradle engine. It runs only
-through `workflow_dispatch`; it is not a push/PR build. See the
-[status notes](PORTING_STATUS.md) for its validation and GitHub's default-branch
-indexing requirement for the manual entry.
+records these steps without enabling the default Gradle engine. It runs for
+native/runtime changes on `feature/android-raw-editor`, with manual dispatch
+also available. Its first complete
+[remote run at `90ce43520f`](https://github.com/togekk39/darktable-android/actions/runs/40722614711)
+passed native build, fresh stripped installation, staging, final APK runtime
+hashes, signatures and 16 KiB load alignment, then uploaded both APKs. That
+workflow does not execute Android instrumentation. See the
+[status notes](PORTING_STATUS.md) for the artifact and separate JNI evidence.

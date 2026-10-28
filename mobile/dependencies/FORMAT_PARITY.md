@@ -1,7 +1,8 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Android format coverage and remaining parity
 
-Source/configuration audit of the bootstrap used for the `e084d6f085` APK.
+Source/configuration audit of the bootstrap used for the `e084d6f085` APK,
+with the subsequent XCF export increment described below.
 Compilation and advertised extensions do not establish camera, compression or
 export-setting coverage. The current evidence is six official GoPro GPR samples
 on the host; Android results are tracked separately in [PORTING_STATUS.md](PORTING_STATUS.md).
@@ -26,13 +27,13 @@ Keep the original decoder pins: LibRaw
 | Rendered JPEG XL input/export | `USE_JXL=OFF` | libjxl 0.11.1#1 and highway; this is separate from JPEG XL inside DNG |
 | AVIF input/export | `USE_AVIF=OFF` | libavif 1.3.0 plus a working decoder/encoder; dav1d alone does not encode |
 | HEIF/HEIC/HIF input/export | `USE_HEIF=OFF` | libheif 1.19.8#1 and appropriate subcodecs; decode/encode, brands and bit depths differ |
-| XCF export | `USE_XCF=OFF` | Existing pinned libxcf, zlib and libm; two internal C sources, no new external codec |
+| XCF export | `USE_XCF=ON` in the updated bootstrap | Original pinned libxcf, zlib and libm; 8/16-bit unsigned and 32-bit float controls exposed; Android execution tracked below |
 | XCF and other exotic input | GraphicsMagick/ImageMagick disabled | Original exotic loader; enabling XCF export does not enable XCF import |
 
-The seven configured export modules are `copy, jpeg, pdf, png, ppm, pfm, tiff`.
-Excluding copy leaves at most six processed-output choices, subject to original
-module initialization. Dedicated mobile settings currently cover JPEG, PNG and
-TIFF. Merely compiling another codec does not expose its desktop quality,
+The updated eight configured export modules are `copy, jpeg, pdf, png, ppm, pfm, tiff, xcf`.
+Excluding copy leaves at most seven processed-output choices, subject to original
+module initialization. Dedicated mobile settings currently cover JPEG, PNG,
+TIFF and XCF. Merely compiling another codec does not expose its desktop quality,
 lossless, encoder, precision or other options. Preserve each original parameter
 layout and invariants when adding those controls.
 
@@ -76,7 +77,22 @@ is disabled. The mobile API currently models UINT8, UINT16 and FLOAT32. Half-flo
 storage needs its own reviewed representation: the original TIFF module uses a
 32-bit pipeline even when storing 16-bit floats; UINT16 is not an equivalent.
 
-Small dependency candidates are internal XCF export and then OpenJPEG/WebP. Imath can
+The XCF increment retains libxcf gitlink `64efecf63ddd952ccf654e479714aaae6f8c5986`.
+Its original module and encoder build on the host and ARM64/API 26. A generated
+build copy fixes only error cleanup and buffered IO status; the source submodule,
+pixel layout and compression algorithms are unchanged. The adapter uses the
+original `plugins/imageio/format/xcf/bpp` configuration, restoring its exact prior
+value after each export. Write failures preserve the destination.
+
+GIMP 3.0.4 independently loaded real Fusion GPR exports at 192x185 in all three
+precisions. Native RGB bytes and embedded sRGB ICC profiles matched the paired
+same-settings TIFF outputs exactly, including finite 32-bit floats. This is host
+evidence, not Android execution, full-resolution XCF or mask-channel validation.
+The separate `NativeXcfExportTest` requires `requireXcf=true` for mandatory Android
+coverage, exports XCF/TIFF pairs and checks the unchanged official source hash.
+Its Android run and independent output decoding remain to be verified.
+
+Next small dependency candidates are OpenJPEG/WebP. Imath can
 precede OpenEXR. These are source-audit candidates, not successful Android ports.
 Each needs actual native build, staging/16 KiB checks, original input/edit/export
 and independent output decoding before becoming verified coverage.

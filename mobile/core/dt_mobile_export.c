@@ -39,6 +39,7 @@ static const char *canonical_format(const char *format)
   if(format && (!g_ascii_strcasecmp(format, "jpg") || !g_ascii_strcasecmp(format, "jpeg"))) return "jpeg";
   if(format && (!g_ascii_strcasecmp(format, "tif") || !g_ascii_strcasecmp(format, "tiff"))) return "tiff";
   if(format && !g_ascii_strcasecmp(format, "png")) return "png";
+  if(format && !g_ascii_strcasecmp(format, "xcf")) return "xcf";
   return format;
 }
 
@@ -77,12 +78,13 @@ dt_mobile_status dt_mobile_export_validate(const char *format_name,
      || s->metadata_policy < DT_MOBILE_EXPORT_METADATA_DEFAULT || s->metadata_policy > DT_MOBILE_EXPORT_METADATA_SOURCE_NONE)
     return export_fail(error, size, DT_MOBILE_ERROR_INVALID_ARGUMENT, "invalid export settings");
   const char *name = canonical_format(format_name);
-  const gboolean png = !strcmp(name, "png"), tiff = !strcmp(name, "tiff"), jpeg = !strcmp(name, "jpeg");
+  const gboolean png = !strcmp(name, "png"), tiff = !strcmp(name, "tiff"), jpeg = !strcmp(name, "jpeg"),
+                 xcf = !strcmp(name, "xcf");
   if((s->png_compression != -1 && !png)
      || ((s->tiff_compression != -1 || s->tiff_compression_level != -1) && !tiff)
      || (s->jpeg_subsample != -1 && !jpeg) || (s->dpi && !jpeg && !tiff)
      || (s->pixel_format != DT_MOBILE_EXPORT_PIXEL_DEFAULT
-         && !(tiff || (png && s->pixel_format != DT_MOBILE_EXPORT_FLOAT32)
+         && !(tiff || xcf || (png && s->pixel_format != DT_MOBILE_EXPORT_FLOAT32)
               || (jpeg && s->pixel_format == DT_MOBILE_EXPORT_UINT8))))
     return export_fail(error, size, DT_MOBILE_ERROR_UNSUPPORTED, "these settings are not supported by the selected format");
   if(!profile_available(find_profile(s->output_profile)))
@@ -178,7 +180,9 @@ dt_mobile_status dt_mobile_export_write(dt_imgid_t image_id, const char *path,
   if(s->pixel_format != DT_MOBILE_EXPORT_PIXEL_DEFAULT && strcmp(name, "jpeg"))
   {
     const int bits = s->pixel_format == DT_MOBILE_EXPORT_UINT8 ? 8 : s->pixel_format == DT_MOBILE_EXPORT_UINT16 ? 16 : 32;
-    OVERRIDE(!strcmp(name, "png") ? "plugins/imageio/format/png/bpp" : "plugins/imageio/format/tiff/bpp", bits, FALSE);
+    const char *key = !strcmp(name, "png") ? "plugins/imageio/format/png/bpp"
+      : !strcmp(name, "xcf") ? "plugins/imageio/format/xcf/bpp" : "plugins/imageio/format/tiff/bpp";
+    OVERRIDE(key, bits, FALSE);
     if(!strcmp(name, "tiff")) OVERRIDE("plugins/imageio/format/tiff/pixelformat", FALSE, TRUE);
   }
   if(s->png_compression != -1) OVERRIDE("plugins/imageio/format/png/compression", s->png_compression, FALSE);
@@ -238,13 +242,14 @@ cleanup:
 void dt_mobile_export_append_options(GString *json, const char *format_name)
 {
   const char *name = canonical_format(format_name);
-  const gboolean png = name && !strcmp(name, "png"), tiff = name && !strcmp(name, "tiff"), jpeg = name && !strcmp(name, "jpeg");
+  const gboolean png = name && !strcmp(name, "png"), tiff = name && !strcmp(name, "tiff"),
+                 jpeg = name && !strcmp(name, "jpeg"), xcf = name && !strcmp(name, "xcf");
   g_string_append_printf(json, "{\"maxWidth\":{\"default\":0,\"min\":0,\"max\":%d},"
     "\"maxHeight\":{\"default\":0,\"min\":0,\"max\":%d},\"upscale\":false,\"pixelFormats\":["
     "{\"value\":0,\"label\":\"format settings\"}", INT_MAX, INT_MAX);
-  if(png || tiff || jpeg) g_string_append(json, ",{\"value\":1,\"label\":\"8 bit unsigned\"}");
-  if(png || tiff) g_string_append(json, ",{\"value\":2,\"label\":\"16 bit unsigned\"}");
-  if(tiff) g_string_append(json, ",{\"value\":3,\"label\":\"32 bit float\"}");
+  if(png || tiff || jpeg || xcf) g_string_append(json, ",{\"value\":1,\"label\":\"8 bit unsigned\"}");
+  if(png || tiff || xcf) g_string_append(json, ",{\"value\":2,\"label\":\"16 bit unsigned\"}");
+  if(tiff || xcf) g_string_append(json, ",{\"value\":3,\"label\":\"32 bit float\"}");
   g_string_append(json, "],\"pixelFormatDefault\":0");
   if(jpeg) g_string_append_printf(json, ",\"quality\":{\"default\":95,\"min\":5,\"max\":100},"
     "\"jpegSubsample\":{\"default\":-1,\"inherited\":%d,\"values\":[-1,0,1,2,3,4]}",

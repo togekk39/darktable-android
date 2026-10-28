@@ -8,9 +8,13 @@ incomplete dependency probe into an editor or establish device support.
 
 The configured ARM64/API 26 engine has now been built, installed and staged.
 An experimental engine-enabled development APK has passed assembly and final
-runtime byte/hash verification. Device loading/execution remains unverified.
-The dated [port status](../mobile/dependencies/PORTING_STATUS.md) records the
-exact build and validation boundary.
+runtime byte/hash verification. A matching main/test APK pair passed all 41
+Fusion GPR JNI phases on an official ARM64/API 28 guest with host single-step
+emulation and fixed virtual timing, including native loading, default-instance
+editing/undo/redo and 3104×3000 PNG export/reopen. Physical devices and all-format
+coverage remain unverified. The dated
+[port status](../mobile/dependencies/PORTING_STATUS.md) records the exact build
+and validation boundary.
 
 First finish the ARM64/API 26 [engine build](../mobile/dependencies/ENGINE_BOOTSTRAP.md),
 install it, and run the current [staging tool](../mobile/dependencies/STAGING.md)
@@ -129,9 +133,15 @@ contents have passed verification; native loader behavior and RAW/GPR
 edit/export/cancel on real devices remain unverified. The configured manifest
 covers only the selected native build; optional codecs and
 unported editing controls remain separate work. The opt-in
-[engine workflow](../.github/workflows/android-engine.yml) records this route;
-it has not been executed, and its manual entry is subject to GitHub's
-default-branch indexing requirement described in the [status notes](../mobile/dependencies/PORTING_STATUS.md).
+[engine workflow](../.github/workflows/android-engine.yml) records this route and
+also runs for native/runtime changes on `feature/android-raw-editor`.
+[Run 40722614711](https://github.com/togekk39/darktable-android/actions/runs/40722614711)
+at `90ce43520f` passed the complete native build/staging/packaging checks and
+uploaded the signed engine APK and paired instrumentation APK as artifact
+`12833671749`. That CI job did not install or run the APK; the local API 28
+execution above is separate evidence. See the
+[status notes](../mobile/dependencies/PORTING_STATUS.md) for the recorded
+configuration and artifact identity.
 
 Offline producer/verifier regression tests use synthetic ELF headers and ZIP
 fixtures, without loading or simulating the processing engine:

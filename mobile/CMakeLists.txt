@@ -222,6 +222,10 @@ if(DT_MOBILE_BUILD_TESTS)
     # dependency. Building the smoke test must also build its actual pixelpipe.
     get_property(_dt_mobile_iops GLOBAL PROPERTY DT_PLUGIN_IOPS)
     add_dependencies(dt_mobile_engine_test ${_dt_mobile_iops} jpeg png deploy darktablerc_file)
+    if(TARGET gimp_xcf)
+      add_dependencies(dt_mobile_engine_test gimp_xcf)
+      target_compile_definitions(dt_mobile_engine_test PRIVATE DT_MOBILE_TEST_REQUIRE_XCF=1)
+    endif()
     add_test(NAME dt_mobile_engine_test COMMAND dt_mobile_engine_test
       "${CMAKE_CURRENT_SOURCE_DIR}/../data/pixmaps/256x256/darktable.png"
       "${CMAKE_CURRENT_BINARY_DIR}/dt-mobile-engine-output.png")

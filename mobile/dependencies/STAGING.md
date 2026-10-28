@@ -7,8 +7,12 @@ Android library-only engine. It does not build missing dependencies, modify ELF
 files, enable the Gradle engine flag, build an APK, or prove Android execution.
 The configured Android core/GTK graph has now been built and installed, and a
 real stage has passed these checks. An experimental engine-enabled APK has
-also passed final runtime-content validation. Android loading/execution remain
-unverified; see [port status](PORTING_STATUS.md).
+also passed final runtime-content validation. A matching APK pair passed the
+41-phase Fusion GPR JNI test on an official ARM64/API 28 guest using host
+single-step emulation and fixed virtual timing. This covers native loading,
+runtime extraction, editing, exact undo/redo and full-size PNG export for that
+fixture; physical devices and full format/feature coverage remain unverified.
+See [port status](PORTING_STATUS.md) for the evidence and execution settings.
 
 After the experimental root engine build succeeds, install that exact build to
 a fresh private prefix. Use the same build configuration throughout:
@@ -102,9 +106,10 @@ The actual LibRaw parity and Lensfun ARM64/API 26 probes can be audited this way
 The optional [prebuilt Gradle route](../../android/PREBUILT_ENGINE.md) consumes
 these verified sources without configuring a second dependency-only JNI build.
 The real engine stage is available for the configured bootstrap graph. Installer
-extraction, module discovery and RAW/GPR edit/export still need Android device
-validation. Disabled optional codecs and runtime features are not added by
-staging. Third-party license/source distribution obligations
+extraction, module discovery and Fusion GPR edit/export passed the separate
+ARM64/API 28 JNI run described above. Other inputs, physical devices and device
+lifecycle/cancellation still need validation. Disabled optional codecs and runtime
+features are not added by staging. Third-party license/source distribution obligations
 also remain with the final packaged build; this tool copies runtime files only.
 
 After packaging, audit the exact final APK with the companion verifier:

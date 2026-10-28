@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-# Android port status — 2026-10-27
+# Android port status — 2026-10-28
 
 The Android port remains incomplete. The experimental ARM64/API 26 root build
 now compiles, links and installs the configured desktop engine, JNI adapter and
@@ -27,6 +27,8 @@ actual Android execution; they do not all establish the same scope:
 | New default module instances | Native host and Android exposure-instance checks passed | Original creation/order/default helpers; independent parameters, exact pixels and topology undo/redo, stable IDs and stale-ID rejection. Host checks additionally cover 64-step history and actual reclamation of 1 + 80 abandoned instances while retaining redo objects |
 | Offline staging/APK verifier tests | 23 passed | Synthetic ELF/ZIP fixtures exercise validation, including pinned application native libraries and required original translation catalogs; they do not simulate the engine |
 | GitHub CI at `80bb9d3` | All three jobs passed | Desktop Release 25/25, Debug 25/25, standalone host 2/2, runtime tooling 23/23, Android lint/unit tasks and dev APK assembly; the CI APK uses the default dependency-only route |
+| GitHub CI at `90ce43520f` | All three jobs passed | Fresh remote Release 25/25 (72.23 seconds), Debug 25/25 (467.08 seconds), standalone host 2/2, runtime tooling 23/23, Android lint/unit tasks and dependency-only dev release APK assembly |
+| Full-engine GitHub workflow at `90ce43520f` | Complete build and audited main/test APK artifact passed | Native core/JNI/configured modules, fresh stripped installation, runtime staging, final APK hashes, signatures and 16 KiB load alignment; CI did not execute Android instrumentation |
 | Shared white-balance calculation | 35,057 Kelvin/tint pairs match the original desktop calculations | XYZ values are byte-identical and the inverse float results match; Kotlin contains no replacement formula |
 | Effective Android API guard | API 26 accepted with actual compiler macro checks; API 27 rejected | Handles NDK r27's legacy `CMAKE_SYSTEM_VERSION=1` sentinel without relaxing the API baseline |
 | GTK/GDK probe | Whole-archive link with undefined symbols disallowed passed | AArch64/API 26, no X11/Wayland or POSIX shared-memory entry points |
@@ -156,18 +158,35 @@ native/runtime changes on `feature/android-raw-editor`, as well as retaining
 manual dispatch. It records the native build, fresh stripped installation,
 staging, explicit Gradle prebuilt route, final APK runtime audit, signature
 check and native alignment audit, then uploads the main and instrumentation
-APKs. Its definition passed actionlint and shell syntax checks; a completed
-full-engine GitHub Actions build has not yet been verified. Branch push events
-avoid depending on indexing a manual entry on the default branch. This does
+APKs. The complete
+[remote run at `90ce43520f`](https://github.com/togekk39/darktable-android/actions/runs/40722614711)
+passed all these steps. Its artifact `12833671749`,
+`experimental-android-engine-90ce43520fd375ca7bf08663505022a68ca9e876`,
+is a 41,472,523-byte archive with SHA-256
+`f5eebdc10f1f05fea40e177fab72ddee65be7dd158049ce8ea1a4fbd227993fe`.
+It contains the signed engine APK, paired instrumentation APK, source commit,
+checksums and runtime/native audit reports. The final main APK runtime audit
+reports SHA-256 `21e0e173e39c911e4a3fab3862bad1256b6ab17f2802003d685e5e9605873019`,
+107 configured libraries, 109 stage libraries, one separately pinned application
+library and 805 assets. This is the recorded pre-XCF configuration. The job does not install or execute
+Android tests, so this is separate from the locally executed API 28 pair above.
+The [normal Android CI run](https://github.com/togekk39/darktable-android/actions/runs/40722614405)
+at the same commit independently passed all three jobs; its dev release remains
+the dependency-only APK. Full logs and artifact metadata are retained in
+`work/logs/ci90-github-summary.json` and the corresponding `ci90-job-*.log` files.
+Branch push events avoid depending on indexing a manual entry on the default
+branch. This does
 not modify the default branch or enable the normal dependency-only Gradle
 engine. Documentation-only changes are excluded from this expensive build.
-The updated workflow is currently committed locally. GitHub reads remain working,
-but `create_tree` and then a narrower `create_blob` call produced no response and
-were interrupted; neither produced its expected object. No commit/ref write was
-attempted, no rejection reason was returned, and the remote remains `80bb9d38`.
-The new full-engine workflow has therefore not been triggered remotely.
+GitHub publication through the explicit `togekk39` connection subsequently
+succeeded. All five formerly local commits were recreated and the feature ref
+advanced from `80bb9d38` to `90ce43520f` without force. Every recreated commit's
+tree matches its original local commit tree exactly. Original commits remain in
+the local backup branch and source bundle; the work branch now follows the
+published history. The recorded publication mapping is
+`work/logs/github-publication-success-2026-10-28.json`.
 
-The configured bootstrap still disables JPEG XL, AVIF/HEIF, JPEG 2000, WebP,
+The verified `90ce43520f` bootstrap disables JPEG XL, AVIF/HEIF, JPEG 2000, WebP,
 OpenEXR, XCF, G'MIC, AI, OpenCL, Lua, camera tethering and desktop integrations.
 The counts above describe that configuration, not all desktop capabilities.
 The [format coverage audit](FORMAT_PARITY.md) separates input decoders, actual

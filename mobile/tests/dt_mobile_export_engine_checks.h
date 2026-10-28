@@ -12,6 +12,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <signal.h>
+#include <sys/resource.h>
+#endif
 
 typedef struct mobile_export_conf_snapshot {
   const char *key;
@@ -23,7 +27,7 @@ static const char *const mobile_export_conf_keys[] = {
   "plugins/imageio/format/png/bpp", "plugins/imageio/format/png/compression",
   "plugins/imageio/format/tiff/bpp", "plugins/imageio/format/tiff/pixelformat",
   "plugins/imageio/format/tiff/compress", "plugins/imageio/format/tiff/compresslevel",
-  "metadata/resolution"
+  "plugins/imageio/format/xcf/bpp", "metadata/resolution"
 };
 enum { MOBILE_EXPORT_CONF_COUNT = sizeof(mobile_export_conf_keys) / sizeof(mobile_export_conf_keys[0]) };
 
@@ -210,6 +214,23 @@ finished:
   return found_sof && found_density;
 }
 
+/* Check the real writer's image header. This is a storage/precision assertion,
+ * not an independent pixel decoder or proof of GIMP import compatibility. */
+static int mobile_export_xcf_header(const char *path, uint32_t width, uint32_t height,
+                                    unsigned int precision)
+{
+  unsigned char data[30];
+  FILE *file = g_fopen(path, "rb");
+  if(!file) return 0;
+  const size_t count = fread(data, 1, sizeof(data), file);
+  fclose(file);
+  return count == sizeof(data) && !memcmp(data, "gimp xcf v012\0", 14)
+    && mobile_export_integer(data + 14, 4, 0) == width
+    && mobile_export_integer(data + 18, 4, 0) == height
+    && mobile_export_integer(data + 22, 4, 0) == 0 /* RGB */
+    && mobile_export_integer(data + 26, 4, 0) == precision;
+}
+
 static int export_settings_checks(dt_mobile_session *session, const char *image_path,
                                   const char *output_path, uint32_t source_width, uint32_t source_height)
 {
@@ -221,6 +242,7 @@ static int export_settings_checks(dt_mobile_session *session, const char *image_
   gchar *png = g_strconcat(output_path, ".settings.png", NULL);
   gchar *tiff = g_strconcat(output_path, ".settings.tiff", NULL);
   gchar *jpeg = g_strconcat(output_path, ".settings.jpg", NULL);
+  gchar *xcf = g_strconcat(output_path, ".settings.xcf", NULL);
   gchar *missing = g_strconcat(output_path, ".missing-directory/output.png", NULL);
   gchar *alias = g_strconcat(output_path, ".source-alias", NULL);
   mobile_export_conf_snapshot original[MOBILE_EXPORT_CONF_COUNT] = {{0}}, expected[MOBILE_EXPORT_CONF_COUNT] = {{0}};
@@ -238,6 +260,7 @@ static int export_settings_checks(dt_mobile_session *session, const char *image_
   /* Exercise exact string restoration and absence, not just effective ints. */
   g_hash_table_replace(darktable.conf->table, g_strdup(mobile_export_conf_keys[0]), g_strdup("095"));
   g_hash_table_remove(darktable.conf->table, "plugins/imageio/format/png/compression");
+  g_hash_table_replace(darktable.conf->table, g_strdup("plugins/imageio/format/xcf/bpp"), g_strdup("016"));
   previous_override = g_strdup(g_hash_table_lookup(darktable.conf->override_entries, mobile_export_conf_keys[0]));
   dt_pthread_mutex_unlock(&darktable.conf->mutex);
   mobile_export_conf_capture(expected);
@@ -314,6 +337,98 @@ static int export_settings_checks(dt_mobile_session *session, const char *image_
       EXPORT_CHECK(mobile_export_conf_matches(expected));
     }
   }
+  const char *xcf_options = strstr(formats, "\"id\":\"xcf\"");
+#ifdef DT_MOBILE_TEST_REQUIRE_XCF
+  EXPORT_CHECK(xcf_options);
+#endif
+  if(xcf_options)
+  {
+    const char *next_format = strstr(xcf_options + 1, "{\"id\":");
+    gchar *options = next_format ? g_strndup(xcf_options, next_format - xcf_options) : g_strdup(xcf_options);
+    const int advertised = strstr(options, "\"mimeType\":\"image/x-xcf\"")
+      && strstr(options, "{\"value\":1,\"label\":\"8 bit unsigned\"}")
+      && strstr(options, "{\"value\":2,\"label\":\"16 bit unsigned\"}")
+      && strstr(options, "{\"value\":3,\"label\":\"32 bit float\"}")
+      && !strstr(options, "\"pngCompression\"") && !strstr(options, "\"tiffCompression\"")
+      && !strstr(options, "\"jpegSubsample\"") && !strstr(options, "\"dpi\"");
+    g_free(options);
+    EXPORT_CHECK(advertised);
+    const int pixel_formats[] = { DT_MOBILE_EXPORT_UINT8, DT_MOBILE_EXPORT_UINT16, DT_MOBILE_EXPORT_FLOAT32 };
+    /* XCF stores the transfer function in its precision identifier. sRGB
+     * must use gamma encodings, whereas linear Rec709 must use linear. */
+    const unsigned int precisions[] = { 150, 250, 650 };
+    for(size_t i = 0; i < 3; i++)
+    {
+      settings = (dt_mobile_export_settings)DT_MOBILE_EXPORT_SETTINGS_INIT;
+      settings.pixel_format = pixel_formats[i];
+      settings.output_profile = DT_MOBILE_EXPORT_PROFILE_SRGB;
+      settings.metadata_policy = DT_MOBILE_EXPORT_METADATA_SOURCE_NONE;
+      EXPORT_OK(dt_mobile_export_with_settings(session, xcf, "xcf", &settings));
+      EXPORT_CHECK(mobile_export_xcf_header(xcf, source_width, source_height, precisions[i]));
+      EXPORT_CHECK(mobile_export_conf_matches(expected));
+    }
+    settings.output_profile = DT_MOBILE_EXPORT_PROFILE_LINEAR_REC709;
+    EXPORT_OK(dt_mobile_export_with_settings(session, xcf, "xcf", &settings));
+    EXPORT_CHECK(mobile_export_xcf_header(xcf, source_width, source_height, 600));
+    EXPORT_CHECK(mobile_export_conf_matches(expected));
+    /* DEFAULT must still honor the existing original-module setting, not
+     * the last export's temporary 32-bit precision. */
+    settings.pixel_format = DT_MOBILE_EXPORT_PIXEL_DEFAULT;
+    EXPORT_OK(dt_mobile_export_with_settings(session, xcf, "xcf", &settings));
+    EXPORT_CHECK(mobile_export_xcf_header(xcf, source_width, source_height, 200));
+    EXPORT_CHECK(mobile_export_conf_matches(expected));
+#ifdef __linux__
+    /* Force a real buffered writer/close failure. Only this serialized export
+     * runs under the temporary file-size limit; the original destination must
+     * survive and the per-export configuration must still be restored. */
+    EXPORT_CHECK(g_file_set_contents(xcf, "preserve-existing-destination", -1, NULL));
+    struct rlimit old_limit;
+    struct sigaction old_signal, ignored_signal = {0};
+    EXPORT_CHECK(getrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+    ignored_signal.sa_handler = SIG_IGN;
+    sigemptyset(&ignored_signal.sa_mask);
+    EXPORT_CHECK(sigaction(SIGXFSZ, &ignored_signal, &old_signal) == 0);
+    struct rlimit short_limit = old_limit;
+    short_limit.rlim_cur = 1;
+    const int limit_set = setrlimit(RLIMIT_FSIZE, &short_limit);
+    dt_mobile_status failed_write = DT_MOBILE_OK;
+    if(limit_set == 0)
+    {
+      settings.pixel_format = DT_MOBILE_EXPORT_FLOAT32;
+      failed_write = dt_mobile_export_with_settings(session, xcf, "xcf", &settings);
+    }
+    const int limit_restored = setrlimit(RLIMIT_FSIZE, &old_limit);
+    const int signal_restored = sigaction(SIGXFSZ, &old_signal, NULL);
+    EXPORT_CHECK(limit_set == 0 && limit_restored == 0 && signal_restored == 0);
+    EXPORT_CHECK(failed_write == DT_MOBILE_ERROR_PROCESSING);
+    gchar *preserved = NULL;
+    gsize preserved_size = 0;
+    const int read_preserved = g_file_get_contents(xcf, &preserved, &preserved_size, NULL);
+    const int destination_unchanged = read_preserved
+      && preserved_size == strlen("preserve-existing-destination")
+      && !memcmp(preserved, "preserve-existing-destination", preserved_size);
+    g_free(preserved);
+    EXPORT_CHECK(destination_unchanged);
+    EXPORT_CHECK(mobile_export_conf_matches(expected));
+#endif
+    settings.pixel_format = DT_MOBILE_EXPORT_UINT8;
+    EXPORT_CHECK(dt_mobile_export_with_settings(session, missing, "xcf", &settings) == DT_MOBILE_ERROR_IO);
+    EXPORT_CHECK(mobile_export_conf_matches(expected));
+    EXPORT_CHECK(dt_mobile_export_with_settings(session, image_path, "xcf", &settings)
+                 == DT_MOBILE_ERROR_INVALID_ARGUMENT);
+    settings.png_compression = 1;
+    EXPORT_CHECK(dt_mobile_export_with_settings(session, xcf, "xcf", &settings) == DT_MOBILE_ERROR_UNSUPPORTED);
+    settings.png_compression = -1;
+    settings.tiff_compression = 1;
+    EXPORT_CHECK(dt_mobile_export_with_settings(session, xcf, "xcf", &settings) == DT_MOBILE_ERROR_UNSUPPORTED);
+    settings.tiff_compression = -1;
+    settings.jpeg_subsample = 1;
+    EXPORT_CHECK(dt_mobile_export_with_settings(session, xcf, "xcf", &settings) == DT_MOBILE_ERROR_UNSUPPORTED);
+    settings.jpeg_subsample = -1;
+    settings.dpi = 240;
+    EXPORT_CHECK(dt_mobile_export_with_settings(session, xcf, "xcf", &settings) == DT_MOBILE_ERROR_UNSUPPORTED);
+    EXPORT_CHECK(mobile_export_conf_matches(expected));
+  }
   if(strstr(formats, "\"id\":\"jpeg\""))
   {
     settings = (dt_mobile_export_settings)DT_MOBILE_EXPORT_SETTINGS_INIT;
@@ -361,8 +476,8 @@ finished:
   dt_mobile_free_buffer(modules_before); dt_mobile_free_buffer(modules_after);
   g_free(source_before); g_free(source_after); g_free(previous_override);
   g_free(srgb_profile_hash); g_free(adobe_profile_hash);
-  g_unlink(png); g_unlink(tiff); g_unlink(jpeg); g_unlink(alias);
-  g_free(png); g_free(tiff); g_free(jpeg); g_free(missing); g_free(alias);
+  g_unlink(png); g_unlink(tiff); g_unlink(jpeg); g_unlink(xcf); g_unlink(alias);
+  g_free(png); g_free(tiff); g_free(jpeg); g_free(xcf); g_free(missing); g_free(alias);
 #undef EXPORT_CHECK
 #undef EXPORT_OK
   return success;
