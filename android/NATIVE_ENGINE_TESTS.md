@@ -113,9 +113,27 @@ and checks the ELF's shared-library dependencies.
 
 On 2026-10-26, the original standalone assembly reproducer failed with
 `SIGSEGV` on official emulator 30.8.4 build 7600983, running the unmodified
-official ARM64 API 26 image. The same investigation found that the original
-vectorized OpenMP loops failed, while nonvectorized diagnostic loops passed;
-isolated `powf` ABI preservation and DUP instruction probes also passed. The
-standalone sequence removes OpenMP, libm and image processing from that failure
-case. Verification on emulator 31.3.14 is pending. These observations do not
-justify changing desktop algorithms or disabling production vectorization.
+official ARM64 API 26 image. Official emulator 37.2.12 subsequently reproduced
+the failure with that image and with the official AOSP API 28 ARM64 image.
+QMP on emulator 37.2.12 reports QEMU `2.12.0-19097-g85fa07f04ef`, so those SDK
+release numbers do not establish independent QEMU implementations.
+
+On 2026-10-27 the same API 28 guest and original dynamic diagnostic binary
+(SHA-256 `819f9b660db90649402c349199c2ca93697439cb78cd5a5580b93f27044a854c`)
+failed in normal host mode, then passed after QMP/HMP `singlestep on`. The host
+reported `singlestep: true`; the diagnostic returned exit 0 with
+`canaries=preserved all65536values=exact`. This setting changes host emulation,
+not the Android images, authentication, SELinux policy, engine algorithms or
+production compiler flags. The API 28 framework also completed boot with
+`sys.boot_completed=1` and SELinux enforcing. The complete JNI editing/export
+test in this host mode is still pending.
+
+An independent, checksum-verified Debian QEMU 10.0.13 user-mode run also passes
+with the exact original dynamic executable and original API 28 Bionic
+linker/libc/libdl files. This is useful architecture evidence, but it is not an
+Android guest or darktable processing test. Individual `powf` ABI, DUP and
+simple zero-vector store probes also pass, while prefix snapshots change the
+execution context. The evidence does not identify a single defective opcode or
+prove a particular translation bug. Keep the diagnostic and host-mode details
+with any execution report; these observations do not justify changing desktop
+algorithms or disabling production vectorization.

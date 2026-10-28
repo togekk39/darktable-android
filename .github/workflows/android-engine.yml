@@ -1,9 +1,29 @@
 name: Experimental Android engine APK
 
-# This expensive build is opt-in. It does not enable the default Gradle engine
-# or establish RAW/GPR execution on an Android device.
+# Native changes on the Android feature branch produce a complete runtime APK.
+# This does not enable the default Gradle engine or establish device execution.
 on:
   workflow_dispatch:
+  push:
+    branches: [feature/android-raw-editor]
+    paths:
+      - .github/workflows/android-engine.yml
+      - mobile/core/**
+      - mobile/jni/**
+      - mobile/include/**
+      - mobile/cmake/**
+      - mobile/dependencies/**
+      - '!mobile/dependencies/**/*.md'
+      - mobile/CMakeLists.txt
+      - src/**
+      - cmake/**
+      - CMakeLists.txt
+      - .gitmodules
+      - android/app/build.gradle.kts
+      - android/app/src/main/**
+      - android/app/src/androidTest/**
+      - android/build.gradle.kts
+      - android/settings.gradle.kts
 
 permissions:
   contents: read
@@ -116,8 +136,11 @@ jobs:
           # Both destinations are new, separate directories in this fresh job.
           test ! -e "$install_prefix"
           test ! -e "$runtime_stage"
+          # Strip only the fresh installation; keep the build's original debug
+          # symbols available for diagnostics. Staging/Gradle preserve these
+          # installed bytes exactly, with no further binary rewriting.
           cmake --install "$DT_MOBILE_ENGINE_BUILD" --config "$DT_MOBILE_ENGINE_BUILD_TYPE" \
-            --prefix "$install_prefix" 2>&1 | tee "$task_root/logs/native-install.log"
+            --prefix "$install_prefix" --strip 2>&1 | tee "$task_root/logs/native-install.log"
           python3 mobile/dependencies/stage-android-runtime.py \
             --prefix "$install_prefix" \
             --library-root "$DT_MOBILE_VCPKG_INSTALLED/arm64-android/lib" \

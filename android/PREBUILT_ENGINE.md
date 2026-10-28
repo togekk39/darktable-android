@@ -26,6 +26,15 @@ assets/darktable-runtime/lensfun/version_1/...
 jniLibs/arm64-v8a/*.so
 ```
 
+For a smaller installation APK, install the completed native build into a
+fresh prefix with `cmake --install /path/to/build --prefix /fresh/prefix --strip`,
+then stage that prefix. Keep the original build libraries for symbolized crash
+diagnostics. Stripping is an installation step; staging and Gradle still retain
+the installed bytes exactly. When replacing a much larger native runtime in an
+existing Android build directory, clear the generated APK/package incremental
+state before repackaging so unused ZIP space is not retained. A fresh CI build
+does not have that incremental archive history.
+
 Build using its absolute path:
 
 ```sh
