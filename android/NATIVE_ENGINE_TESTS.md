@@ -128,8 +128,13 @@ reported `singlestep: true`; the diagnostic returned exit 0 with
 `canaries=preserved all65536values=exact`. This setting changes host emulation,
 not the Android images, authentication, SELinux policy, engine algorithms or
 production compiler flags. The API 28 framework also completed boot with
-`sys.boot_completed=1` and SELinux enforcing. The complete JNI editing/export
-test in this host mode is still pending.
+`sys.boot_completed=1` and SELinux enforcing. A later cold boot with fixed host
+instruction timing (`-singlestep -icount shift=0,align=off,sleep=on`) passed the
+earlier main/test pair's complete Fusion JNI edit/undo/full-size PNG export/
+source-protection/reopen test. The newer test described above additionally
+requires default-instance checks and is being run separately. Record exact
+APK hashes and host settings; this evidence is one fixture/runtime and does not
+establish physical-device behavior or performance.
 
 An independent, checksum-verified Debian QEMU 10.0.13 user-mode run also passes
 with the exact original dynamic executable and original API 28 Bionic

@@ -7,12 +7,13 @@ modules using real GTK3 Broadway and Android Bionic. Its installed runtime has
 been staged and checked. An experimental engine-enabled development APK has
 also been assembled and passed final runtime byte/hash verification. Installation,
 JNI/core loading, runtime extraction and opening one original Fusion GPR have
-now run on an official ARM64/API 26 Android emulator. That run crashes at its
-first pixel preview in a lowpass OpenMP LUT loop. A separate instruction
-diagnostic now passes in an API 28 guest when the host emulator's single-step
-mode is enabled; the full JNI editing/export test in that mode is still pending.
-No Android editing/export run has passed. The default Gradle engine remains
-disabled.
+run on an official ARM64/API 26 Android emulator; its initial normal-mode preview
+failed. A preserved compact APK pair subsequently passed the complete Fusion
+GPR JNI edit/undo/full-size PNG export/source-protection/reopen test on ARM64/API 28
+with host single-step emulation and fixed virtual timing. The newer default-instance
+APK is being tested separately. This is one original fixture/runtime, not complete
+format/feature parity, physical-device validation or performance evidence.
+The default Gradle engine remains disabled.
 
 The following recorded results distinguish local build checks, GitHub CI and
 actual Android execution; they do not all establish the same scope:
@@ -40,8 +41,9 @@ actual Android execution; they do not all establish the same scope:
 | Android original Fusion GPR open | Passed | `GPBK7066.GPR`, source SHA-256 `c03eccdc334dc5b35cf6385799b219f4c9a0bc18ccbe70fe433237d98f352247`; native open returned a live session |
 | Initial API 26 JNI preview/edit/export run | Failed at first preview | SIGSEGV in `lowpass.c` brightness LUT's OpenMP outlined loop; that run stopped before exposure, Kelvin/tint, undo/redo and full-size export |
 | API 28 instruction diagnostic | Passed with host `singlestep on`; failed in normal host mode | Same original executable and Android image; all 65,536 values exact, allocation canaries intact, exit 0 in single-step mode. This is not the JNI engine test |
-| API 28 framework boot | Completed with host `singlestep on` | `sys.boot_completed=1`, boot animation exited successfully and SELinux remained enforcing; full engine JNI execution in this mode is still pending |
-| API 28 JNI original preview and exposure | Passed in the preserved compact APK run | Fixed host instruction timing and single-step mode; actual original Fusion GPR preview returned, exposure changed pixels, and undo/redo restored exact previews. Kelvin/tint, export and final close/reopen checks are still running |
+| API 28 framework boot | Completed with host `singlestep on` | `sys.boot_completed=1`, boot animation exited successfully and SELinux remained enforcing; the later complete JNI run is recorded below |
+| API 28 JNI original preview and exposure | Passed in the preserved compact APK run | Fixed host instruction timing and single-step mode; actual original Fusion GPR preview returned, exposure changed pixels, and undo/redo restored exact previews |
+| API 28 complete Fusion JNI run | Passed; runner `OK (1 test)` and report `status: passed` | Preserved main `b4ebf619…` / test `688b5d44…`; native capabilities 3, real exposure and Kelvin/tint pixels, exact undo/redo, Android-decodable 3104×3000 PNG, unchanged source after final close, and reopened preview exact. Host `-singlestep -icount shift=0,align=off,sleep=on`; the new default-instance APK remains a separate run |
 
 The compact installation APK has SHA-256
 `b4ebf6195869ae0f80f42dffda21839c66271a3d841ef67b725cc3327ed7ce72`.
@@ -107,8 +109,8 @@ On 2026-10-27, QMP/HMP `singlestep on` changed only the host execution mode.
 The same API 28 guest and original dynamic diagnostic executable then returned
 exit 0, preserved its allocation canaries and produced all 65,536 values
 exactly. The API 28 framework also reached `sys.boot_completed=1`, with a
-successful boot-animation exit and SELinux enforcing. The full JNI smoke test
-in this mode remains pending. An independent
+successful boot-animation exit and SELinux enforcing. That initial diagnostic
+run did not establish full JNI execution. An independent
 Debian QEMU 10.0.13 user-mode run also passes using that exact executable and
 the original API 28 Bionic linker/libc/libdl files; user-mode execution is not
 Android guest or darktable execution proof. Together these results narrow the
@@ -118,9 +120,14 @@ A subsequent cold boot using host `-singlestep` and fixed instruction timing
 `-icount shift=0,align=off,sleep=on` reached framework boot completion and
 SELinux enforcing. The original vector diagnostic passed again, both earlier
 compact APKs installed successfully, and the real JNI test reached native
-capabilities, runtime extraction/configuration and the original GPR open phase.
-The run is still in progress; it is using the preserved earlier APK pair, not
-the new instance APK. Earlier single-step installation attempts timed out;
+capabilities, runtime extraction/configuration and all edit/export/reopen checks.
+The runner reported `OK (1 test)` and the saved report has `status: passed`.
+The resulting Android-decoded PNG is 3104×3000, 14,830,811 bytes, SHA-256
+`e8b53d300d6bf293ae9ed32cd49a27446c09bca5dfc4a78ee4767a326fdb1fd6`.
+The original GPR hash remained unchanged after final close, and reopened preview
+pixels matched exactly. This used the preserved earlier APK pair; the newer
+default-instance pair is a separate run currently in progress.
+Earlier single-step installation attempts timed out;
 the host timing settings must accompany any eventual result. They do not alter
 guest image bytes or production processing algorithms and establish no device
 performance claim.
@@ -155,6 +162,8 @@ The new full-engine workflow has therefore not been triggered remotely.
 The configured bootstrap still disables JPEG XL, AVIF/HEIF, JPEG 2000, WebP,
 OpenEXR, XCF, G'MIC, AI, OpenCL, Lua, camera tethering and desktop integrations.
 The counts above describe that configuration, not all desktop capabilities.
+The [format coverage audit](FORMAT_PARITY.md) separates input decoders, actual
+processed-output modules, optional RAW subtypes and unexposed export settings.
 Android font discovery/Fontconfig setup and SVG text watermark rendering also
 need runtime integration and validation. Creating default module instances is
 implemented with host-tested topology undo/redo; copying current settings/masks,

@@ -10,10 +10,13 @@ by its processing core; it does not imply a browser screen.
 The experimental Android ARM64/API 26 core, JNI and configured modules now
 build and link with real GTK3 Broadway, and their installed runtime has been
 staged and verified. An experimental engine-enabled APK has passed final
-runtime byte/hash verification. The default Gradle engine remains disabled;
-installation, JNI/core loading and one Fusion GPR open have run on an ARM64/API
-26 emulator. Its first native preview crashes, so Android editing/export has
-not passed.
+runtime byte/hash verification. The default Gradle engine remains disabled.
+A preserved APK pair passed the complete JNI Fusion GPR test on ARM64/API 28:
+real previews, exposure, native Kelvin/tint, exact undo/redo, full-size PNG export
+and Android decoding, source protection and close/reopen. That run required
+host single-step emulation with fixed virtual timing; it is one fixture/runtime,
+not full desktop parity or device performance evidence. The newer default-instance
+APK pair is being tested separately.
 See [port status](dependencies/PORTING_STATUS.md) for the dated evidence and
 remaining limits.
 

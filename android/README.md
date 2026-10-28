@@ -13,11 +13,12 @@ The experimental ARM64/API 26 core, JNI and configured modules now build/link
 with real GTK3 Broadway, and their runtime has been installed and staged.
 The explicit [prebuilt route](PREBUILT_ENGINE.md) packages that stage, and an
 experimental engine-enabled APK has passed final runtime byte/hash verification.
-Installation, JNI/core loading and one original Fusion GPR open have run on an
-ARM64/API 26 emulator, but its first native preview crashes and editing/export
-has not passed; see
-[port status](../mobile/dependencies/PORTING_STATUS.md). This is not yet a verified
-standalone Android RAW editor or full desktop feature parity.
+A preserved APK pair passed the complete JNI Fusion GPR edit/undo/export/reopen
+test on ARM64/API 28 with host single-step emulation and fixed virtual timing;
+the newer default-instance APK pair is being tested separately. See
+[port status](../mobile/dependencies/PORTING_STATUS.md) for exact scope and host
+settings. One fixture/runtime does not establish full desktop parity, physical
+device behavior or performance.
 
 The numeric bridge deliberately exposes an audited subset: exposure/black
 correction and compensation switches, Velvia strength/bias, Lab color contrast,
@@ -32,7 +33,8 @@ the editor focuses the returned instance and edits its independent settings.
 One undo removes the instance, and redo restores its stable identifier and settings.
 This does not copy the source instance's edits or masks. Copying current settings,
 deleting and reordering instances remain pending. Host native tests and Android JVM
-tests pass; this feature still requires a newly built engine APK and Android execution.
+tests pass and the new engine APK has been built; this feature's Android run is
+still in progress.
 
 The curve editors support 2–20 nodes through dragging or numeric coordinates,
 adding/deleting nodes, resetting to identity, and choosing the upstream cubic
@@ -124,9 +126,9 @@ prepares this tree and its native-library closure from a complete installed
 Android engine. The explicit [prebuilt engine route](PREBUILT_ENGINE.md)
 consumes the verified stage when selected by a project property. Native
 build/link, staging and final APK runtime-content validation have passed for the
-configured bootstrap. Installation, native loading and one Fusion GPR open have
-run on an ARM64/API 26 emulator; its first preview failed, and Android editing/export
-remains unverified. Disabled optional codecs and unported controls remain separate work.
+configured bootstrap. A preserved APK pair also passed the separate ARM64/API 28
+Fusion JNI edit/export test with the recorded host execution settings. Disabled
+optional codecs, unported controls and broader device/format checks remain separate work.
 
 ## Restoring the Gradle Wrapper binary
 
