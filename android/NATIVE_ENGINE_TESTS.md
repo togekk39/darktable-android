@@ -132,7 +132,11 @@ production compiler flags. The API 28 framework also completed boot with
 instruction timing (`-singlestep -icount shift=0,align=off,sleep=on`) passed the
 earlier main/test pair's complete Fusion JNI edit/undo/full-size PNG export/
 source-protection/reopen test. The newer test described above additionally
-requires default-instance checks and is being run separately. Record exact
+requires default-instance checks and also passed all 41 phases with main APK
+`734cfbdafff4cbac0f69cd7fb00f6ff5e0d25f61dd0044d80ad441be4840d225`
+and test APK `228022cacd52d795d5e36002d184883dfb1bb5594e04e16fb32545a50f289b20`.
+The actual exported 3104×3000 PNG was pulled and SHA-256 verified; its full
+8-bit RGB pixel data match the earlier APK's output exactly. Record exact
 APK hashes and host settings; this evidence is one fixture/runtime and does not
 establish physical-device behavior or performance.
 

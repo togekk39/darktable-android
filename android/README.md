@@ -15,7 +15,7 @@ The explicit [prebuilt route](PREBUILT_ENGINE.md) packages that stage, and an
 experimental engine-enabled APK has passed final runtime byte/hash verification.
 A preserved APK pair passed the complete JNI Fusion GPR edit/undo/export/reopen
 test on ARM64/API 28 with host single-step emulation and fixed virtual timing;
-the newer default-instance APK pair is being tested separately. See
+the newer default-instance APK pair also passed its complete 41-phase run. See
 [port status](../mobile/dependencies/PORTING_STATUS.md) for exact scope and host
 settings. One fixture/runtime does not establish full desktop parity, physical
 device behavior or performance.
@@ -33,8 +33,9 @@ the editor focuses the returned instance and edits its independent settings.
 One undo removes the instance, and redo restores its stable identifier and settings.
 This does not copy the source instance's edits or masks. Copying current settings,
 deleting and reordering instances remain pending. Host native tests and Android JVM
-tests pass and the new engine APK has been built; this feature's Android run is
-still in progress.
+tests pass, and the exposure-instance JNI sequence also passed on the ARM64/API 28
+Fusion fixture with the recorded host settings. Other modules, UI interactions
+and device/runtime combinations still need validation.
 
 The curve editors support 2–20 nodes through dragging or numeric coordinates,
 adding/deleting nodes, resetting to identity, and choosing the upstream cubic

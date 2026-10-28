@@ -11,7 +11,7 @@ run on an official ARM64/API 26 Android emulator; its initial normal-mode previe
 failed. A preserved compact APK pair subsequently passed the complete Fusion
 GPR JNI edit/undo/full-size PNG export/source-protection/reopen test on ARM64/API 28
 with host single-step emulation and fixed virtual timing. The newer default-instance
-APK is being tested separately. This is one original fixture/runtime, not complete
+APK also passed its complete 41-phase run. This is one original fixture/runtime, not complete
 format/feature parity, physical-device validation or performance evidence.
 The default Gradle engine remains disabled.
 
@@ -24,7 +24,7 @@ actual Android execution; they do not all establish the same scope:
 | Android unit tests | 47 passed, no failures/errors/skips | Includes five new instance capability/selector/selection regressions; Kotlin/Compose and adapter boundaries, not native Android execution |
 | Android lint | 0 errors, 10 existing warnings | `lintDevDebug` |
 | Desktop-backed mobile engine tests | 25 passed in 165.67 seconds after the instance changes | Six original official GPR samples through RawSpeed, full-resolution PNG export/redecode, Kelvin/tint pixels and undo/redo; desktop/Android resource resolver fixtures and original core/modules rebuilt |
-| New default module instances | Native host regression passed | Original creation/order/default helpers; independent parameters, exact pixels and topology undo/redo, stable IDs, stale-ID rejection and 64-step history. Linux cleanup instrumentation preserves retained redo objects and confirms reclamation of 1 + 80 abandoned instances; Android execution remains pending |
+| New default module instances | Native host and Android exposure-instance checks passed | Original creation/order/default helpers; independent parameters, exact pixels and topology undo/redo, stable IDs and stale-ID rejection. Host checks additionally cover 64-step history and actual reclamation of 1 + 80 abandoned instances while retaining redo objects |
 | Offline staging/APK verifier tests | 23 passed | Synthetic ELF/ZIP fixtures exercise validation, including pinned application native libraries and required original translation catalogs; they do not simulate the engine |
 | GitHub CI at `80bb9d3` | All three jobs passed | Desktop Release 25/25, Debug 25/25, standalone host 2/2, runtime tooling 23/23, Android lint/unit tasks and dev APK assembly; the CI APK uses the default dependency-only route |
 | Shared white-balance calculation | 35,057 Kelvin/tint pairs match the original desktop calculations | XYZ values are byte-identical and the inverse float results match; Kotlin contains no replacement formula |
@@ -34,7 +34,7 @@ actual Android execution; they do not all establish the same scope:
 | Real runtime stage | 109 native libraries and 805 data files verified | Adds NDK `libc++_shared.so` and `libomp.so`; matching darktable data, 36 original translation catalogs and Lensfun database retained |
 | Final development APK | Assemble and final runtime verifier passed | 109 engine/runtime libraries, 107 configured targets, 805 data files and one separately pinned AndroidX application native library; 110 native libraries in total |
 | Compact installation APK | 40,413,700 bytes; signature and final runtime verifier passed | Fresh CMake `--strip` installation reduces configured libraries from 241,128,512 to 45,914,616 bytes. All allocated sections, including `.text` and `.rodata`, and all load-segment fields match the original 107 libraries exactly |
-| New default-instance APK at local `e084d6f085` | 40,423,928 bytes; build, signature and final runtime verifier passed | Fresh rebuilt 107 targets, 109 staged libraries, 805 data files and 110 final APK libraries; all 2,311 allocated sections and load/dynamic metadata retained exactly through stripping. Paired instrumentation APK contains the new instance checks; their Android execution remains pending |
+| New default-instance APK at local `e084d6f085` | 40,423,928 bytes; build, signature, runtime verifier and complete Fusion JNI run passed | Fresh rebuilt 107 targets, 109 staged libraries, 805 data files and 110 final APK libraries; all 2,311 allocated sections and load/dynamic metadata retained exactly through stripping. Android execution scope is the fixture/runtime recorded below |
 | APK signature and manifest | SDK signature verification passed using v2 signing; ARM64, minimum API 26, target API 35 | Development/debug certificate; signature and manifest checks do not establish installation or native execution |
 | Native load alignment | Every staged library and all 110 final APK libraries have 16 KiB `PT_LOAD` alignment | This is ELF validation, not execution on a 4 KiB or 16 KiB Android device |
 | Android installation and JNI/core loading | Passed on ARM64/API 26 emulator | Signed APK installation, real native capability mask 3 and private runtime extraction/configuration |
@@ -44,6 +44,8 @@ actual Android execution; they do not all establish the same scope:
 | API 28 framework boot | Completed with host `singlestep on` | `sys.boot_completed=1`, boot animation exited successfully and SELinux remained enforcing; the later complete JNI run is recorded below |
 | API 28 JNI original preview and exposure | Passed in the preserved compact APK run | Fixed host instruction timing and single-step mode; actual original Fusion GPR preview returned, exposure changed pixels, and undo/redo restored exact previews |
 | API 28 complete Fusion JNI run | Passed; runner `OK (1 test)` and report `status: passed` | Preserved main `b4ebf619…` / test `688b5d44…`; native capabilities 3, real exposure and Kelvin/tint pixels, exact undo/redo, Android-decodable 3104×3000 PNG, unchanged source after final close, and reopened preview exact. Host `-singlestep -icount shift=0,align=off,sleep=on`; the new default-instance APK remains a separate run |
+| API 28 complete default-instance Fusion run | Passed; runner `OK (1 test)`, report `status: passed`, 41 completed phases | Main `734cfbda…` / test `228022ca…`; adds `exposure@1`, independent exposure pixels, edit and topology undo/redo, retained ID and retired-selector rejection, then completes Kelvin/tint, full-size PNG, source protection and reopen checks under the same host settings |
+| Full-resolution output regression | All 27,936,000 RGB bytes identical across both APK runs | Independently decoded 8-bit 3104×3000 PNGs; pixel SHA-256 `7d1e6eaf7133d3db50bf857ac59033553338f0285104c30f15944d635dc18f66`. Initial previews also match exactly; PNG file/metadata bytes differ |
 
 The compact installation APK has SHA-256
 `b4ebf6195869ae0f80f42dffda21839c66271a3d841ef67b725cc3327ed7ce72`.
@@ -61,8 +63,13 @@ The newer default-instance APK is
 `734cfbdafff4cbac0f69cd7fb00f6ff5e0d25f61dd0044d80ad441be4840d225`.
 Its paired test APK has SHA-256
 `228022cacd52d795d5e36002d184883dfb1bb5594e04e16fb32545a50f289b20`.
-Both signatures, the exact runtime bytes and native alignment were verified;
-the new instance feature has not yet run on Android.
+Both signatures, exact runtime bytes and native alignment were verified. Its
+complete Android run passed with the recorded host settings. The actual output
+is retained at `work/deliverables/android-fusion-instances-edited-full-size.png`,
+14,830,806 bytes, SHA-256
+`7f0a8fdc81b7fdba246d51a0a0d16fbec4d71c1aa4bff55fe3f0413c2a2dac1b`.
+The source GPR remained unchanged after final close; the saved report and output
+comparison are retained beside the artifact.
 
 Its separate application native dependency is the pinned AndroidX
 `graphics-path:1.0.1` library described in the
@@ -125,8 +132,9 @@ The runner reported `OK (1 test)` and the saved report has `status: passed`.
 The resulting Android-decoded PNG is 3104×3000, 14,830,811 bytes, SHA-256
 `e8b53d300d6bf293ae9ed32cd49a27446c09bca5dfc4a78ee4767a326fdb1fd6`.
 The original GPR hash remained unchanged after final close, and reopened preview
-pixels matched exactly. This used the preserved earlier APK pair; the newer
-default-instance pair is a separate run currently in progress.
+pixels matched exactly. This used the preserved earlier APK pair. The newer
+default-instance pair then passed its own full 41-phase run and the independent
+full-resolution pixel comparison recorded above.
 Earlier single-step installation attempts timed out;
 the host timing settings must accompany any eventual result. They do not alter
 guest image bytes or production processing algorithms and establish no device

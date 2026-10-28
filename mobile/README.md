@@ -16,7 +16,8 @@ real previews, exposure, native Kelvin/tint, exact undo/redo, full-size PNG expo
 and Android decoding, source protection and close/reopen. That run required
 host single-step emulation with fixed virtual timing; it is one fixture/runtime,
 not full desktop parity or device performance evidence. The newer default-instance
-APK pair is being tested separately.
+APK pair also passed its complete 41-phase JNI run, including instance creation,
+independent edits, topology undo/redo and retired-selector rejection.
 See [port status](dependencies/PORTING_STATUS.md) for the dated evidence and
 remaining limits.
 
@@ -133,7 +134,9 @@ Snapshots retain retired instances only while reachable; abandoned instances are
 reclaimed. The Android editor focuses the returned instance and routes its controls
 through the same native APIs. Copying current settings/masks and deleting or
 reordering instances still need separate support. Native host regressions cover
-pixel-exact restoration and actual cleanup; Android execution remains unverified.
+pixel-exact restoration and actual cleanup. The exposure-instance sequence also
+passed on the ARM64/API 28 Fusion fixture with the recorded host settings; other
+modules and device/runtime combinations still need validation.
 
 `dt_mobile_set_module_params` is a low-level interface for trusted native
 integrations that already own a validated upstream parameter struct for the exact

@@ -11,7 +11,7 @@ staged in a fresh environment. An experimental engine-enabled development APK
 has also passed packaging and final runtime byte verification. A preserved APK
 pair passed the full Fusion GPR JNI edit/undo/export/reopen test on ARM64/API 28
 with host single-step emulation and fixed virtual timing. The newer default-instance
-APK is being tested separately; neither result establishes all formats/features
+APK also passed its full 41-phase run; neither result establishes all formats/features
 or physical-device performance.
 See the dated [port status](PORTING_STATUS.md)
 for the exact configuration, test results and remaining work.
