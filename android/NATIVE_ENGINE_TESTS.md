@@ -1,6 +1,46 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Android native engine execution test
 
+## Parameter editor and color-control regression
+
+`ModuleControlsTest` uses the production Compose module component with callback
+fixtures. It tests explicit expansion, entering and applying signed exposure,
+enabling a module to reveal its editor, collapse and the unavailable-controls
+explanation. It does not simulate a native pixelpipe.
+
+`NativeColorControlsTest` separately creates a 32x24 RGB PNG fixture and uses real
+JNI plus the original `colisa` and `colorize` modules. Set
+`-e requireColorControls true` so a missing engine is a failure. It verifies all
+seven fields, native bounds, private-version rejection, native-to-Kotlin control
+discovery and initial selection, pixel changes, exact undo/redo and source hashes.
+The 19 preview calls include explicit priming and a strict repeatability check;
+the existing first-render observation on a host PNG is tracked in PORTING_STATUS.
+
+```sh
+"$ADB_BIN" -s "$TEST_SERIAL" shell am instrument -w -r \
+  -e class org.example.darktableandroid.ModuleControlsTest \
+  "$APP_PACKAGE.test/androidx.test.runner.AndroidJUnitRunner"
+"$ADB_BIN" -s "$TEST_SERIAL" shell am instrument -w -r \
+  -e class org.example.darktableandroid.nativecore.NativeColorControlsTest \
+  -e requireColorControls true \
+  "$APP_PACKAGE.test/androidx.test.runner.AndroidJUnitRunner"
+"$ADB_BIN" -s "$TEST_SERIAL" exec-out run-as "$APP_PACKAGE" \
+  cat files/color-controls/result.json > android-color-controls-result.json
+```
+
+The pair built from the source content committed locally as `6283ef1858` passed
+all three Compose tests and the 53-phase JNI test on the official ARM64/API 28
+guest using host single-step emulation with fixed virtual timing. Main APK SHA-256
+`1cb0f7e1e07149105149a31825cfbb9b7e34851c543790bfb36ce1458f19cdbf`;
+test APK `87bbc1c9e0e208973eb9719960b70d3bb1df2c95cd16a0c38e24bd113a6f2e7b`.
+Native version metadata was built before that commit as `d2ec88d415-dirty`;
+the actual source content matches the committed change. This is a small RGB
+fixture/component test, separate from RAW/GPR and complete app/physical-device
+coverage. Require both the runner's successful test counts and a completed JSON
+report with status `passed`.
+
+## Fusion RAW/GPR execution
+
 `NativeEngineSmokeTest` runs the installed Android JNI/core/modules through the
 same public adapter used by the editor. It requires an ARM64 Android API 26+
 device or an actual ARM64 Android emulator, a complete engine-enabled APK and an

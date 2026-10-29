@@ -41,7 +41,10 @@ JSON module descriptions contain `operation`, `name`, `enabled`, `canDisable`, `
 `max` and optional `choices` (`value`, `label`). The current reviewed scalar subset
 includes exposure/black correction and compensation switches, Velvia strength/bias,
 Lab color contrast, six global color-balance RGB grading controls, Sigmoid
-contrast/skew/hue preservation, and sharpen amount/threshold (19 controls).
+contrast/skew/hue preservation, sharpen amount/threshold, original `colisa`
+contrast/brightness/saturation and `colorize` hue/saturation/source-lightness
+mix/lightness (26 controls across eight modules). These seven additions use the
+existing desktop processing code; the private colorize version is not writable.
 Float inputs are checked in their native float representation so decimal values
 at a boundary, such as `0.1`, remain usable. Non-finite and overflowing values
 are rejected. Nested fields,
@@ -49,6 +52,21 @@ arrays, curve counts and other unreviewed parameters need purpose-built APIs tha
 preserve upstream invariants. The complete module list and enable/disable controls
 remain available, even when a module has no reviewed numeric controls. Descriptions are
 allocated for the caller, who must release them with `dt_mobile_free_buffer`.
+
+The Android tools panel groups modules with ported editors first, initially
+selects exposure, and labels expansion and unavailable controls explicitly.
+`ModuleControlsTest` passed three actual Compose component interaction tests;
+`NativeColorControlsTest` passed 53 actual JNI phases with a generated 32x24 RGB
+PNG on ARM64/API 28 under the documented host emulation mode. The latter checks
+native-to-Kotlin discovery, seven new fields, rejected writes, five RGB pixel
+round trips, exact undo/redo and unchanged source hashes.
+
+The host regression also exercises declared endpoints through the original
+pixelpipe. A separate existing observation remains unresolved: its original PNG
+fixture's first unchanged preview differs from the following nine identical
+previews. The color-control checks explicitly prime once, then require two
+identical baselines and exact undo/redo; no tolerance or production processing
+change was introduced. This is not a claim that the first-preview issue is fixed.
 
 `dt_mobile_set_curve` updates a complete node list and its interpolation in one
 history change for basecurve and RGB curve. The editor supports 2–20 finite

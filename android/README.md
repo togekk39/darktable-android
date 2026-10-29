@@ -23,9 +23,25 @@ device behavior or performance.
 The numeric bridge deliberately exposes an audited subset: exposure/black
 correction and compensation switches, Velvia strength/bias, Lab color contrast,
 six global color-balance RGB controls, Sigmoid contrast/skew/hue preservation,
-and sharpen amount/threshold. Other modules can still be listed and
+sharpen amount/threshold, original contrast/brightness/saturation (`colisa`),
+and colorize hue/saturation/source-lightness mix/lightness. These are 26 reviewed
+scalar controls across eight original modules. Other modules can still be listed and
 enabled, but internal counts, arrays and unreviewed fields require dedicated
 editors that maintain the same parameter invariants as the desktop widgets.
+
+Opening **Editing tools** selects exposure when no tool is selected. Tools with
+editable controls appear first; this presentation does not reorder the native
+pixelpipe. Tap **Adjust ▼**, enter a number and press **Apply**. Enabling a module
+also opens its editor. Tools without ported controls show an explicit explanation
+even while collapsed. The full-height sheet keeps progress/cancel feedback inside
+the editor and accommodates the keyboard.
+
+Production Compose component tests passed on ARM64/API 28 for expansion, signed
+numeric input/Apply, enabling a module and the unavailable-controls explanation.
+Separate JNI tests passed 53 phases on a small RGB fixture, including all seven
+new native fields, actual color changes and exact undo/redo. See
+[native test instructions](NATIVE_ENGINE_TESTS.md). This does not establish every
+desktop control or a complete physical-device editing workflow.
 
 Modules advertising native instance support offer **New default instance**.
 The original engine creates image-specific default parameters and blending;

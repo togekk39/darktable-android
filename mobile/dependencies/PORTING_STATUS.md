@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-# Android port status — 2026-10-28
+# Android port status — 2026-10-29
 
 The Android port remains incomplete. The experimental ARM64/API 26 root build
 now compiles, links and installs the configured desktop engine, JNI adapter and
@@ -14,6 +14,48 @@ with host single-step emulation and fixed virtual timing. The newer default-inst
 APK also passed its complete 41-phase run. This is one original fixture/runtime, not complete
 format/feature parity, physical-device validation or performance evidence.
 The default Gradle engine remains disabled.
+
+## Mobile parameter editor increment
+
+The previous module list presented collapsed name buttons without a disclosure
+hint and placed many modules with no ported controls before usable editors.
+The updated single-image UI selects exposure initially, groups editable modules
+first, offers explicit Adjust/Collapse actions, opens controls when enabling a
+module and labels unavailable controls. Native processing order is unchanged.
+Progress/cancel feedback stays in the expanded sheet, which accommodates IME.
+
+Seven reviewed original scalar fields were added: `colisa` contrast/brightness/
+saturation and `colorize` hue/saturation/source-lightness mix/lightness. The total
+is 26 scalar controls across eight original modules, alongside the dedicated
+curve/crop/white-balance editors. Source algorithms and decoder pins are retained;
+private structural/version fields stay inaccessible.
+
+Local source `6283ef1858` passed 47 JVM tests, lint with no errors, the focused
+host engine test (18.55 seconds), and actual ARM64/API 28 instrumentation:
+three production Compose component tests plus all 53 native color-control
+phases. The native run checks seven fields, real RGB changes, exact undo/redo,
+metadata-to-mobile discovery and an unchanged generated 32x24 source PNG hash
+`c6ef76f2260d8d96a8882e8687599dc433b2e76719450e1196c1f76920bcb5ec`.
+Host single-step/fixed-clock settings were used for this Android execution;
+reported virtual durations are not performance evidence.
+
+The tested APK pair has main SHA-256
+`1cb0f7e1e07149105149a31825cfbb9b7e34851c543790bfb36ce1458f19cdbf`
+(40,447,674 bytes) and test SHA-256
+`87bbc1c9e0e208973eb9719960b70d3bb1df2c95cd16a0c38e24bd113a6f2e7b`
+(1,150,473 bytes). There are 108 configured/110 staged libraries, 805 assets and
+111 final APK libraries; staging/final runtime hashes and 16 KiB load alignment
+passed. Source content matches the commit, while native build version metadata
+predates it (`d2ec88d415-dirty`). Actual logs and parsed report are retained in
+`work/logs/tool-controls-android-instrumentation.log` and
+`work/deliverables/android-color-controls-result.json`.
+
+The existing host PNG first-preview anomaly is separate and unresolved: its first
+unchanged frame differs from nine identical later frames. These color tests
+explicitly prime, require two identical baselines and then strict byte-identical
+undo/redo. No processing approximation or production render workaround was added.
+The new tests do not establish RAW/GPR color-control coverage, all tools or a
+complete physical-device workflow. Most desktop controls remain unported.
 
 ## XCF export increment after `90ce43520f`
 
