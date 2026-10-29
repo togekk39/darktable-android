@@ -16,6 +16,25 @@ coverage remain unverified. The dated
 [port status](../mobile/dependencies/PORTING_STATUS.md) records the exact build
 and validation boundary.
 
+## Downloading an experimental APK
+
+The `Android engine APK downloads` workflow publishes raw APK assets to a
+source-specific GitHub prerelease named `android-engine-<12-character-source-SHA>`.
+Download `darktable-android-engine-arm64.apk` from that release's **Assets**;
+it installs directly without opening an Actions artifact ZIP. The separately
+named instrumentation APK is for native test execution, not the editor app.
+The checksum and validation notes remain attached beside the APKs.
+
+The publisher first downloads the full-engine Actions artifact back from GitHub,
+requires its main/test APKs, verifies source and SHA-256 records, and checks APK
+ZIP integrity and engine contents. It does not publish the dependency-only APK
+from the normal Android CI. The main engine workflow calls this publisher after
+successful packaging; its standalone push/manual path can recover an existing
+successful engine run without rebuilding the native dependency graph.
+
+A Release download does not establish full desktop parity or physical-device
+support. The default Gradle engine and existing `dev-latest` release are separate.
+
 First finish the ARM64/API 26 [engine build](../mobile/dependencies/ENGINE_BOOTSTRAP.md),
 install it, and run the current [staging tool](../mobile/dependencies/STAGING.md)
 with `--ndk`. Use one matching engine version/configuration for the core, JNI,
