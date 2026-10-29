@@ -1,6 +1,44 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Android native engine execution test
 
+## Sliders and expanded desktop controls
+
+`ParameterControlTest` exercises production numeric drag/release, native-default
+reset callbacks, enum choice menus, boolean switches and busy-state disabling.
+`SpecialSliderControlsTest` exercises the white-balance Kelvin/gain sliders and
+crop sliders, ensuring the grouped values remain drafts until Apply. These
+component tests use callback fixtures; they do not establish native pixel edits.
+Run them together with the existing three `ModuleControlsTest` methods:
+
+```sh
+"$ADB_BIN" -s "$TEST_SERIAL" shell am instrument -w -r \
+  -e class org.example.darktableandroid.ModuleControlsTest,org.example.darktableandroid.ParameterControlTest,org.example.darktableandroid.SpecialSliderControlsTest \
+  "$APP_PACKAGE.test/androidx.test.runner.AndroidJUnitRunner"
+```
+
+`NativeAdditionalControlsTest` separately uses the real JNI engine with a
+generated 32x24 RGB PNG. It checks the screenshot's tone-mapping contrast/spatial
+extent, vignette pixel changes and strict undo/redo, native enums and booleans,
+exact nested paths, narrower safe domains, desktop slider extents, original
+default resets and unchanged source hashes. Its eleven preview calls include
+an explicit readiness pass and a byte-identical repeatability check. Other new
+controls use native metadata/setter/history round trips; their pixel algorithms
+are covered separately by the host fixture and are not all rendered here.
+
+```sh
+"$ADB_BIN" -s "$TEST_SERIAL" shell am instrument -w -r \
+  -e class org.example.darktableandroid.nativecore.NativeAdditionalControlsTest \
+  -e requireAdditionalControls true \
+  "$APP_PACKAGE.test/androidx.test.runner.AndroidJUnitRunner"
+"$ADB_BIN" -s "$TEST_SERIAL" exec-out run-as "$APP_PACKAGE" \
+  cat files/additional-controls/result.json > android-additional-controls-result.json
+```
+
+Require the runner's successful counts and a JSON report whose `status` is
+`passed` and `phase` is `complete`. Compiling these tests is not execution
+evidence. See [control coverage](../mobile/CONTROL_PARITY.md) for the exact
+103-field review boundary and outstanding desktop controls.
+
 ## Parameter editor and color-control regression
 
 `ModuleControlsTest` uses the production Compose module component with callback

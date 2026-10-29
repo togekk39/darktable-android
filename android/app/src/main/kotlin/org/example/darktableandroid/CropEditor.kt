@@ -42,6 +42,21 @@ internal fun CropEditor(crop: ModuleCrop, editable: Boolean, onApply: (CropRect)
             CropCoordinate(right, { right = it }, stringResource(R.string.crop_right), editable, draft != null, Modifier.weight(1f))
             CropCoordinate(bottom, { bottom = it }, stringResource(R.string.crop_bottom), editable, draft != null, Modifier.weight(1f))
         }
+        // Keep both edges coherent in the same native Float representation. A
+        // slider only edits the draft; the complete rectangle is applied below.
+        val bounds = draft ?: crop.bounds
+        ParameterSlider(stringResource(R.string.crop_left), left.toDoubleOrNull(), 0.0,
+            maximumLeadingEdge(bounds.right, crop.minSize).toDouble(), editable && draft != null,
+            onValue = { left = it.toFloat().toString() })
+        ParameterSlider(stringResource(R.string.crop_top), top.toDoubleOrNull(), 0.0,
+            maximumLeadingEdge(bounds.bottom, crop.minSize).toDouble(), editable && draft != null,
+            onValue = { top = it.toFloat().toString() })
+        ParameterSlider(stringResource(R.string.crop_right), right.toDoubleOrNull(),
+            minimumTrailingEdge(bounds.left, crop.minSize).toDouble(), 1.0, editable && draft != null,
+            onValue = { right = it.toFloat().toString() })
+        ParameterSlider(stringResource(R.string.crop_bottom), bottom.toDoubleOrNull(),
+            minimumTrailingEdge(bounds.top, crop.minSize).toDouble(), 1.0, editable && draft != null,
+            onValue = { bottom = it.toFloat().toString() })
         Text(stringResource(R.string.crop_coordinate_range, crop.minSize.toString()),
             style = MaterialTheme.typography.bodySmall)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -54,6 +69,16 @@ internal fun CropEditor(crop: ModuleCrop, editable: Boolean, onApply: (CropRect)
         }
     }
 }
+
+// Subtraction can round one ULP above the valid leading edge. Preserve the
+// desktop's `trailing >= leading + minSize` test, including tiny minima.
+private fun maximumLeadingEdge(trailing: Float, minSize: Float): Float {
+    val candidate = (trailing - minSize).coerceAtMost(Math.nextDown(trailing)).coerceAtLeast(0f)
+    return if(candidate + minSize > trailing) Math.nextDown(candidate).coerceAtLeast(0f) else candidate
+}
+
+private fun minimumTrailingEdge(leading: Float, minSize: Float): Float =
+    (leading + minSize).coerceAtLeast(Math.nextUp(leading)).coerceAtMost(1f)
 
 @Composable
 private fun CropCoordinate(value: String, onValue: (String) -> Unit, label: String,

@@ -27,6 +27,9 @@ import org.example.darktableandroid.nativecore.ModuleParameter
 import org.example.darktableandroid.nativecore.CurvePoint
 import org.example.darktableandroid.nativecore.CropRect
 import org.example.darktableandroid.nativecore.parseNumericInput
+import org.example.darktableandroid.nativecore.sliderBounds
+import org.example.darktableandroid.nativecore.sliderInput
+import org.example.darktableandroid.nativecore.resetValue
 import org.example.darktableandroid.nativecore.hasEditableControls
 import org.example.darktableandroid.nativecore.controlsFirst
 import org.example.darktableandroid.nativecore.initialControlModule
@@ -303,12 +306,6 @@ internal fun ModuleControls(
             }
             if(!module.hasEditableControls) Text(stringResource(R.string.no_numeric_parameters), style = MaterialTheme.typography.bodySmall)
             if(expanded) {
-                if(module.canCreateInstance) {
-                    TextButton(onClick = { onNewInstance(module.operation) }, enabled = editable) {
-                        Text(stringResource(R.string.module_new_instance))
-                    }
-                    Text(stringResource(R.string.module_new_instance_hint), style = MaterialTheme.typography.bodySmall)
-                }
                 module.crop?.let { crop ->
                     CropEditor(crop, editable) { bounds -> onCrop(module.operation, bounds) }
                 }
@@ -331,52 +328,75 @@ internal fun ModuleControls(
                         ParameterControl(parameter, editable) { onParameter(module.operation, parameter.name, it) }
                     }
                 }
+                if(module.canCreateInstance) {
+                    TextButton(onClick = { onNewInstance(module.operation) }, enabled = editable) {
+                        Text(stringResource(R.string.module_new_instance))
+                    }
+                    Text(stringResource(R.string.module_new_instance_hint), style = MaterialTheme.typography.bodySmall)
+                }
             }
         }
     }
 }
 
 @Composable
-private fun ParameterControl(parameter: ModuleParameter, editable: Boolean, onValue: (Double) -> Unit) {
-    when {
-        parameter.type == "bool" || parameter.type == "boolean" -> Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(parameter.label, Modifier.weight(1f))
-            Switch(checked = parameter.value != 0.0, onCheckedChange = { onValue(if(it) 1.0 else 0.0) }, enabled = editable)
-        }
-        parameter.choices.isNotEmpty() -> {
-            var expanded by remember { mutableStateOf(false) }
-            Text(parameter.label, style = MaterialTheme.typography.labelLarge)
-            Box {
-                OutlinedButton(onClick = { expanded = true }, enabled = editable) {
-                    Text(parameter.choices.firstOrNull { it.value == parameter.value }?.label ?: parameter.value.toString())
+internal fun ParameterControl(parameter: ModuleParameter, editable: Boolean, onValue: (Double) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        when {
+            parameter.type == "bool" || parameter.type == "boolean" -> Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(parameter.label, Modifier.weight(1f))
+                Switch(checked = parameter.value != 0.0, onCheckedChange = { onValue(if(it) 1.0 else 0.0) },
+                    enabled = editable, modifier = Modifier.semantics { contentDescription = parameter.label })
+            }
+            parameter.choices.isNotEmpty() -> {
+                var expanded by remember { mutableStateOf(false) }
+                Text(parameter.label, style = MaterialTheme.typography.labelLarge)
+                Box {
+                    OutlinedButton(onClick = { expanded = true }, enabled = editable,
+                        modifier = Modifier.semantics { contentDescription = parameter.label }) {
+                        Text(parameter.choices.firstOrNull { it.value == parameter.value }?.label ?: parameter.value.toString())
+                    }
+                    DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                        parameter.choices.forEach { choice ->
+                            DropdownMenuItem(text = { Text(choice.label) }, enabled = editable,
+                                onClick = { expanded = false; onValue(choice.value) })
+                        }
+                    }
                 }
-                DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                    parameter.choices.forEach { choice ->
-                        DropdownMenuItem(text = { Text(choice.label) }, enabled = editable,
-                            onClick = { expanded = false; onValue(choice.value) })
+            }
+            else -> {
+                var draft by remember(parameter.name, parameter.value) { mutableStateOf(parameter.value.toString()) }
+                val parsed = parameter.parseNumericInput(draft)
+                parameter.sliderBounds()?.let { bounds ->
+                    ParameterSlider(parameter.label, parsed ?: parameter.value, bounds.start, bounds.endInclusive,
+                        editable, onValue = { draft = parameter.sliderInput(it) }, onFinished = {
+                            // One history/preview operation per completed drag. Reads the current
+                            // state directly, including accessibility SetProgress actions.
+                            parameter.parseNumericInput(draft)?.takeIf { it != parameter.value }?.let(onValue)
+                        })
+                }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(value = draft, onValueChange = { draft = it }, label = { Text(parameter.label) },
+                        modifier = Modifier.weight(1f), enabled = editable, singleLine = true, isError = parsed == null,
+                        // Android decimal keyboards can omit minus. Keep signed input available.
+                        keyboardOptions = KeyboardOptions(keyboardType =
+                            if(parameter.minimum == null || parameter.minimum < 0.0) KeyboardType.Ascii else KeyboardType.Decimal),
+                        supportingText = {
+                            if(parameter.minimum != null || parameter.maximum != null)
+                                Text("${parameter.minimum ?: "−∞"} … ${parameter.maximum ?: "∞"}")
+                        })
+                    TextButton(onClick = { parameter.parseNumericInput(draft)?.let(onValue) },
+                        enabled = editable && parsed != null && parsed != parameter.value) {
+                        Text(stringResource(R.string.apply))
                     }
                 }
             }
         }
-        else -> {
-            var draft by remember(parameter.name, parameter.value) { mutableStateOf(parameter.value.toString()) }
-            val parsed = parameter.parseNumericInput(draft)
-            val valid = parsed != null
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(value = draft, onValueChange = { draft = it }, label = { Text(parameter.label) },
-                    modifier = Modifier.weight(1f), enabled = editable, singleLine = true, isError = !valid,
-                    // Android decimal keyboards can omit the minus sign. Use
-                    // ASCII for signed ranges so exposure and offsets remain editable.
-                    keyboardOptions = KeyboardOptions(keyboardType =
-                        if(parameter.minimum == null || parameter.minimum < 0.0) KeyboardType.Ascii else KeyboardType.Decimal),
-                    supportingText = {
-                        if(parameter.minimum != null || parameter.maximum != null) {
-                            Text("${parameter.minimum ?: "−∞"} … ${parameter.maximum ?: "∞"}")
-                        }
-                    })
-                TextButton(onClick = { parsed?.let(onValue) }, enabled = editable && valid && parsed != parameter.value) {
-                    Text(stringResource(R.string.apply))
-                }
+        parameter.resetValue()?.let { default ->
+            val description = stringResource(R.string.parameter_reset_description, parameter.label)
+            TextButton(onClick = { onValue(default) }, enabled = editable && default != parameter.value,
+                modifier = Modifier.semantics { contentDescription = description }) {
+                Text(stringResource(R.string.parameter_reset))
             }
         }
     }

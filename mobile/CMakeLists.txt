@@ -231,7 +231,10 @@ if(DT_MOBILE_BUILD_TESTS)
       "${CMAKE_CURRENT_BINARY_DIR}/dt-mobile-engine-output.png")
     set_tests_properties(dt_mobile_engine_test PROPERTIES
       ENVIRONMENT "DT_MOBILE_DATADIR=${DARKTABLE_DATADIR};DT_MOBILE_MODULEDIR=${DARKTABLE_LIBDIR};OMP_NUM_THREADS=2"
-      TIMEOUT 180)
+      # This real-engine fixture now covers 77 additional scalar/enum controls,
+      # native history and original-pipeline endpoint/undo renders. Allow the
+      # same coverage in Debug builds and on slower CI runners.
+      TIMEOUT 600)
     if(DT_MOBILE_WITH_GPR_SDK)
       add_executable(dt_mobile_rawspeed_gpr_test tests/dt_mobile_rawspeed_gpr_test.cpp)
       target_compile_features(dt_mobile_rawspeed_gpr_test PRIVATE cxx_std_20)

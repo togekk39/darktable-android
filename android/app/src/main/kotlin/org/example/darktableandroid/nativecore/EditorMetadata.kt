@@ -13,6 +13,9 @@ data class ModuleParameter(
     val minimum: Double?,
     val maximum: Double?,
     val choices: List<ParameterChoice>,
+    val sliderMinimum: Double? = null,
+    val sliderMaximum: Double? = null,
+    val defaultValue: Double? = null,
 )
 data class EditorModule(
     val operation: String,
@@ -74,6 +77,8 @@ internal fun parseModules(json: String): List<EditorModule> = JSONArray(json).le
                         val choice = choices.getJSONObject(choiceIndex)
                         ParameterChoice(choice.getDouble("value"), choice.getString("label"))
                     },
+                    parameter.finiteNumber("sliderMin"), parameter.finiteNumber("sliderMax"),
+                    parameter.finiteNumber("default"),
                 )
             },
             // An unavailable or older curve schema must not hide the image's

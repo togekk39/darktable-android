@@ -95,6 +95,7 @@ static int parameter_equals(const char *json, const char *operation, const char 
 }
 
 #include "dt_mobile_color_controls_checks.h"
+#include "dt_mobile_tool_controls_checks.h"
 
 static int instance_checks(dt_mobile_session *session)
 {
@@ -655,6 +656,7 @@ int main(int argc, char **argv)
   CHECK(strstr(curve_json, "\"position\":0,\"length\":0"));
   dt_mobile_free_buffer(curve_json); curve_json = NULL;
   CHECK(mobile_color_controls_checks(session));
+  CHECK(mobile_tool_controls_checks(session));
   ENGINE_OK(dt_mobile_render_preview(session, 96, 96, &before, &width, &height));
   CHECK(before && width > 0 && height > 0);
   dt_mobile_free_buffer(before);

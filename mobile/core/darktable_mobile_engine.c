@@ -553,6 +553,7 @@ static void append_parameter(dt_iop_module_t *module, const dt_introspection_fie
   const char *type;
   if(!number_info(field, (const char *)module->params + offset, &value, &minimum, &maximum, &type)
      || !isfinite((double)value)) return;
+  dt_mobile_parameter_limits(module->op, path, &minimum, &maximum);
   /* Some iops use NaN as an unavailable sensor channel (for example the
    * fourth white-balance coefficient on a three-channel RGB image). Such a
    * sentinel is not an editable numeric control. */
@@ -561,12 +562,45 @@ static void append_parameter(dt_iop_module_t *module, const dt_introspection_fie
   description->first = FALSE;
   g_string_append(json, "{\"name\":"); json_string(json, path);
   g_string_append(json, ",\"label\":");
-  json_string(json, field->header.description && field->header.description[0]
-                     ? field->header.description : path);
+  json_string(json, dt_mobile_parameter_label(module->op, path,
+                   field->header.description && field->header.description[0]
+                     ? field->header.description : path));
   g_string_append(json, ",\"type\":"); json_string(json, type);
   g_string_append(json, ",\"value\":"); json_number(json, (double)value);
   g_string_append(json, ",\"min\":"); json_number(json, (double)minimum);
   g_string_append(json, ",\"max\":"); json_number(json, (double)maximum);
+  /* Defaults come from the image's original iop default parameter struct, not
+   * a second table in the phone UI. visit_fields already checked this field's
+   * complete storage span against the shared params_size schema. */
+  if(module->default_params)
+  {
+    long double original, unused_minimum, unused_maximum;
+    const char *unused_type;
+    if(number_info(field, (const char *)module->default_params + offset,
+                   &original, &unused_minimum, &unused_maximum, &unused_type)
+       && isfinite((double)original) && original >= minimum && original <= maximum
+       && dt_mobile_parameter_value_valid(module, path, (double)original))
+    {
+      gboolean valid_default = TRUE;
+      if(field->header.type == DT_INTROSPECTION_TYPE_ENUM)
+      {
+        valid_default = FALSE;
+        for(size_t k = 0; k < enum_entry_count(field); k++)
+          if(original == field->Enum.values[k].value) valid_default = TRUE;
+      }
+      if(valid_default)
+      {
+        g_string_append(json, ",\"default\":"); json_number(json, (double)original);
+      }
+    }
+  }
+  double slider_minimum, slider_maximum;
+  if(dt_mobile_parameter_slider_limits(module->op, path, &slider_minimum, &slider_maximum)
+     && slider_minimum >= minimum && slider_maximum <= maximum && slider_minimum < slider_maximum)
+  {
+    g_string_append(json, ",\"sliderMin\":"); json_number(json, slider_minimum);
+    g_string_append(json, ",\"sliderMax\":"); json_number(json, slider_maximum);
+  }
   if(field->header.type == DT_INTROSPECTION_TYPE_ENUM)
   {
     g_string_append(json, ",\"choices\":[");
@@ -1620,8 +1654,9 @@ static void update_parameter(dt_iop_module_t *module, const dt_introspection_fie
     value = (double)(float)value;
     if(!isfinite(value)) return;
   }
-  if(!number_info(field, destination, &current, &minimum, &maximum, &type)
-     || (long double)value < minimum || (long double)value > maximum
+  if(!number_info(field, destination, &current, &minimum, &maximum, &type)) return;
+  dt_mobile_parameter_limits(module->op, path, &minimum, &maximum);
+  if((long double)value < minimum || (long double)value > maximum
      || (field->header.type != DT_INTROSPECTION_TYPE_FLOAT
          && field->header.type != DT_INTROSPECTION_TYPE_DOUBLE && trunc(value) != value)
      || !dt_mobile_parameter_value_valid(module, path, value)) return;

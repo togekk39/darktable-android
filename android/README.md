@@ -20,18 +20,20 @@ the newer default-instance APK pair also passed its complete 41-phase run. See
 settings. One fixture/runtime does not establish full desktop parity, physical
 device behavior or performance.
 
-The numeric bridge deliberately exposes an audited subset: exposure/black
-correction and compensation switches, Velvia strength/bias, Lab color contrast,
-six global color-balance RGB controls, Sigmoid contrast/skew/hue preservation,
-sharpen amount/threshold, original contrast/brightness/saturation (`colisa`),
-and colorize hue/saturation/source-lightness mix/lightness. These are 26 reviewed
-scalar controls across eight original modules. Other modules can still be listed and
-enabled, but internal counts, arrays and unreviewed fields require dedicated
-editors that maintain the same parameter invariants as the desktop widgets.
+The numeric bridge exposes 103 reviewed fields across 21 original modules,
+including tone mapping, global tone mapping, high/low pass, soften, graduated
+ND, monochrome, vignette, split toning, bloom, grain and additional color-balance
+controls. Continuous parameters offer sliders and precise input, native enums
+offer choice menus, and booleans offer switches. Reset uses image-specific
+original module defaults. See [control coverage](../mobile/CONTROL_PARITY.md)
+for the exact fields and remaining gaps. Internal counts, arrays and unreviewed
+fields still require editors that maintain the desktop parameter invariants.
 
 Opening **Editing tools** selects exposure when no tool is selected. Tools with
 editable controls appear first; this presentation does not reorder the native
-pixelpipe. Tap **Adjust ▼**, enter a number and press **Apply**. Enabling a module
+pixelpipe. Tap **Adjust ▼** and drag a slider; a completed drag submits one
+native history/preview operation. For precise input, enter a number and press
+**Apply**. Enabling a module
 also opens its editor. Tools without ported controls show an explicit explanation
 even while collapsed. The full-height sheet keeps progress/cancel feedback inside
 the editor and accommodates the keyboard.
@@ -74,7 +76,7 @@ when available. Manual coefficients use `0.001..8`; native preset values above
 Three-channel images preserve the inactive fourth value; four-Bayer labels and
 display order come from the native module. True camera-monochrome inputs do not
 offer white balance. When the native module can derive temperature/tint from the
-image's camera matrix and active gains, two numeric controls apply Kelvin and tint
+image's camera matrix and active gains, sliders and precise inputs apply Kelvin and tint
 together through the desktop temperature module's shared calculation core. Android
 does not calculate replacement gains. The native module supplies the current values
 and bounds; applying selects user-defined white balance and normalizes green to 1,

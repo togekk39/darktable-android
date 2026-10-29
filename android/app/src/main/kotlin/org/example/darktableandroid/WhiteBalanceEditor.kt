@@ -66,6 +66,10 @@ internal fun WhiteBalanceEditor(balance: WhiteBalance, editable: Boolean,
                 modifier = Modifier.fillMaxWidth(), isError = value == null || !value.isFinite() ||
                     value !in balance.manualMin..balance.manualMax,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii))
+            ParameterSlider(channel.label, value?.toDouble(), balance.manualMin.toDouble(), balance.manualMax.toDouble(),
+                editable, onValue = { updated ->
+                    input = input.mapIndexed { index, old -> if(index == position) updated.toFloat().toString() else old }
+                })
         }
         Text(stringResource(R.string.white_balance_gain_range, balance.manualMin.toString(), balance.manualMax.toString()),
             style = MaterialTheme.typography.bodySmall)
@@ -87,11 +91,15 @@ private fun WhiteBalanceTemperatureEditor(temperature: WhiteBalanceTemperature, 
         modifier = Modifier.fillMaxWidth(), isError = kelvin.toDoubleOrNull()?.let {
             !it.isFinite() || it !in temperature.minKelvin..temperature.maxKelvin
         } != false, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii))
+    ParameterSlider(stringResource(R.string.white_balance_kelvin), kelvin.toDoubleOrNull(),
+        temperature.minKelvin, temperature.maxKelvin, editable, onValue = { kelvin = it.toString() })
     OutlinedTextField(value = tint, onValueChange = { tint = it },
         label = { Text(stringResource(R.string.white_balance_tint)) }, enabled = editable, singleLine = true,
         modifier = Modifier.fillMaxWidth(), isError = tint.toDoubleOrNull()?.let {
             !it.isFinite() || it !in temperature.minTint..temperature.maxTint
         } != false, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii))
+    ParameterSlider(stringResource(R.string.white_balance_tint), tint.toDoubleOrNull(),
+        temperature.minTint, temperature.maxTint, editable, onValue = { tint = it.toString() })
     Text(stringResource(R.string.white_balance_temperature_range, temperature.minKelvin.toString(),
         temperature.maxKelvin.toString(), temperature.minTint.toString(), temperature.maxTint.toString()),
         style = MaterialTheme.typography.bodySmall)

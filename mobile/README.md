@@ -38,17 +38,20 @@ maintained by the desktop widget without silently changing another control.
 
 JSON module descriptions contain `operation`, `name`, `enabled`, `canDisable`, `canCreateInstance`,
 `parameters`, `curves` and optional `crop`/`rgbCurveOptions`/`whiteBalance` descriptions. Parameters contain `name`, `label`, `type`, `value`, `min`,
-`max` and optional `choices` (`value`, `label`). The current reviewed scalar subset
-includes exposure/black correction and compensation switches, Velvia strength/bias,
-Lab color contrast, six global color-balance RGB grading controls, Sigmoid
-contrast/skew/hue preservation, sharpen amount/threshold, original `colisa`
-contrast/brightness/saturation and `colorize` hue/saturation/source-lightness
-mix/lightness (26 controls across eight modules). These seven additions use the
-existing desktop processing code; the private colorize version is not writable.
+`max`, optional `choices` (`value`, `label`), original image-specific `default`,
+and optional desktop `sliderMin`/`sliderMax`. Defaults that conflict with current
+coupled constraints are omitted. The current reviewed subset is 103 fields
+across 21 original modules. See [control coverage](CONTROL_PARITY.md) for the
+exact list, dedicated editors and outstanding desktop controls. The original
+processing code handles all edits; private structural/version fields remain
+inaccessible. Sliders use native bounds and submit one change per completed drag;
+precise input, native choice menus, boolean switches and default-reset buttons
+remain available alongside them. White-balance and crop sliders update drafts
+until their complete values are applied together.
 Float inputs are checked in their native float representation so decimal values
 at a boundary, such as `0.1`, remain usable. Non-finite and overflowing values
-are rejected. Nested fields,
-arrays, curve counts and other unreviewed parameters need purpose-built APIs that
+are rejected. Only four exact reviewed nested scalar paths are allowed; other
+nested fields, arrays, curve counts and unreviewed parameters need APIs that
 preserve upstream invariants. The complete module list and enable/disable controls
 remain available, even when a module has no reviewed numeric controls. Descriptions are
 allocated for the caller, who must release them with `dt_mobile_free_buffer`.
