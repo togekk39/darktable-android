@@ -39,6 +39,28 @@ Require the runner's successful counts and a JSON report whose `status` is
 evidence. See [control coverage](../mobile/CONTROL_PARITY.md) for the exact
 103-field review boundary and outstanding desktop controls.
 
+The source content committed locally as `ca5a4875d4` passed all 12 production
+Compose component tests and all 50 JNI phases on the official ARM64/API 28
+guest. The native test made 11 previews, found 103 original defaults and 15
+desktop soft ranges, and preserved source SHA-256
+`c6ef76f2260d8d96a8882e8687599dc433b2e76719450e1196c1f76920bcb5ec`
+before edits, after edits and after close. Both runner counts and the completed
+JSON report passed. Host single-step emulation with `icount` shift 0 and sleep
+enabled was used; virtual durations do not measure phone performance.
+
+The actual tested main APK is 40,464,814 bytes, SHA-256
+`11f267a9ce621b38876ff0459a190d9edb3161c33a09a7a29bb13c9cc7351632`;
+the paired test APK is 1,183,173 bytes, SHA-256
+`285eca0a4948f8c26c2a043b3bf23af14554bb6ddd0c2f0b4a591d29843c873a`.
+Native version metadata was built before the local commit as
+`41753a3006-dirty`; the source content and recorded native source hashes match
+the commit. Final runtime bytes, all 111 native libraries' 16 KiB load
+alignment, v2 signatures and compact APK ZIP layout passed. Curated evidence
+is under `work/deliverables/tool-sliders-validation/`, with the actual parsed
+report at `work/deliverables/android-additional-controls-result.json`.
+These are component and small RGB native tests, separate from a complete
+physical-device picker/edit/export workflow and broader RAW/GPR coverage.
+
 ## Parameter editor and color-control regression
 
 `ModuleControlsTest` uses the production Compose module component with callback

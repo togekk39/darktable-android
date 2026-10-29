@@ -82,6 +82,15 @@ linked channel arrays, additional curves, geometry handles and advanced tool
 settings also remain pending. They must be implemented with the original core
 operations and their invariants, without substitute image-processing formulas.
 
+The `mask_manager` IOP itself is the desktop's hidden mask-history sentinel;
+its private `dummy` integer is not a mask editor. The real desktop panel is
+`src/libs/masks.c` and edits native forms and groups. Do not expose that dummy
+field to turn the current placeholder into a functional-looking control. A
+subsequent UI cleanup should hide internal IOPs while preserving their native
+history identities. A separate per-instance uniform-blending editor can use
+the original `blend_params` and `dt_iop_commit_blend_params` with native history;
+drawn/parametric/raster modes need their additional original state operations.
+
 The current configured runtime contains 93 original processing modules, including
 internal pipeline and diagnostic modules. Many still have no mobile parameter
 editor. Major outstanding tools include `filmicrgb`, `agx`, `toneequal`,

@@ -15,6 +15,63 @@ APK also passed its complete 41-phase run. This is one original fixture/runtime,
 format/feature parity, physical-device validation or performance evidence.
 The default Gradle engine remains disabled.
 
+## Touch sliders and additional desktop controls
+
+Local source `ca5a4875d4` adds touch sliders alongside precise input, native
+choice menus, boolean switches and original-default reset buttons. Numeric
+drags commit once on release. White-balance Kelvin/tint/gain and crop sliders
+retain atomic Apply; instance creation is below the actual parameters. The
+native numeric boundary grows from 26 fields/eight modules to 103 fields/21
+modules: 77 new fields, including both screenshot tone-mapping controls and
+13 additional original tools. The [coverage table](../CONTROL_PARITY.md)
+identifies every exposed field and the remaining desktop controls. Source
+algorithms and all three decoder/codec gitlinks remain unchanged.
+
+Native metadata supplies image-specific original defaults and 15 desktop soft
+slider ranges. Exact numeric entry keeps the reviewed hard bounds. Metadata
+and setters enforce the same narrower domains for virtual monochrome filters,
+graduated-filter offset and nonsingular vignette ratio. Only four exact nested
+paths are allowed. Coupled mid-tone RGB coefficients and structural/version
+fields stay private. Defaults conflicting with the current exposure/black
+relationship are omitted until a safe reset is possible.
+
+The source passed 53 JVM tests, lint with zero errors/10 existing warnings and
+the focused real host engine regression in 122.97 seconds. The latter checks
+all 77 new field types/bounds/defaults/setters and history independence, 78
+endpoint previews, 13 deterministic module pixel/undo/redo sequences, second
+tone-mapping instance isolation and rejected writes without mutations. The
+three grain fields have setter/metadata/history coverage without a new grain
+pixel assertion. The expanded focused fixture permits 600 seconds for Debug
+and slower CI runners; this is not a new full-suite Debug result.
+
+Actual official ARM64/API 28 execution also passed all 12 production Compose
+component tests plus the complete 50-phase JNI test, using host single-step
+emulation and fixed virtual timing. The 11 native previews establish tone-map
+and vignette RGB changes and byte-identical undo/redo. Native metadata reports
+103 original reset defaults and 15 soft ranges. The generated 32x24 PNG SHA-256
+remains `c6ef76f2260d8d96a8882e8687599dc433b2e76719450e1196c1f76920bcb5ec`
+before/after edits and after close. Virtual durations are not performance
+evidence. UI callbacks and JNI processing were tested separately, without a
+full document-picker/export UI flow or new RAW/GPR/physical-device claims.
+
+The exact tested APK pair is main 40,464,814 bytes, SHA-256
+`11f267a9ce621b38876ff0459a190d9edb3161c33a09a7a29bb13c9cc7351632`,
+and test 1,183,173 bytes, SHA-256
+`285eca0a4948f8c26c2a043b3bf23af14554bb6ddd0c2f0b4a591d29843c873a`.
+Source content matches the local code commit; native version metadata predates
+the commit (`41753a3006-dirty`). Fresh installation/staging, final runtime hashes,
+all 111 final ELF libraries' 16 KiB load alignment, both v2 signatures and zero
+unused APK ZIP gaps passed. Evidence is retained in
+`work/logs/tool-sliders-android-instrumentation.log`,
+`work/logs/tool-slider-host-validation.json` and
+`work/deliverables/tool-sliders-validation/`.
+
+The existing first-PNG-preview observation remains unresolved. Tests prime
+explicitly and require stable identical baselines before strict undo/redo;
+neither processing formulas nor production floating-point mode were changed.
+Masks, blending, styles, further tool settings and full desktop parity remain
+unfinished. The older increments below retain their original tested scope.
+
 ## Mobile parameter editor increment
 
 The previous module list presented collapsed name buttons without a disclosure

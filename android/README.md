@@ -38,10 +38,11 @@ also opens its editor. Tools without ported controls show an explicit explanatio
 even while collapsed. The full-height sheet keeps progress/cancel feedback inside
 the editor and accommodates the keyboard.
 
-Production Compose component tests passed on ARM64/API 28 for expansion, signed
-numeric input/Apply, enabling a module and the unavailable-controls explanation.
-Separate JNI tests passed 53 phases on a small RGB fixture, including all seven
-new native fields, actual color changes and exact undo/redo. See
+All 12 production Compose component tests passed on ARM64/API 28, including
+drag/release, precise input, choices, switches, resets and grouped crop/white-
+balance application. A separate JNI test passed 50 phases on a small RGB fixture,
+including actual tone-map/vignette changes and exact undo/redo. The earlier
+53-phase original color-control test remains separate evidence. See
 [native test instructions](NATIVE_ENGINE_TESTS.md). This does not establish every
 desktop control or a complete physical-device editing workflow.
 

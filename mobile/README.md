@@ -58,11 +58,14 @@ allocated for the caller, who must release them with `dt_mobile_free_buffer`.
 
 The Android tools panel groups modules with ported editors first, initially
 selects exposure, and labels expansion and unavailable controls explicitly.
-`ModuleControlsTest` passed three actual Compose component interaction tests;
-`NativeColorControlsTest` passed 53 actual JNI phases with a generated 32x24 RGB
-PNG on ARM64/API 28 under the documented host emulation mode. The latter checks
-native-to-Kotlin discovery, seven new fields, rejected writes, five RGB pixel
-round trips, exact undo/redo and unchanged source hashes.
+The three Compose component test classes passed all 12 actual interaction
+tests, including slider release, precise input, native choices/defaults and
+atomic crop/white-balance drafts. `NativeAdditionalControlsTest` separately
+passed 50 actual JNI phases on a generated 32x24 RGB PNG, including native
+metadata/default discovery, selected float/enum/bool/nested fields, actual
+tone-map/vignette pixels, exact undo/redo and unchanged source hashes. The
+official ARM64/API 28 guest used the documented host emulation mode. The earlier
+53-phase `NativeColorControlsTest` remains separate color-control evidence.
 
 The host regression also exercises declared endpoints through the original
 pixelpipe. A separate existing observation remains unresolved: its original PNG
