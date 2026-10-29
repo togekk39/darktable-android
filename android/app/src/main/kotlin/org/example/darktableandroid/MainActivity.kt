@@ -27,6 +27,11 @@ import org.example.darktableandroid.nativecore.ModuleParameter
 import org.example.darktableandroid.nativecore.CurvePoint
 import org.example.darktableandroid.nativecore.CropRect
 import org.example.darktableandroid.nativecore.parseNumericInput
+import org.example.darktableandroid.nativecore.hasEditableControls
+import org.example.darktableandroid.nativecore.controlsFirst
+import org.example.darktableandroid.nativecore.initialControlModule
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -162,7 +167,10 @@ private fun MobileRawApp(sourceIntent: SourceIntent?, onSourceSelected: (Uri, In
                     }
                     current.notice?.let { Text(it) }
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Button(onClick = { tools = true }, enabled = !busy) { Text(stringResource(R.string.edit_tools)) }
+                        Button(onClick = {
+                            if(current.selectedModule == null) editor.selectModule(current.modules.initialControlModule())
+                            tools = true
+                        }, enabled = !busy) { Text(stringResource(R.string.edit_tools)) }
                         Button(onClick = { exportSettings = true }, enabled = !busy && current.exportFormats.isNotEmpty()) {
                             Text(stringResource(R.string.export))
                         }
@@ -187,19 +195,28 @@ private fun MobileRawApp(sourceIntent: SourceIntent?, onSourceSelected: (Uri, In
                 }
             }
         }
-        if(tools && ready != null) ModalBottomSheet(onDismissRequest = { tools = false }) {
+        if(tools && ready != null) ModalBottomSheet(onDismissRequest = { tools = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
             val moduleList = rememberLazyListState()
-            LaunchedEffect(ready.sessionId, ready.selectedModule) {
-                val index = ready.modules.indexOfFirst { it.operation == ready.selectedModule }
-                if(index >= 0 && moduleList.layoutInfo.visibleItemsInfo.none { it.index == index })
+            val shownModules = remember(ready.modules) { ready.modules.controlsFirst() }
+            LaunchedEffect(ready.sessionId, ready.selectedModule, shownModules) {
+                val index = shownModules.indexOfFirst { it.operation == ready.selectedModule }
+                if(index >= 0 && moduleList.layoutInfo.visibleItemsInfo.none { it.key == "${ready.sessionId}:${ready.selectedModule}" })
                     moduleList.animateScrollToItem(index)
             }
-            Column(Modifier.fillMaxHeight(0.8f).padding(horizontal = 24.dp)) {
+            Column(Modifier.fillMaxHeight(0.9f).imePadding().padding(horizontal = 24.dp)) {
                 Text(stringResource(R.string.edit_tools), style = MaterialTheme.typography.titleLarge)
                 Text(stringResource(R.string.tool_limitations), style = MaterialTheme.typography.bodySmall)
+                (state as? EditorState.Working)?.let { working ->
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                    Text(stringResource(working.stage.labelResource()))
+                    TextButton(onClick = editor::cancel, enabled = working.stage != EditorState.Stage.CANCELLING) {
+                        Text(stringResource(R.string.cancel))
+                    }
+                }
                 ready.notice?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 LazyColumn(Modifier.fillMaxWidth(), state = moduleList, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(ready.modules, key = { "${ready.sessionId}:${it.operation}" }) { module ->
+                    items(shownModules, key = { "${ready.sessionId}:${it.operation}" }) { module ->
                         ModuleControls(module, !busy, ready.selectedModule == module.operation,
                             editor::selectModule, editor::newInstance, editor::setModuleEnabled, editor::setParameter,
                             editor::setCurve, editor::setCrop, editor::setRgbCurveOptions,
@@ -247,7 +264,7 @@ private fun MobileRawApp(sourceIntent: SourceIntent?, onSourceSelected: (Uri, In
 }
 
 @Composable
-private fun ModuleControls(
+internal fun ModuleControls(
     module: EditorModule,
     editable: Boolean,
     selected: Boolean,
@@ -264,6 +281,7 @@ private fun ModuleControls(
 ) {
     var expanded by rememberSaveable(module.operation) { mutableStateOf(false) }
     LaunchedEffect(selected) { if(selected) expanded = true }
+    val disclosure = stringResource(if(expanded) R.string.module_collapse_controls else R.string.module_expand_controls, module.name)
     OutlinedCard(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -271,9 +289,19 @@ private fun ModuleControls(
                     expanded = !expanded
                     if(expanded) onSelected(module.operation) else if(selected) onSelected(null)
                 },
-                    enabled = editable, modifier = Modifier.weight(1f)) { Text(module.name) }
-                Switch(checked = module.enabled, onCheckedChange = { onEnabled(module.operation, it) }, enabled = editable && module.canDisable)
+                    enabled = editable, modifier = Modifier.weight(1f).semantics { contentDescription = disclosure }) {
+                    Column(horizontalAlignment = Alignment.Start) {
+                        Text(module.name)
+                        Text(stringResource(if(expanded) R.string.module_hide_controls else if(module.hasEditableControls)
+                            R.string.module_show_controls else R.string.module_show_details), style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+                Switch(checked = module.enabled, onCheckedChange = {
+                    if(it) { expanded = true; onSelected(module.operation) }
+                    onEnabled(module.operation, it)
+                }, enabled = editable && module.canDisable)
             }
+            if(!module.hasEditableControls) Text(stringResource(R.string.no_numeric_parameters), style = MaterialTheme.typography.bodySmall)
             if(expanded) {
                 if(module.canCreateInstance) {
                     TextButton(onClick = { onNewInstance(module.operation) }, enabled = editable) {
@@ -281,8 +309,6 @@ private fun ModuleControls(
                     }
                     Text(stringResource(R.string.module_new_instance_hint), style = MaterialTheme.typography.bodySmall)
                 }
-                if(module.parameters.isEmpty() && module.curves.isEmpty() && module.crop == null && module.rgbCurveOptions == null && module.whiteBalance == null)
-                    Text(stringResource(R.string.no_numeric_parameters))
                 module.crop?.let { crop ->
                     CropEditor(crop, editable) { bounds -> onCrop(module.operation, bounds) }
                 }

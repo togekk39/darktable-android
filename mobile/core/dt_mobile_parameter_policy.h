@@ -32,6 +32,12 @@
  * - src/iop/sharpen.c: amount/threshold only weight the fixed unsharp-mask
  *   result. Radius remains private: arbitrary tiny positive values can make
  *   its Gaussian variance underflow, unlike the desktop widget's normal steps.
+ * - src/iop/colisa.c: contrast/brightness/saturation use the original fixed-size
+ *   LUTs and channel weights. Declared [-1,1] bounds keep brightness's gamma
+ *   positive and bounded; these fields do not alter indexes or allocations.
+ * - src/iop/colorize.c: the four original HSL/mix sliders feed the original
+ *   HSL/XYZ/Lab conversion and a fixed-size pixel operation. The internal
+ *   version selector remains private so imported legacy behavior is retained.
  *
  * Match the type as well as the name so an upstream schema change cannot turn
  * an approved float control into an unreviewed count or enum. Continue checking
@@ -64,6 +70,13 @@ static inline int dt_mobile_parameter_allowed(const char *operation, const char 
     { "sigmoid", "hue_preservation", DT_INTROSPECTION_TYPE_FLOAT },
     { "sharpen", "amount", DT_INTROSPECTION_TYPE_FLOAT },
     { "sharpen", "threshold", DT_INTROSPECTION_TYPE_FLOAT },
+    { "colisa", "contrast", DT_INTROSPECTION_TYPE_FLOAT },
+    { "colisa", "brightness", DT_INTROSPECTION_TYPE_FLOAT },
+    { "colisa", "saturation", DT_INTROSPECTION_TYPE_FLOAT },
+    { "colorize", "hue", DT_INTROSPECTION_TYPE_FLOAT },
+    { "colorize", "saturation", DT_INTROSPECTION_TYPE_FLOAT },
+    { "colorize", "source_lightness_mix", DT_INTROSPECTION_TYPE_FLOAT },
+    { "colorize", "lightness", DT_INTROSPECTION_TYPE_FLOAT },
   };
   if(!operation || !parameter || strpbrk(parameter, "[.")) return 0;
   for(size_t k = 0; k < sizeof(approved) / sizeof(approved[0]); k++)

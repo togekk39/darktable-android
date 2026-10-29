@@ -94,6 +94,8 @@ static int parameter_equals(const char *json, const char *operation, const char 
   return end != value + strlen(",\"value\":") && isfinite(actual) && actual == expected;
 }
 
+#include "dt_mobile_color_controls_checks.h"
+
 static int instance_checks(dt_mobile_session *session)
 {
   char *baseline = NULL, *metadata = NULL, *history = NULL, *after_failure = NULL;
@@ -652,6 +654,7 @@ int main(int argc, char **argv)
   ENGINE_OK(dt_mobile_history(session, &curve_json));
   CHECK(strstr(curve_json, "\"position\":0,\"length\":0"));
   dt_mobile_free_buffer(curve_json); curve_json = NULL;
+  CHECK(mobile_color_controls_checks(session));
   ENGINE_OK(dt_mobile_render_preview(session, 96, 96, &before, &width, &height));
   CHECK(before && width > 0 && height > 0);
   dt_mobile_free_buffer(before);

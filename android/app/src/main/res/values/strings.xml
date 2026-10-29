@@ -6,6 +6,11 @@
   <string name="unofficial_notice">This is an unofficial Android application based on darktable.\nIt is not affiliated with or endorsed by the darktable project.</string>
   <string name="engine_unavailable">Opening photos, editing and exporting are not yet available in this build.</string>
   <string name="edit_tools">Editing tools</string>
+  <string name="module_expand_controls">Show controls for %1$s</string>
+  <string name="module_collapse_controls">Hide controls for %1$s</string>
+  <string name="module_show_controls">Adjust ▼</string>
+  <string name="module_show_details">Details ▼</string>
+  <string name="module_hide_controls">Collapse ▲</string>
   <string name="module_new_instance">New default instance</string>
   <string name="module_new_instance_hint">Creates another instance using this tool’s defaults. You can undo this change.</string>
   <string name="tool_limitations">Exposure, white balance, selected color controls, crop, base curve and RGB curve nodes are available. Masks and additional tool settings are not yet available on mobile.</string>

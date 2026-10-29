@@ -46,6 +46,17 @@ data class ExportFormat(
     val options: ExportOptions? = null,
 )
 
+internal val EditorModule.hasEditableControls: Boolean
+    get() = parameters.isNotEmpty() || curves.any { it.editable } || crop != null ||
+        rgbCurveOptions != null || whiteBalance != null
+
+/** Presentation order only; native pixelpipe order remains unchanged. */
+internal fun List<EditorModule>.controlsFirst(): List<EditorModule> = sortedBy { !it.hasEditableControls }
+
+internal fun List<EditorModule>.initialControlModule(): String? =
+    firstOrNull { it.operation == "exposure" && it.hasEditableControls }?.operation
+        ?: firstOrNull { it.hasEditableControls }?.operation
+
 internal fun parseModules(json: String): List<EditorModule> = JSONArray(json).let { modules ->
     List(modules.length()) { index ->
         val module = modules.getJSONObject(index)
