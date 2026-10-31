@@ -53,11 +53,174 @@ static void mobile_mask_action(parameter_json *description, const char *name, co
 
 static gboolean mobile_mask_shape_supported(const dt_masks_form_t *form)
 {
-  if(!form || !form->points || form->points->next || !form->functions) return FALSE;
+  if(!form || !form->points || !form->functions) return FALSE;
   const dt_masks_type_t type = form->type & ~(DT_MASKS_CLONE | DT_MASKS_NON_CLONE);
+  if(type == DT_MASKS_PATH || type == DT_MASKS_BRUSH)
+  {
+    const unsigned count = g_list_length(form->points);
+    if(count < (type == DT_MASKS_PATH ? 3u : 2u) || count > 64) return FALSE;
+    if(form->functions->point_struct_size != (type == DT_MASKS_PATH
+         ? sizeof(dt_masks_point_path_t) : sizeof(dt_masks_point_brush_t))) return FALSE;
+    for(const GList *point = form->points; point; point = point->next)
+      if(!point->data) return FALSE;
+    return TRUE;
+  }
+  if(form->points->next || !form->points->data) return FALSE;
   return (type == DT_MASKS_CIRCLE && form->functions->point_struct_size == sizeof(dt_masks_point_circle_t))
     || (type == DT_MASKS_ELLIPSE && form->functions->point_struct_size == sizeof(dt_masks_point_ellipse_t))
     || (type == DT_MASKS_GRADIENT && form->functions->point_struct_size == sizeof(dt_masks_point_gradient_t));
+}
+
+/* These are original mask node fields, not a second path representation used
+ * for rendering. Typed copies avoid aliasing the two native point structs. */
+typedef struct mobile_mask_node
+{
+  float corner[2], ctrl1[2], ctrl2[2], border[2], density, hardness;
+  dt_masks_points_states_t state;
+} mobile_mask_node;
+
+static mobile_mask_node mobile_mask_read_node(const dt_masks_form_t *form, const void *point)
+{
+  mobile_mask_node node = { .density = 1, .hardness = .7f };
+  if(form->type & DT_MASKS_PATH)
+  {
+    const dt_masks_point_path_t *p = point;
+    memcpy(node.corner, p->corner, sizeof(node.corner));
+    memcpy(node.ctrl1, p->ctrl1, sizeof(node.ctrl1));
+    memcpy(node.ctrl2, p->ctrl2, sizeof(node.ctrl2));
+    memcpy(node.border, p->border, sizeof(node.border));
+    node.state = p->state;
+  }
+  else
+  {
+    const dt_masks_point_brush_t *p = point;
+    memcpy(node.corner, p->corner, sizeof(node.corner));
+    memcpy(node.ctrl1, p->ctrl1, sizeof(node.ctrl1));
+    memcpy(node.ctrl2, p->ctrl2, sizeof(node.ctrl2));
+    memcpy(node.border, p->border, sizeof(node.border));
+    node.density = p->density; node.hardness = p->hardness;
+    node.state = p->state;
+  }
+  return node;
+}
+
+static void mobile_mask_write_node(const dt_masks_form_t *form, void *point, const mobile_mask_node *node)
+{
+  if(form->type & DT_MASKS_PATH)
+  {
+    dt_masks_point_path_t *p = point;
+    memcpy(p->corner, node->corner, sizeof(p->corner));
+    memcpy(p->ctrl1, node->ctrl1, sizeof(p->ctrl1));
+    memcpy(p->ctrl2, node->ctrl2, sizeof(p->ctrl2));
+    memcpy(p->border, node->border, sizeof(p->border));
+    p->state = node->state;
+  }
+  else
+  {
+    dt_masks_point_brush_t *p = point;
+    memcpy(p->corner, node->corner, sizeof(p->corner));
+    memcpy(p->ctrl1, node->ctrl1, sizeof(p->ctrl1));
+    memcpy(p->ctrl2, node->ctrl2, sizeof(p->ctrl2));
+    memcpy(p->border, node->border, sizeof(p->border));
+    p->density = node->density; p->hardness = node->hardness;
+    p->state = node->state;
+  }
+}
+
+static gboolean mobile_mask_nodes_valid(const mobile_mask_node *nodes, unsigned count, gboolean closed)
+{
+  if(count < (closed ? 3u : 2u) || count > 64) return FALSE;
+  float minimum[2] = { 1, 1 }, maximum[2] = { 0, 0 };
+  for(unsigned index = 0; index < count; index++)
+  {
+    const mobile_mask_node *p = nodes + index;
+    for(unsigned axis = 0; axis < 2; axis++)
+    {
+      if(!isfinite(p->corner[axis]) || p->corner[axis] < 0 || p->corner[axis] > 1
+         || !isfinite(p->ctrl1[axis]) || p->ctrl1[axis] < -1 || p->ctrl1[axis] > 2
+         || !isfinite(p->ctrl2[axis]) || p->ctrl2[axis] < -1 || p->ctrl2[axis] > 2
+         || !isfinite(p->border[axis]) || p->border[axis] < .0005f || p->border[axis] > .5f) return FALSE;
+      minimum[axis] = MIN(minimum[axis], p->corner[axis]);
+      maximum[axis] = MAX(maximum[axis], p->corner[axis]);
+    }
+    if(!closed && (!isfinite(p->hardness) || p->hardness < .0005f || p->hardness > 1
+       || !isfinite(p->density) || p->density < .05f || p->density > 1)) return FALSE;
+    if(index + 1 < count || closed)
+    {
+      const mobile_mask_node *next = nodes + (index + 1) % count;
+      const double dx = next->corner[0] - p->corner[0], dy = next->corner[1] - p->corner[1];
+      if(dx * dx + dy * dy < 1e-10) return FALSE;
+    }
+  }
+  /* Original paths support self intersections. Reject only a collapsed box,
+   * rather than inventing a winding/convexity rule absent from that processor. */
+  return !closed || (maximum[0] - minimum[0]) * (maximum[1] - minimum[1]) >= 1e-10;
+}
+
+static void mobile_mask_node_parameters(dt_masks_form_t *form, const char *shape, parameter_json *description)
+{
+  const unsigned count = g_list_length(form->points);
+  const gboolean brush = (form->type & DT_MASKS_BRUSH) != 0;
+  unsigned index = 0;
+  for(const GList *point = form->points; point; point = point->next, index++)
+  {
+    const mobile_mask_node p = mobile_mask_read_node(form, point->data);
+    static const char *const fields[] = { "x", "y", "ctrl1_x", "ctrl1_y", "ctrl2_x", "ctrl2_y",
+      "border_in", "border_out", "hardness", "density" };
+    static const char *const labels[] = { "x", "y", "incoming handle x", "incoming handle y",
+      "outgoing handle x", "outgoing handle y", "incoming feather/radius", "outgoing feather/radius",
+      "hardness", "density" };
+    const float values[] = { p.corner[0], p.corner[1], p.ctrl1[0], p.ctrl1[1], p.ctrl2[0], p.ctrl2[1],
+      p.border[0], p.border[1], p.hardness, p.density };
+    for(unsigned field = 0; field < (brush ? 10u : 8u); field++)
+    {
+      char name[64], label[128];
+      snprintf(name, sizeof(name), "node.%u.%s", index, fields[field]);
+      snprintf(label, sizeof(label), "node %u · %s", index + 1, labels[field]);
+      const double minimum = field < 2 ? 0 : field < 6 ? -1 : field == 9 ? (double).05f : (double).0005f;
+      const double maximum = field < 2 ? 1 : field < 6 ? 2 : field < 8 ? .5 : 1;
+      mobile_mask_number(description, form->formid, shape, name, label, "float", values[field], minimum, maximum);
+    }
+    char name[96], label[128];
+    if(count < 64 && (!brush || index + 1 < count))
+    {
+      snprintf(name, sizeof(name), "mask.%d.node.%u.insert_after", form->formid, index);
+      snprintf(label, sizeof(label), "split segment after node %u", index + 1);
+      mobile_mask_action(description, name, label);
+    }
+    if(count > (brush ? 2u : 3u))
+    {
+      snprintf(name, sizeof(name), "mask.%d.node.%u.delete", form->formid, index);
+      snprintf(label, sizeof(label), "delete node %u", index + 1);
+      mobile_mask_action(description, name, label);
+    }
+  }
+}
+
+static void mobile_mask_operation_parameter(const dt_masks_form_t *form, const char *shape,
+    const dt_masks_point_group_t *member, parameter_json *description)
+{
+  if(!description->first) g_string_append_c(description->json, ',');
+  description->first = FALSE;
+  char name[96], label[160];
+  snprintf(name, sizeof(name), "mask.%d.operation", form->formid);
+  snprintf(label, sizeof(label), "%s %d · combine with preceding shapes", shape, form->formid);
+  g_string_append(description->json, "{\"name\":"); json_string(description->json, name);
+  g_string_append(description->json, ",\"label\":"); json_string(description->json, label);
+  g_string_append_printf(description->json, ",\"type\":\"enum\",\"value\":%d,\"min\":8,\"max\":128,\"choices\":[",
+    member->state & DT_MASKS_STATE_OP);
+  static const struct { int value; const char *label; } choices[] = {
+    { DT_MASKS_STATE_UNION, "union" }, { DT_MASKS_STATE_INTERSECTION, "intersection" },
+    { DT_MASKS_STATE_DIFFERENCE, "difference" }, { DT_MASKS_STATE_EXCLUSION, "exclusion" },
+    { DT_MASKS_STATE_SUM, "sum" }
+  };
+  for(unsigned index = 0; index < sizeof(choices) / sizeof(choices[0]); index++)
+  {
+    if(index) g_string_append_c(description->json, ',');
+    g_string_append_printf(description->json, "{\"value\":%d,\"label\":", choices[index].value);
+    json_string(description->json, choices[index].label); g_string_append_c(description->json, '}');
+  }
+  g_string_append(description->json, "]}");
 }
 
 static void mobile_retouch_parameters(dt_iop_module_t *module, dt_masks_form_t *form, parameter_json *description)
@@ -141,13 +304,28 @@ static void append_mobile_mask_parameters(dt_iop_module_t *module, parameter_jso
         mobile_mask_action(description, "mask.add.clone", "add clone circle");
         mobile_mask_action(description, "mask.add.blur", "add blur circle");
         mobile_mask_action(description, "mask.add.fill", "add fill circle");
+        const char *const algorithms[] = { "clone", "heal", "blur", "fill" };
+        for(unsigned algorithm = 0; algorithm < 4; algorithm++)
+          for(unsigned shape = 0; shape < 2; shape++)
+          {
+            char name[96], label[128];
+            const char *kind = shape ? "brush" : "path";
+            snprintf(name, sizeof(name), "mask.add.%s.%s", algorithms[algorithm], kind);
+            snprintf(label, sizeof(label), "add %s %s", algorithms[algorithm], kind);
+            mobile_mask_action(description, name, label);
+          }
       }
     }
     else
     {
       mobile_mask_action(description, "mask.add.circle", mobile_mask_special(module) ? "add clone circle" : "add circle mask");
       mobile_mask_action(description, "mask.add.ellipse", mobile_mask_special(module) ? "add clone ellipse" : "add ellipse mask");
-      if(!mobile_mask_special(module)) mobile_mask_action(description, "mask.add.gradient", "add gradient mask");
+      mobile_mask_action(description, "mask.add.path", mobile_mask_special(module) ? "add clone path" : "add path mask");
+      if(!mobile_mask_special(module))
+      {
+        mobile_mask_action(description, "mask.add.gradient", "add gradient mask");
+        mobile_mask_action(description, "mask.add.brush", "add brush mask");
+      }
     }
   }
   if(!group) return;
@@ -156,7 +334,8 @@ static void append_mobile_mask_parameters(dt_iop_module_t *module, parameter_jso
     dt_masks_point_group_t *member = item->data;
     dt_masks_form_t *form = dt_masks_get_from_id(module->dev, member->formid);
     if(!form || !mobile_mask_shape_supported(form)) continue;
-    const char *shape = form->type & DT_MASKS_CIRCLE ? "circle" : form->type & DT_MASKS_ELLIPSE ? "ellipse" : "gradient";
+    const char *shape = form->type & DT_MASKS_CIRCLE ? "circle" : form->type & DT_MASKS_ELLIPSE ? "ellipse"
+      : form->type & DT_MASKS_PATH ? "path" : form->type & DT_MASKS_BRUSH ? "brush" : "gradient";
     float *x = NULL, *y = NULL;
     if(form->type & DT_MASKS_CIRCLE)
     {
@@ -174,7 +353,7 @@ static void append_mobile_mask_parameters(dt_iop_module_t *module, parameter_jso
       mobile_mask_number(description, form->formid, shape, "rotation", "rotation (degrees)", "float", p->rotation, -180, 180);
       mobile_mask_number(description, form->formid, shape, "feather", "feather", "float", p->border, .0005f, .5f);
     }
-    else
+    else if(form->type & DT_MASKS_GRADIENT)
     {
       dt_masks_point_gradient_t *p = form->points->data;
       x = p->anchor; y = p->anchor + 1;
@@ -184,13 +363,17 @@ static void append_mobile_mask_parameters(dt_iop_module_t *module, parameter_jso
       mobile_mask_number(description, form->formid, shape, "sigmoid", "sigmoidal transition", "bool",
         p->state == DT_MASKS_GRADIENT_STATE_SIGMOIDAL, 0, 1);
     }
-    mobile_mask_number(description, form->formid, shape, "x", "center x", "float", *x, 0, 1);
-    mobile_mask_number(description, form->formid, shape, "y", "center y", "float", *y, 0, 1);
+    else mobile_mask_node_parameters(form, shape, description);
+    if(x && y)
+    {
+      mobile_mask_number(description, form->formid, shape, "x", "center x", "float", *x, 0, 1);
+      mobile_mask_number(description, form->formid, shape, "y", "center y", "float", *y, 0, 1);
+    }
     mobile_mask_number(description, form->formid, shape, "opacity", "shape opacity", "float", member->opacity, 0, 1);
     if(!mobile_mask_special(module))
     {
-      mobile_mask_number(description, form->formid, shape, "enabled", "use shape", "bool", !!(member->state & DT_MASKS_STATE_USE), 0, 1);
       mobile_mask_number(description, form->formid, shape, "inverted", "invert shape", "bool", !!(member->state & DT_MASKS_STATE_INVERSE), 0, 1);
+      if(item->prev) mobile_mask_operation_parameter(form, shape, member, description);
     }
     if(form->type & DT_MASKS_CLONE)
     {
@@ -217,18 +400,25 @@ static int mobile_mask_add(dt_iop_module_t *module, const char *kind)
      || (module->blend_params->mask_mode & DEVELOP_MASK_RASTER)) return -1;
   dt_masks_type_t type;
   int algorithm = 0;
-  if(!strcmp(kind, "circle")) type = DT_MASKS_CIRCLE;
-  else if(!strcmp(kind, "ellipse")) type = DT_MASKS_ELLIPSE;
-  else if(!strcmp(kind, "gradient") && !mobile_mask_special(module)) type = DT_MASKS_GRADIENT;
-  else if(!strcmp(module->op, "retouch"))
+  if(!strcmp(module->op, "retouch"))
   {
-    type = DT_MASKS_CIRCLE;
-    if(!strcmp(kind, "clone")) algorithm = 1;
-    else if(!strcmp(kind, "heal")) algorithm = 2;
-    else if(!strcmp(kind, "blur")) algorithm = 3;
-    else if(!strcmp(kind, "fill")) algorithm = 4;
+    const char *suffix = strchr(kind, '.');
+    const size_t name_length = suffix ? (size_t)(suffix - kind) : strlen(kind);
+    if(name_length == 5 && !strncmp(kind, "clone", name_length)) algorithm = 1;
+    else if(name_length == 4 && !strncmp(kind, "heal", name_length)) algorithm = 2;
+    else if(name_length == 4 && !strncmp(kind, "blur", name_length)) algorithm = 3;
+    else if(name_length == 4 && !strncmp(kind, "fill", name_length)) algorithm = 4;
+    else return -1;
+    if(!suffix) type = DT_MASKS_CIRCLE;
+    else if(!strcmp(suffix, ".path")) type = DT_MASKS_PATH;
+    else if(!strcmp(suffix, ".brush")) type = DT_MASKS_BRUSH;
     else return -1;
   }
+  else if(!strcmp(kind, "circle")) type = DT_MASKS_CIRCLE;
+  else if(!strcmp(kind, "ellipse")) type = DT_MASKS_ELLIPSE;
+  else if(!strcmp(kind, "path")) type = DT_MASKS_PATH;
+  else if(!strcmp(kind, "brush") && !mobile_mask_special(module)) type = DT_MASKS_BRUSH;
+  else if(!strcmp(kind, "gradient") && !mobile_mask_special(module)) type = DT_MASKS_GRADIENT;
   else return -1;
   mobile_retouch_add_function add = NULL;
   if(!strcmp(module->op, "retouch"))
@@ -266,12 +456,29 @@ static int mobile_mask_add(dt_iop_module_t *module, const char *kind)
     p->border = .05f; p->flags = DT_MASKS_ELLIPSE_EQUIDISTANT;
     form->points = g_list_append(NULL, p);
   }
-  else
+  else if(type & DT_MASKS_GRADIENT)
   {
     dt_masks_point_gradient_t *p = g_new0(dt_masks_point_gradient_t, 1);
     p->anchor[0] = p->anchor[1] = .5f; p->compression = .5f;
     p->state = DT_MASKS_GRADIENT_STATE_LINEAR;
     form->points = g_list_append(NULL, p);
+  }
+  else
+  {
+    const gboolean closed = (type & DT_MASKS_PATH) != 0;
+    const float corners[][2] = { { .35f, .35f }, { .65f, .35f }, { .65f, .65f }, { .35f, .65f } };
+    const float stroke[][2] = { { .35f, .4f }, { .5f, .6f }, { .65f, .4f } };
+    for(unsigned index = 0; index < (closed ? 4u : 3u); index++)
+    {
+      mobile_mask_node node = { .border = { .03f, .03f }, .density = 1, .hardness = .7f,
+        .state = DT_MASKS_POINT_STATE_USER };
+      memcpy(node.corner, closed ? corners[index] : stroke[index], sizeof(node.corner));
+      memcpy(node.ctrl1, node.corner, sizeof(node.ctrl1));
+      memcpy(node.ctrl2, node.corner, sizeof(node.ctrl2));
+      void *point = g_malloc0(form->functions->point_struct_size);
+      mobile_mask_write_node(form, point, &node);
+      form->points = g_list_append(form->points, point);
+    }
   }
   form->source[0] = .25f; form->source[1] = .5f;
   dt_masks_point_group_t *member = dt_masks_group_add_form(group, form);
@@ -282,6 +489,8 @@ static int mobile_mask_add(dt_iop_module_t *module, const char *kind)
     return -1;
   }
   member->opacity = 1;
+  if(!mobile_mask_special(module) && (type & DT_MASKS_BRUSH) && group->points->next)
+    member->state = (member->state & ~DT_MASKS_STATE_OP) | DT_MASKS_STATE_SUM;
   if(created_group) module->dev->forms = g_list_append(module->dev->forms, group);
   module->dev->forms = g_list_append(module->dev->forms, form);
   dt_develop_blend_params_t blend = *module->blend_params;
@@ -290,6 +499,95 @@ static int mobile_mask_add(dt_iop_module_t *module, const char *kind)
   dt_iop_commit_blend_params(module, &blend, NULL);
   if(add) add(module, algorithm);
   else if(mobile_mask_special(module)) mobile_mask_sync(module)(module);
+  return 1;
+}
+
+static int mobile_mask_update_node(dt_masks_form_t *form, const char *field, double value)
+{
+  if(strncmp(field, "node.", 5) || !(form->type & (DT_MASKS_PATH | DT_MASKS_BRUSH))) return -1;
+  char *end;
+  const unsigned long index = strtoul(field + 5, &end, 10);
+  if(end == field + 5 || *end != '.' || index >= 64) return -1;
+  char canonical[32]; snprintf(canonical, sizeof(canonical), "node.%lu.", index);
+  if(strncmp(field, canonical, strlen(canonical))) return -1;
+  const char *attribute = end + 1;
+  unsigned count = g_list_length(form->points);
+  if(index >= count || count > 64) return -1;
+  const gboolean closed = (form->type & DT_MASKS_PATH) != 0;
+  mobile_mask_node nodes[64];
+  unsigned number = 0;
+  for(const GList *point = form->points; point; point = point->next)
+    nodes[number++] = mobile_mask_read_node(form, point->data);
+  const gboolean insert = !strcmp(attribute, "insert_after"), remove = !strcmp(attribute, "delete");
+  if(insert)
+  {
+    if(value != 1 || count >= 64 || (!closed && index + 1 == count)) return -1;
+    const unsigned next = (index + 1) % count;
+    mobile_mask_node added = nodes[index];
+    /* De Casteljau splitting changes only original cubic control points and
+     * retains the curve. Rendering remains entirely in masks/path or brush. */
+    for(unsigned axis = 0; axis < 2; axis++)
+    {
+      const float a = .5f * (nodes[index].corner[axis] + nodes[index].ctrl2[axis]);
+      const float b = .5f * (nodes[index].ctrl2[axis] + nodes[next].ctrl1[axis]);
+      const float c = .5f * (nodes[next].ctrl1[axis] + nodes[next].corner[axis]);
+      const float d = .5f * (a + b), e = .5f * (b + c);
+      added.corner[axis] = .5f * (d + e);
+      added.ctrl1[axis] = d; added.ctrl2[axis] = e;
+      nodes[index].ctrl2[axis] = a; nodes[next].ctrl1[axis] = c;
+    }
+    added.border[0] = added.border[1] = .5f * (nodes[index].border[1] + nodes[next].border[0]);
+    added.density = .5f * (nodes[index].density + nodes[next].density);
+    added.hardness = .5f * (nodes[index].hardness + nodes[next].hardness);
+    added.state = nodes[index].state = nodes[next].state = DT_MASKS_POINT_STATE_USER;
+    memmove(nodes + index + 2, nodes + index + 1, (count - index - 1) * sizeof(*nodes));
+    nodes[index + 1] = added;
+    count++;
+  }
+  else if(remove)
+  {
+    if(value != 1 || count <= (closed ? 3u : 2u)) return -1;
+    memmove(nodes + index, nodes + index + 1, (count - index - 1) * sizeof(*nodes));
+    count--;
+  }
+  else
+  {
+    if(value < -FLT_MAX || value > FLT_MAX) return -1;
+    const float stored = (float)value;
+    if(!isfinite(stored)) return -1;
+    mobile_mask_node *p = nodes + index;
+    if(!strcmp(attribute, "x") || !strcmp(attribute, "y"))
+    {
+      const unsigned axis = !strcmp(attribute, "y");
+      const float delta = stored - p->corner[axis];
+      p->corner[axis] = stored; p->ctrl1[axis] += delta; p->ctrl2[axis] += delta;
+      p->state = DT_MASKS_POINT_STATE_USER;
+    }
+    else if(!strcmp(attribute, "ctrl1_x")) { p->ctrl1[0] = stored; p->state = DT_MASKS_POINT_STATE_USER; }
+    else if(!strcmp(attribute, "ctrl1_y")) { p->ctrl1[1] = stored; p->state = DT_MASKS_POINT_STATE_USER; }
+    else if(!strcmp(attribute, "ctrl2_x")) { p->ctrl2[0] = stored; p->state = DT_MASKS_POINT_STATE_USER; }
+    else if(!strcmp(attribute, "ctrl2_y")) { p->ctrl2[1] = stored; p->state = DT_MASKS_POINT_STATE_USER; }
+    else if(!strcmp(attribute, "border_in")) p->border[0] = stored;
+    else if(!strcmp(attribute, "border_out")) p->border[1] = stored;
+    else if(!strcmp(attribute, "hardness") && !closed) p->hardness = stored;
+    else if(!strcmp(attribute, "density") && !closed) p->density = stored;
+    else return -1;
+  }
+  /* Validate the entire candidate before altering either native list links or
+   * points. Invalid geometry never acquires a mask/history snapshot. */
+  if(!mobile_mask_nodes_valid(nodes, count, closed)) return -1;
+  if(insert)
+    form->points = g_list_insert_before(form->points, g_list_nth(form->points, index + 1),
+                                        g_malloc0(form->functions->point_struct_size));
+  else if(remove)
+  {
+    GList *point = g_list_nth(form->points, index);
+    g_free(point->data);
+    form->points = g_list_delete_link(form->points, point);
+  }
+  number = 0;
+  for(GList *point = form->points; point; point = point->next)
+    mobile_mask_write_node(form, point->data, nodes + number++);
   return 1;
 }
 
@@ -315,11 +613,24 @@ static int update_mobile_mask_parameter(dt_iop_module_t *module, const char *nam
   dt_masks_point_group_t *member = link->data;
   dt_masks_form_t *form = dt_masks_get_from_id(module->dev, (int32_t)id);
   if(!mobile_mask_shape_supported(form)) return -1;
+  if(!strncmp(field, "node.", 5)) return mobile_mask_update_node(form, field, value);
+  if(!strcmp(field, "operation"))
+  {
+    if(mobile_mask_special(module) || !link->prev) return -1;
+    if(value != DT_MASKS_STATE_UNION && value != DT_MASKS_STATE_INTERSECTION
+       && value != DT_MASKS_STATE_DIFFERENCE && value != DT_MASKS_STATE_EXCLUSION
+       && value != DT_MASKS_STATE_SUM) return -1;
+    member->state = (member->state & ~DT_MASKS_STATE_OP) | (int)value;
+    return 1;
+  }
   if(!strcmp(field, "delete"))
   {
     if(value != 1) return -1;
+    const gboolean removed_first = link == group->points;
     group->points = g_list_delete_link(group->points, link);
     free(member);
+    if(removed_first && group->points && !mobile_mask_special(module))
+      ((dt_masks_point_group_t *)group->points->data)->state &= ~DT_MASKS_STATE_OP;
     /* Keep the now-empty group: mask snapshots use a nonempty form list to
      * distinguish clearing the last shape from an unchanged mask history. */
     if(mobile_mask_special(module)) mobile_mask_sync(module)(module);
@@ -349,8 +660,6 @@ static int update_mobile_mask_parameter(dt_iop_module_t *module, const char *nam
   double minimum = 0, maximum = 1;
   int *boolean_destination = NULL, boolean_bit = 0;
   if(!strcmp(field, "opacity")) destination = &member->opacity;
-  else if(!strcmp(field, "enabled") && !mobile_mask_special(module))
-    { boolean_destination = &member->state; boolean_bit = DT_MASKS_STATE_USE; }
   else if(!strcmp(field, "inverted") && !mobile_mask_special(module))
     { boolean_destination = &member->state; boolean_bit = DT_MASKS_STATE_INVERSE; }
   else if((form->type & DT_MASKS_CLONE) && (!strcmp(field, "source_x") || !strcmp(field, "source_y")))

@@ -70,7 +70,7 @@ jobs:
         run: |
           cmake --build build/mobile-engine --parallel 2 --target \
             dt_mobile_engine_test dt_mobile_raw_engine_test dt_mobile_rawspeed_gpr_test dt_mobile_api_test \
-            dt_mobile_mock_api_test dt_mobile_gpr_test dt_mobile_temperature_test \
+            dt_mobile_mock_api_test dt_mobile_gpr_test dt_mobile_temperature_test dt_mobile_zonemap_test \
             dt_mobile_locations_desktop_test dt_mobile_locations_android_test
           ctest --test-dir build/mobile-engine -R '^dt_mobile_' --output-on-failure
       - uses: actions/upload-artifact@v4

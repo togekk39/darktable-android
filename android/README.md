@@ -21,9 +21,18 @@ advanced desktop interactions.
 
 Dedicated editors include base/RGB/Lab tone/color-zone curves, atomic crop and
 white balance, levels and fixed frequency bands, and the original zone system.
+Crop aspect presets and portrait/free drafts use the native input ROI for each
+crop instance, including preceding geometry changes, and apply complete bounds
+atomically. Parametric masking groups original input/output channels with four
+ordered threshold sliders, inversion, boost/reset and native mask refinement.
 The native bridge also supports blending and preceding raster-mask selection,
-native circle/ellipse/gradient forms, clone/retouch shape controls and standalone
-liquify warps. Watermark text/font/template and camera/lens identifiers use
+native circle/ellipse/gradient/path/brush forms, clone/retouch shape controls and
+standalone liquify warps. Stable form and node selectors expose precise path
+coordinates, Bézier handles and brush feather/hardness/density controls, up to
+64 nodes per form. Subsequent group members support the original five
+combination operations. Spots supports clone paths; retouch supports paths and
+brushes. Applied coordinate diagrams remain separate from the processed photo.
+Watermark text/font/template and camera/lens identifiers use
 bounded native text fields. System document selection imports external raster
 PFM/PNG masks, Cube/3DL/Hald-PNG LUTs and PNG/JPEG/TIFF overlay images into retained
 session assets. The original readers and processing code handle those files;
@@ -33,9 +42,10 @@ UI supplies no replacement image formulas.
 The tools panel hides internal pipeline/diagnostic modules. RAW-only settings
 and methods follow the input's original capabilities, including Bayer/X-Trans/
 four-Bayer/monochrome demosaicing. The removed desktop `colortransfer` editor
-retains its legacy explanation/enable state. Brush/path masks, parametric mask
-thresholds, linked liquify strokes, automatic pickers, full preset browsers and
-other advanced interactions remain outside this coverage.
+retains its legacy explanation/enable state. Freehand stroke capture, direct
+photo-canvas manipulation, live channel histograms, linked liquify strokes,
+automatic pickers, full preset browsers and other advanced interactions remain
+outside this coverage.
 
 The default Gradle build still sets `DT_MOBILE_WITH_DARKTABLE_ENGINE=OFF`.
 That dependency-only route reports processing unavailable and disables image

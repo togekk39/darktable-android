@@ -4,7 +4,8 @@
 ## Expanded editor controls: current source validation
 
 The current editor exposes the reviewed scalar and fixed-array parameters,
-curves, blending, native mask forms, retouch/spot forms, liquify point warps,
+curves, blending and parametric masks, native path/brush forms and node editors,
+retouch/spot forms, liquify point warps, native-input-aware crop aspect drafts,
 text fields and file imports described in
 [control coverage](../mobile/CONTROL_PARITY.md). Runtime metadata depends on
 the image, module instances and native capabilities; source-policy field counts
@@ -12,13 +13,18 @@ are not counts of independently rendered Android controls.
 
 The current validation includes:
 
-- Android production and instrumentation Kotlin compilation, 69 JVM tests in
-  19 classes (zero failures or skips), and `lintDevDebug`.
-- All seven host native CTest cases passed in 104.84 seconds, including the
-  original-engine regression in 104.77 seconds. Its RGB fixture traversed 1,143
+- The coordinated Android check passed production and instrumentation Kotlin
+  compilation, 86 JVM tests in 22 classes (zero failures or skips), and
+  `lintDevDebug`. Additional instrumentation-source checks remain separate from
+  actually running those component tests on Android.
+- The final expanded source passed all seven host native CTest cases in
+  161.26 seconds, including the original-engine regression in 161.16 seconds.
+  Its RGB fixture traversed 1,207
   advertised ordinary parameters, including live-instance and blending fields;
-  this runtime count is distinct from the source-policy field counts.
-- Production JNI compilation with the pinned AArch64/API 26 NDK, plus a host
+  this runtime count is distinct from the source-policy field counts. The run
+  includes minimum-node and invalid-topology checks for paths and brushes.
+- The preceding `9e749eeb6e` snapshot also passed production JNI compilation with the pinned
+  AArch64/API 26 NDK, plus a host
   JNI test using the original engine: four Unicode round trips and five invalid
   UTF-16/NUL rejections. The host JVM uses `-Xint` because desktop darktable's
   signal handler conflicts with HotSpot JIT; Android already omits that handler.
@@ -38,6 +44,16 @@ The fixture's runtime metadata lists 85 visible RGB modules. Each has specific
 numeric, curve, text or dedicated controls except legacy `colortransfer`, whose
 original desktop editor also retains only enable/disable. RAW-only modules are
 omitted for that RGB fixture.
+
+The expanded regression adds real parametric threshold pixels and undo/redo,
+inclusive-mode neutral channels, boost-coordinate preservation, invalid handle
+ordering and unsupported-channel rejection. Path/brush checks exercise original
+form creation, precise nodes/handles, insertion/deletion, group combinations,
+native rendering and history; special repair consumers follow their original
+supported shape families. Crop geometry checks use preceding pixel-aspect and
+orientation edits to distinguish the crop input ROI from its processed output.
+Android JVM tests separately cover threshold bounds/graphs, mask address and
+node selection, crop aspect fitting and optional native dimension metadata.
 
 These checks do not establish execution of the new Compose instrumentation
 tests on Android, complete physical-device picker/edit/export behavior, every

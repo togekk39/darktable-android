@@ -45,6 +45,8 @@ struct dt_mobile_engine { dt_imgid_t image_id; dt_develop_t develop; atomic_bool
   GPtrArray *history_states;
   guint history_position;
   GHashTable *instance_priorities;
+  GBytes *crop_geometry_key;
+  GHashTable *crop_input_sizes;
 };
 static pthread_mutex_t runtime_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t engine_work_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -1073,7 +1075,73 @@ static gboolean crop_layout(dt_iop_module_t *module, mobile_crop_layout *layout)
   return TRUE;
 }
 
-static void append_crop(dt_iop_module_t *module, GString *json)
+/* Use the original dimensions-only pixelpipe, as dt_image_get_final_size does.
+ * The editor's private develop deliberately has no persistent pipeline and the
+ * processed preview can already be cropped/rotated. Neither is a substitute for
+ * the actual input ROI of a particular crop instance. Cache exact geometry
+ * parameters so ordinary metadata reads do not repeatedly create a pipeline. */
+static void update_crop_input_sizes(dt_mobile_engine *engine)
+{
+  GByteArray *key = g_byte_array_new();
+  const int dimensions[] = { engine->develop.image_storage.width, engine->develop.image_storage.height };
+  g_byte_array_append(key, (const guint8 *)dimensions, sizeof(dimensions));
+  gboolean has_crop = FALSE;
+  for(const GList *item = engine->develop.iop; item; item = item->next)
+  {
+    const dt_iop_module_t *module = item->data;
+    gpointer native_roi = NULL;
+    if(!strcmp(module->op, "crop")) has_crop = TRUE;
+    /* Modules without this exported callback use imageop.c's pass-through
+     * implementation. Include every original override, not a hand-maintained
+     * list of tools which happen to change dimensions in today's source. */
+    if(!module->module || !g_module_symbol(module->module, "modify_roi_out", &native_roi)) continue;
+    g_byte_array_append(key, (const guint8 *)module->op, strlen(module->op) + 1);
+    const int identity[] = { module->multi_priority, module->enabled, module->params_size };
+    g_byte_array_append(key, (const guint8 *)identity, sizeof(identity));
+    if(module->params && module->params_size > 0)
+      g_byte_array_append(key, module->params, module->params_size);
+  }
+  GBytes *candidate = g_byte_array_free_to_bytes(key);
+  if(engine->crop_geometry_key && g_bytes_equal(candidate, engine->crop_geometry_key))
+  {
+    g_bytes_unref(candidate);
+    return;
+  }
+  g_clear_pointer(&engine->crop_geometry_key, g_bytes_unref);
+  engine->crop_geometry_key = candidate;
+  if(!engine->crop_input_sizes)
+    engine->crop_input_sizes = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+  else g_hash_table_remove_all(engine->crop_input_sizes);
+  if(!has_crop || dimensions[0] <= 0 || dimensions[1] <= 0) return;
+
+  dt_develop_t develop;
+  dt_dev_init(&develop, FALSE);
+  dt_dev_load_image(&develop, engine->image_id);
+  dt_dev_pixelpipe_t pipe;
+  if(dt_dev_pixelpipe_init_dummy(&pipe, dimensions[0], dimensions[1]))
+  {
+    dt_dev_pixelpipe_set_input(&pipe, &develop, NULL, dimensions[0], dimensions[1], 1.0f);
+    dt_dev_pixelpipe_create_nodes(&pipe, &develop);
+    dt_dev_pixelpipe_synch_all(&pipe, &develop);
+    dt_dev_pixelpipe_get_dimensions(&pipe, &develop, pipe.iwidth, pipe.iheight,
+                                    &pipe.processed_width, &pipe.processed_height);
+    for(const GList *node = pipe.nodes; node; node = node->next)
+    {
+      const dt_dev_pixelpipe_iop_t *piece = node->data;
+      if(strcmp(piece->module->op, "crop") || piece->buf_in.width <= 0 || piece->buf_in.height <= 0) continue;
+      char identifier[128];
+      module_identifier(piece->module, identifier, sizeof(identifier));
+      int *size = g_new(int, 2);
+      size[0] = piece->buf_in.width;
+      size[1] = piece->buf_in.height;
+      g_hash_table_replace(engine->crop_input_sizes, g_strdup(identifier), size);
+    }
+    dt_dev_pixelpipe_cleanup(&pipe);
+  }
+  dt_dev_cleanup(&develop);
+}
+
+static void append_crop(dt_mobile_engine *engine, dt_iop_module_t *module, GString *json)
 {
   mobile_crop_layout layout;
   if(!crop_layout(module, &layout)) return;
@@ -1092,7 +1160,12 @@ static void append_crop(dt_iop_module_t *module, GString *json)
   /* commit_params also treats 0/n as freehand unless n selects either
    * orientation of the original image ratio (1 or -1). */
   const gboolean freehand = ratios[0] == 0 && ratios[1] != 1 && ratios[1] != -1;
-  g_string_append_printf(json, ",\"freehand\":%s}", freehand ? "true" : "false");
+  g_string_append_printf(json, ",\"freehand\":%s", freehand ? "true" : "false");
+  char identifier[128];
+  module_identifier(module, identifier, sizeof(identifier));
+  const int *size = engine->crop_input_sizes ? g_hash_table_lookup(engine->crop_input_sizes, identifier) : NULL;
+  if(size) g_string_append_printf(json, ",\"inputWidth\":%d,\"inputHeight\":%d", size[0], size[1]);
+  g_string_append_c(json, '}');
 }
 
 typedef struct mobile_whitebalance_layout
@@ -1335,6 +1408,7 @@ dt_mobile_status dt_mobile_engine_modules(dt_mobile_engine *engine, char **json,
   *json = NULL;
   dt_mobile_status status = begin_operation(engine, error, error_size);
   if(status != DT_MOBILE_OK) return status;
+  update_crop_input_sizes(engine);
   GString *description = g_string_new("[");
   gboolean first = TRUE;
   for(GList *item = engine->develop.iop; item; item = g_list_next(item))
@@ -1377,7 +1451,7 @@ dt_mobile_status dt_mobile_engine_modules(dt_mobile_engine *engine, char **json,
     g_string_append_c(description, ']');
     append_rgb_curve_options(module, description);
     append_whitebalance(module, description);
-    append_crop(module, description);
+    append_crop(engine, module, description);
     append_mobile_text_parameters(module, description);
     g_string_append_printf(description, ",\"canReset\":%s",
       module->default_params && module->params && module->params_size > 0 ? "true" : "false");
@@ -2116,6 +2190,8 @@ void dt_mobile_engine_close(dt_mobile_engine *engine)
   /* History snapshots borrow module pointers and must go before module cleanup. */
   g_clear_pointer(&engine->history_states, g_ptr_array_unref);
   g_clear_pointer(&engine->instance_priorities, g_hash_table_unref);
+  g_clear_pointer(&engine->crop_geometry_key, g_bytes_unref);
+  g_clear_pointer(&engine->crop_input_sizes, g_hash_table_unref);
   dt_dev_cleanup(&engine->develop);
   pthread_mutex_unlock(&engine_work_lock);
   pthread_mutex_unlock(&engine->operation_lock);

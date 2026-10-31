@@ -41,7 +41,11 @@ data class EditorModule(
     val canReset: Boolean = false,
     val textParameters: List<ModuleTextParameter> = emptyList(),
 )
-data class ModuleCrop(val bounds: CropRect, val minSize: Float, val freehand: Boolean)
+data class ModuleCrop(
+    val bounds: CropRect, val minSize: Float, val freehand: Boolean,
+    /** Full crop-module input ROI. Zero means the runtime did not provide it. */
+    val inputWidth: Int = 0, val inputHeight: Int = 0,
+)
 data class ModuleCurve(
     val channel: Int,
     val label: String,
@@ -215,11 +219,22 @@ private fun JSONObject.readCrop(): ModuleCrop? = try {
         getDouble("right").toFloat(), getDouble("bottom").toFloat())
     val minSize = getDouble("minSize").toFloat()
     require(validCropRect(bounds, minSize))
-    ModuleCrop(bounds, minSize, getBoolean("freehand"))
+    val inputWidth = cropInputDimension("inputWidth")
+    val inputHeight = cropInputDimension("inputHeight")
+    val dimensionsAvailable = inputWidth > 0 && inputHeight > 0
+    ModuleCrop(bounds, minSize, getBoolean("freehand"),
+        if(dimensionsAvailable) inputWidth else 0, if(dimensionsAvailable) inputHeight else 0)
 } catch(_: org.json.JSONException) {
     null
 } catch(_: IllegalArgumentException) {
     null
+}
+
+/** Optional capabilities never replace valid legacy bounds with guessed dimensions. */
+private fun JSONObject.cropInputDimension(name: String): Int {
+    val number = (opt(name) as? Number)?.toDouble() ?: return 0
+    return if(number.isFinite() && number >= 1.0 && number <= Int.MAX_VALUE.toDouble() && number % 1.0 == 0.0)
+        number.toInt() else 0
 }
 
 private fun JSONObject.readCurve(): ModuleCurve? = try {

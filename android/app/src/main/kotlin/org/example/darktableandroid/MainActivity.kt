@@ -358,7 +358,15 @@ internal fun ModuleControls(
                 val controlWords = controlSearchWords(module, controlQuery)
                 val visibleParameters = module.parameters.filter { matchesControlSearch(controlWords, it.name, it.label) }
                 val adjustments = visibleParameters.filterNot { it.name.startsWith("blend.") || it.name.startsWith("mask.") }
-                val blending = visibleParameters.filter { it.name.startsWith("blend.") }
+                val parametric = parametricMaskControls(module.parameters).let { controls ->
+                    controls.copy(
+                        global = controls.global.filter { matchesControlSearch(controlWords, it.name, it.label) },
+                        channels = controls.channels.filter { channel -> channel.parameters.any {
+                            matchesControlSearch(controlWords, it.name, it.label)
+                        } },
+                    )
+                }
+                val blending = visibleParameters.filter { it.name.startsWith("blend.") && it.name !in parametric.names }
                 val masks = visibleParameters.filter { it.name.startsWith("mask.") }
                 // Original liquify node deletion compacts indexes. Recreate its drafts
                 // after native changes so an old index cannot address another warp.
@@ -378,13 +386,16 @@ internal fun ModuleControls(
                         } else TextParameterControl(parameter, editable) { onTextParameter(module.operation, parameter.name, it) }
                     }
                 }
-                if(blending.isNotEmpty()) {
+                if(blending.isNotEmpty() || !parametric.isEmpty) {
                     HorizontalDivider()
                     Text(stringResource(R.string.module_blending), style = MaterialTheme.typography.titleSmall)
                     blending.forEach { parameter ->
                         key(parameter.name) {
                             ParameterControl(parameter, editable) { onParameter(module.operation, parameter.name, it) }
                         }
+                    }
+                    ParametricMaskEditor(parametric, editable) { name, value ->
+                        onParameter(module.operation, name, value)
                     }
                 }
                 if(masks.isNotEmpty()) {
@@ -393,11 +404,9 @@ internal fun ModuleControls(
                         R.string.module_repair_shapes else R.string.module_drawn_masks
                     Text(stringResource(shapeTitle), style = MaterialTheme.typography.titleSmall)
                     Text(stringResource(R.string.mask_geometry_hint), style = MaterialTheme.typography.bodySmall)
-                    MaskDiagram(module.parameters.filter { it.name.startsWith("mask.") })
-                    masks.forEach { parameter ->
-                        key(parameter.name) {
-                            ParameterControl(parameter, editable) { onParameter(module.operation, parameter.name, it) }
-                        }
+                    MaskControls(module.parameters.filter { it.name.startsWith("mask.") }, editable,
+                        visibleNames = masks.map { it.name }.toSet()) { name, value ->
+                        onParameter(module.operation, name, value)
                     }
                 }
                 if(module.canReset) {

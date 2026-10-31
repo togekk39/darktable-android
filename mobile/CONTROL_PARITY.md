@@ -33,7 +33,7 @@ bounds and coupled checks.
 | Color grading and calibration | RGB/legacy color balance, channel mixers, color equalizer hue sectors, color harmonizer nodes, active color-checker target Lab patches, monochrome filter coordinates, color correction/contrast, colorize, split toning, vibrance, velvia, low-light and negative inversion controls |
 | Detail and denoising | Profiled denoise settings and fixed bands, diffuse/sharpen, wavelet equalizers, RAW denoise, non-local/bilateral denoise, sharpen radius/amount/threshold, high/low pass, blur, soften, bloom, grain, chromatic-aberration correction, defringe, haze removal and censorize controls |
 | Sensor and optics | RAW black/white levels, source-compatible demosaicing/highlight methods, hot-pixel controls, lens method/corrections/manual vignette and camera/lens identifiers, pixel aspect ratio and input/output intent/gamut settings |
-| Geometry and framing | Crop bounds batch, perspective rotation/shift/shear/lens-model parameters, legacy crop rotation, image orientation, canvas expansion, borders and frame colors |
+| Geometry and framing | Crop bounds batch, native-input-aware aspect presets and orientation drafts, perspective rotation/shift/shear/lens-model parameters, legacy crop rotation, image orientation, canvas expansion, borders and frame colors |
 | Finishing and external assets | Vignette/graduated-filter settings, watermark text/font/template and placement, 3D LUT import/settings, external raster mask import/channel selection; overlay image import and placement/settings |
 
 Continuous controls provide sliders and precise input. Native enums and reviewed
@@ -65,13 +65,38 @@ selected mode; exposing a stored setting does not make every mode use it.
 | Levels and fixed bands | Ordered black/middle/white components, channel vectors and frequency-band sliders with native bounds | Full desktop graph/picker presentation |
 | Zone system | Native zone-count reset, ordered output boundaries and automatic-position switches | Desktop strip dragging/pickers |
 | White balance | Image settings, active gain channels and calibrated Kelvin/tint pairs | Full camera preset/tuning browser and spot picker |
-| Crop/perspective | Crop bounds/reset batch; perspective scalar transforms | Fixed-ratio crop presets, uncropped-photo touch overlay and automatic line fitting |
-| Blending | Original opacity, supported modes/reverse/fulcrum and available preceding raster-source selection/inversion | Full parametric threshold curves and advanced mask refinement |
-| Drawn masks | Add/delete native circle, ellipse and gradient forms; bounded geometry, feather, opacity and group operations | Brush/Bézier path creation, full mask-manager canvas and advanced combinations |
-| Spots/retouch | Native clone/repair shapes, source coordinates, per-form algorithm/blur/fill controls, wavelet selectors and settings reset | Complete desktop repair canvas, brush/path gestures and scale-copy workflow |
+| Crop/perspective | Atomic crop bounds/reset; aspect presets fitted to the original crop input ROI, portrait/free drafts; perspective scalar transforms | Uncropped-photo touch overlay and automatic line fitting |
+| Blending | Original opacity, supported modes/reverse/fulcrum, preceding raster-source selection/inversion; input/output parametric channels with four ordered thresholds, polarity, boost/reset and mask refinement | Live channel histograms, automatic sampling and further desktop graph gestures |
+| Drawn masks | Add/delete native circle, ellipse, gradient, closed Bézier path and brush forms; node/handle/feather controls, brush hardness/density, opacity/inversion and five native group operations | Freehand stroke capture, direct canvas manipulation and full mask-manager workflows |
+| Spots/retouch | Native clone/repair shapes and paths, retouch brushes, source coordinates, per-form algorithm/blur/fill controls, wavelet selectors and settings reset | Complete desktop repair canvas, freehand gestures and scale-copy workflow |
 | Liquify | Native standalone warp nodes, position/radius/strength/hardness/type and add/delete | Linked strokes, line/curve paths and the full interactive mesh canvas |
 | External files | System document import into retained session assets; native raster PFM/PNG, LUT Cube/3DL/Hald-PNG and overlay PNG/JPEG/TIFF inputs | Optional compressed LUT formats, wider overlay-format verification and complete installed asset browsers |
 | Instances/history/export | Default instances, independent parameters, session undo/redo and installed native export options | Copy/delete/reorder instances, styles/presets and complete optional codec parity |
+
+Parametric controls follow the selected native Lab, display RGB or scene RGB
+blend space. The editor groups input/output channels, shows the applied threshold
+shape and constrains each of its four sliders against its neighbors. Channel
+enable/inversion, gain and reset operate on the original blend parameters.
+Mask refinement includes native blur, feathering guide/radius, brightness,
+contrast and RAW details where the input supports them. Controls are advertised
+only for applicable active mask modes; raster and parametric modes retain the
+original exclusive source semantics.
+
+Path and brush editing uses native form identities and up to 64 nodes per form.
+The form/node selectors show one editable set at a time, and discard old drafts
+after insertion, deletion or history restoration. Closed paths keep at least
+three nodes and brushes at least two. Subsequent drawn group members offer the
+original union, intersection, difference, exclusion and sum operations; the first
+member initializes the group. Spots supports clone paths, while retouch supports
+both paths and brushes. The diagram shows applied input-space coordinates and
+handles separately from the processed photo; it is not a photo-aligned touch
+canvas or a rasterized feather preview.
+
+Crop aspect presets fit a draft rectangle using the original pipeline's input
+dimensions for that crop instance, including preceding geometry changes.
+Orientation and preset selection remain drafts until the complete bounds are
+applied atomically. Manual edge edits return to free mode. Ratios are not
+estimated from the already-cropped preview.
 
 File imports validate the original buffer layouts, UTF-8 byte limits, readable
 regular paths and supported extensions before changing the complete native tuple.
@@ -99,10 +124,11 @@ full noise/lens/camera preset selection and source-patch acquisition. The native
 manual parameter controls remain available; unported automatic controls are not
 represented by buttons which merely store an otherwise unused value.
 
-Brush/path masks, parametric thresholds, linked liquify strokes and the advanced
-workflows listed above remain. Overlay selection now has its original import/
-dependency operations; its exact tested formats and history/pixel results belong
-to the verification record rather than a general desktop-parity claim.
+Freehand mask stroke capture, direct photo-canvas editing, live channel
+histograms, automatic pickers, linked liquify strokes and the advanced workflows
+listed above remain. Overlay selection uses its original import/dependency
+operations; exact tested formats and history/pixel results belong to the
+verification record rather than a general desktop-parity claim.
 
 The dependency-only Android build still has the processing engine disabled.
 These controls need an engine-enabled runtime with matching plugins/data; adding

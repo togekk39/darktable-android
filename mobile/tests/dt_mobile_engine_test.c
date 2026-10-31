@@ -99,6 +99,9 @@ static int parameter_equals(const char *json, const char *operation, const char 
 #include "dt_mobile_blending_checks.h"
 #include "dt_mobile_text_controls_checks.h"
 #include "dt_mobile_mask_controls_checks.h"
+#include "dt_mobile_path_mask_checks.h"
+#include "dt_mobile_parametric_checks.h"
+#include "dt_mobile_crop_geometry_checks.h"
 #include "dt_mobile_file_controls_checks.h"
 #include "dt_mobile_array_checks.h"
 #include "dt_mobile_extended_controls_checks.h"
@@ -669,8 +672,11 @@ int main(int argc, char **argv)
   CHECK(mobile_color_controls_checks(session));
   CHECK(mobile_tool_controls_checks(session));
   CHECK(mobile_blending_checks(session));
+  CHECK(mobile_parametric_checks(session));
+  CHECK(mobile_crop_geometry_checks(session, argv[2]));
   CHECK(mobile_text_controls_checks(session));
   CHECK(mobile_mask_controls_checks(session));
+  CHECK(mobile_path_mask_checks(session));
   CHECK(mobile_array_checks(session));
   CHECK(mobile_extended_controls_checks(session));
   CHECK(mobile_file_controls_checks(session));

@@ -116,6 +116,8 @@ static void append_mobile_blend_number(parameter_json *description, const char *
   g_string_append_c(json, '}');
 }
 
+#include "dt_mobile_parametric_controls.h"
+
 static gint mobile_raster_id_compare(gconstpointer a, gconstpointer b)
 {
   const int left = GPOINTER_TO_INT(a), right = GPOINTER_TO_INT(b);
@@ -248,6 +250,7 @@ static void append_mobile_blending_parameters(dt_iop_module_t *module, parameter
   }
   g_string_append(json, "]}");
   append_mobile_raster_parameters(module, description);
+  append_mobile_parametric_parameters(module, description);
 }
 
 /* 0: unrelated field, -1: invalid/unsupported, 1: committed successfully.
@@ -258,6 +261,8 @@ static int update_mobile_blending_parameter(dt_iop_module_t *module, const char 
 {
   if(strncmp(parameter, "blend.", 6)) return 0;
   if(!mobile_blending_available(module) || !isfinite(value)) return -1;
+  const int parametric_update = update_mobile_parametric_parameter(module, parameter, value);
+  if(parametric_update) return parametric_update;
   const int raster_update = update_mobile_raster_parameter(module, parameter, value);
   if(raster_update) return raster_update;
   dt_develop_blend_params_t p = *module->blend_params;

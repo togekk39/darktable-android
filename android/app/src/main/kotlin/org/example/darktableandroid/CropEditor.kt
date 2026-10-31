@@ -26,47 +26,118 @@ internal fun CropEditor(crop: ModuleCrop, editable: Boolean, onApply: (CropRect)
     var top by rememberSaveable(crop) { mutableStateOf(crop.bounds.top.toString()) }
     var right by rememberSaveable(crop) { mutableStateOf(crop.bounds.right.toString()) }
     var bottom by rememberSaveable(crop) { mutableStateOf(crop.bounds.bottom.toString()) }
+    var selectedAspect by rememberSaveable(crop) { mutableStateOf("free") }
+    var portrait by rememberSaveable(crop) { mutableStateOf(crop.inputHeight > crop.inputWidth) }
+    var referenceLeft by rememberSaveable(crop) { mutableFloatStateOf(crop.bounds.left) }
+    var referenceTop by rememberSaveable(crop) { mutableFloatStateOf(crop.bounds.top) }
+    var referenceRight by rememberSaveable(crop) { mutableFloatStateOf(crop.bounds.right) }
+    var referenceBottom by rememberSaveable(crop) { mutableFloatStateOf(crop.bounds.bottom) }
+    var ratioError by remember(crop) { mutableStateOf(false) }
     val draft = parseCropInput(left, top, right, bottom, crop.minSize)
     val changed = draft != crop.bounds || !crop.freehand
+    fun manualEdit(update: () -> Unit) {
+        update()
+        selectedAspect = "free"
+        ratioError = false
+    }
+    fun selectAspect(id: String, newPortrait: Boolean) {
+        if(id == "free") {
+            selectedAspect = id
+            ratioError = false
+            return
+        }
+        val reference = if(selectedAspect == "free") draft ?: crop.bounds else
+            CropRect(referenceLeft, referenceTop, referenceRight, referenceBottom)
+        val aspect = cropPresetAspect(id, crop.inputWidth, crop.inputHeight, newPortrait)
+        val fitted = aspect?.let { fitCropAspect(reference, crop.inputWidth, crop.inputHeight, it, crop.minSize) }
+        ratioError = fitted == null
+        if(fitted != null) {
+            referenceLeft = reference.left; referenceTop = reference.top
+            referenceRight = reference.right; referenceBottom = reference.bottom
+            left = fitted.left.toString(); top = fitted.top.toString()
+            right = fitted.right.toString(); bottom = fitted.bottom.toString()
+            selectedAspect = id
+            portrait = newPortrait
+        }
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(stringResource(R.string.crop_freehand), style = MaterialTheme.typography.titleSmall)
-        CropDiagram(crop.bounds, draft)
+        Text(stringResource(R.string.crop_bounds_title), style = MaterialTheme.typography.titleSmall)
+        CropDiagram(crop.bounds, draft, crop.inputWidth, crop.inputHeight)
         Text(stringResource(R.string.crop_diagram_hint), style = MaterialTheme.typography.bodySmall)
         if(!crop.freehand) Text(stringResource(R.string.crop_freehand_hint), style = MaterialTheme.typography.bodySmall)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            CropCoordinate(left, { left = it }, stringResource(R.string.crop_left), editable, draft != null, Modifier.weight(1f))
-            CropCoordinate(top, { top = it }, stringResource(R.string.crop_top), editable, draft != null, Modifier.weight(1f))
+        if(crop.inputWidth > 0 && crop.inputHeight > 0) {
+            CropAspectControls(selectedAspect, portrait, editable && draft != null,
+                { selectAspect(it, portrait) }, { value ->
+                    if(selectedAspect == "free") portrait = value else selectAspect(selectedAspect, value)
+                })
+            Text(stringResource(R.string.crop_aspect_dimensions, crop.inputWidth, crop.inputHeight),
+                style = MaterialTheme.typography.bodySmall)
+            Text(stringResource(R.string.crop_aspect_hint), style = MaterialTheme.typography.bodySmall)
+            if(ratioError) Text(stringResource(R.string.crop_aspect_minimum), color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            CropCoordinate(right, { right = it }, stringResource(R.string.crop_right), editable, draft != null, Modifier.weight(1f))
-            CropCoordinate(bottom, { bottom = it }, stringResource(R.string.crop_bottom), editable, draft != null, Modifier.weight(1f))
+            CropCoordinate(left, { manualEdit { left = it } }, stringResource(R.string.crop_left), editable, draft != null, Modifier.weight(1f))
+            CropCoordinate(top, { manualEdit { top = it } }, stringResource(R.string.crop_top), editable, draft != null, Modifier.weight(1f))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            CropCoordinate(right, { manualEdit { right = it } }, stringResource(R.string.crop_right), editable, draft != null, Modifier.weight(1f))
+            CropCoordinate(bottom, { manualEdit { bottom = it } }, stringResource(R.string.crop_bottom), editable, draft != null, Modifier.weight(1f))
         }
         // Keep both edges coherent in the same native Float representation. A
         // slider only edits the draft; the complete rectangle is applied below.
         val bounds = draft ?: crop.bounds
         ParameterSlider(stringResource(R.string.crop_left), left.toDoubleOrNull(), 0.0,
             maximumLeadingEdge(bounds.right, crop.minSize).toDouble(), editable && draft != null,
-            onValue = { left = it.toFloat().toString() })
+            onValue = { manualEdit { left = it.toFloat().toString() } })
         ParameterSlider(stringResource(R.string.crop_top), top.toDoubleOrNull(), 0.0,
             maximumLeadingEdge(bounds.bottom, crop.minSize).toDouble(), editable && draft != null,
-            onValue = { top = it.toFloat().toString() })
+            onValue = { manualEdit { top = it.toFloat().toString() } })
         ParameterSlider(stringResource(R.string.crop_right), right.toDoubleOrNull(),
             minimumTrailingEdge(bounds.left, crop.minSize).toDouble(), 1.0, editable && draft != null,
-            onValue = { right = it.toFloat().toString() })
+            onValue = { manualEdit { right = it.toFloat().toString() } })
         ParameterSlider(stringResource(R.string.crop_bottom), bottom.toDoubleOrNull(),
             minimumTrailingEdge(bounds.top, crop.minSize).toDouble(), 1.0, editable && draft != null,
-            onValue = { bottom = it.toFloat().toString() })
+            onValue = { manualEdit { bottom = it.toFloat().toString() } })
         Text(stringResource(R.string.crop_coordinate_range, crop.minSize.toString()),
             style = MaterialTheme.typography.bodySmall)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick = { left = "0.0"; top = "0.0"; right = "1.0"; bottom = "1.0" }, enabled = editable) {
+            TextButton(onClick = { manualEdit { left = "0.0"; top = "0.0"; right = "1.0"; bottom = "1.0" } }, enabled = editable) {
                 Text(stringResource(R.string.crop_reset))
             }
             Button(onClick = { draft?.let(onApply) }, enabled = editable && draft != null && changed) {
                 Text(stringResource(R.string.crop_apply))
             }
         }
+    }
+}
+
+@Composable
+private fun CropAspectControls(selected: String, portrait: Boolean, editable: Boolean,
+                               onPreset: (String) -> Unit, onPortrait: (Boolean) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    val free = stringResource(R.string.crop_aspect_free)
+    val input = stringResource(R.string.crop_aspect_input)
+    val title = stringResource(R.string.crop_aspect_title)
+    Text(title, style = MaterialTheme.typography.labelLarge)
+    Box {
+        OutlinedButton(onClick = { expanded = true }, enabled = editable,
+            modifier = Modifier.semantics { contentDescription = title }) {
+            Text(when(selected) { "free" -> free; "input" -> input; else -> selected })
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            (listOf("free", "input") + cropAspectPresets.map { it.id }).forEach { preset ->
+                DropdownMenuItem(text = { Text(when(preset) { "free" -> free; "input" -> input; else -> preset }) },
+                    enabled = editable, onClick = { expanded = false; onPreset(preset) })
+            }
+        }
+    }
+    Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+        Text(stringResource(R.string.crop_aspect_orientation), Modifier.weight(1f))
+        val description = stringResource(R.string.crop_aspect_orientation)
+        Switch(checked = portrait, onCheckedChange = onPortrait, enabled = editable && selected != "1:1",
+            modifier = Modifier.semantics { contentDescription = description })
     }
 }
 
@@ -89,7 +160,7 @@ private fun CropCoordinate(value: String, onValue: (String) -> Unit, label: Stri
 }
 
 @Composable
-private fun CropDiagram(applied: CropRect, draft: CropRect?) {
+private fun CropDiagram(applied: CropRect, draft: CropRect?, inputWidth: Int, inputHeight: Int) {
     val gridColor = MaterialTheme.colorScheme.outlineVariant
     val appliedColor = MaterialTheme.colorScheme.primary
     val draftColor = MaterialTheme.colorScheme.tertiary
@@ -97,14 +168,20 @@ private fun CropDiagram(applied: CropRect, draft: CropRect?) {
     Canvas(Modifier.fillMaxWidth().height(200.dp).background(MaterialTheme.colorScheme.surfaceVariant)
         .semantics { contentDescription = description }) {
         val padding = 12.dp.toPx()
-        val width = (size.width - padding * 2).coerceAtLeast(1f)
-        val height = (size.height - padding * 2).coerceAtLeast(1f)
+        var width = (size.width - padding * 2).coerceAtLeast(1f)
+        var height = (size.height - padding * 2).coerceAtLeast(1f)
+        if(inputWidth > 0 && inputHeight > 0) {
+            val aspect = inputWidth.toFloat() / inputHeight
+            if(width / height > aspect) width = height * aspect else height = width / aspect
+        }
+        val x = (size.width - width) / 2f
+        val y = (size.height - height) / 2f
         for(step in 0..4) {
             val fraction = step / 4f
-            drawLine(gridColor, Offset(padding + fraction * width, padding), Offset(padding + fraction * width, padding + height))
-            drawLine(gridColor, Offset(padding, padding + fraction * height), Offset(padding + width, padding + fraction * height))
+            drawLine(gridColor, Offset(x + fraction * width, y), Offset(x + fraction * width, y + height))
+            drawLine(gridColor, Offset(x, y + fraction * height), Offset(x + width, y + fraction * height))
         }
-        fun origin(rect: CropRect) = Offset(padding + rect.left * width, padding + rect.top * height)
+        fun origin(rect: CropRect) = Offset(x + rect.left * width, y + rect.top * height)
         fun extent(rect: CropRect) = Size((rect.right - rect.left) * width, (rect.bottom - rect.top) * height)
         // This is a normalized coordinate diagram. The already-cropped photo is
         // never drawn as though it were the uncropped crop-module input.
