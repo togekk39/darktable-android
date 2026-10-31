@@ -96,6 +96,12 @@ static int parameter_equals(const char *json, const char *operation, const char 
 
 #include "dt_mobile_color_controls_checks.h"
 #include "dt_mobile_tool_controls_checks.h"
+#include "dt_mobile_blending_checks.h"
+#include "dt_mobile_text_controls_checks.h"
+#include "dt_mobile_mask_controls_checks.h"
+#include "dt_mobile_file_controls_checks.h"
+#include "dt_mobile_array_checks.h"
+#include "dt_mobile_extended_controls_checks.h"
 
 static int instance_checks(dt_mobile_session *session)
 {
@@ -424,7 +430,7 @@ int main(int argc, char **argv)
   CHECK(strstr(modules, "\"name\":\"exposure\",\"label\":"));
   CHECK(!strstr(modules, "\"name\":\"curve_num_nodes[0]\""));
   CHECK(!strstr(modules, "\"name\":\"basecurve_nodes[0]\""));
-  CHECK(!strstr(modules, "\"name\":\"exposure_fusion\""));
+  CHECK(module_has(modules, "basecurve", "\"name\":\"exposure_fusion\""));
   static const struct {
     const char *operation, *parameter;
     double minimum, maximum, edited;
@@ -458,10 +464,10 @@ int main(int argc, char **argv)
   CHECK(parameter_equals(curve_json, "sigmoid", "middle_grey_contrast", (double)0.1f));
   dt_mobile_free_buffer(curve_json); curve_json = NULL;
   ENGINE_OK(dt_mobile_set_parameter(session, "sigmoid", "middle_grey_contrast", 2.2f));
-  CHECK(!module_has(modules, "sharpen", "\"name\":\"radius\""));
-  CHECK(!module_has(modules, "sigmoid", "\"name\":\"red_inset\""));
-  CHECK(dt_mobile_set_parameter(session, "sharpen", "radius", 1e-40)
-        == DT_MOBILE_ERROR_UNSUPPORTED);
+  CHECK(module_has(modules, "sharpen", "\"name\":\"radius\""));
+  CHECK(module_has(modules, "sigmoid", "\"name\":\"red_inset\""));
+  CHECK(dt_mobile_set_parameter(session, "sharpen", "radius", 0.01)
+        == DT_MOBILE_ERROR_INVALID_ARGUMENT);
   ENGINE_OK(dt_mobile_modules(session, &scalar_json));
   for(size_t k = 0; k < sizeof(scalar_controls) / sizeof(scalar_controls[0]); k++)
   {
@@ -485,7 +491,7 @@ int main(int argc, char **argv)
   CHECK(dt_mobile_set_parameter(session, "basecurve", "basecurve_nodes[0]", 0.0)
         == DT_MOBILE_ERROR_UNSUPPORTED);
   CHECK(dt_mobile_set_parameter(session, "basecurve", "exposure_fusion", 10000.0)
-        == DT_MOBILE_ERROR_UNSUPPORTED);
+        == DT_MOBILE_ERROR_INVALID_ARGUMENT);
   /* The desktop exposure widget keeps black below its exposure-derived white
    * point. Numeric updates must preserve that relation before saving history. */
   ENGINE_OK(dt_mobile_set_parameter(session, "exposure", "black", 0.0));
@@ -655,8 +661,19 @@ int main(int argc, char **argv)
   ENGINE_OK(dt_mobile_history(session, &curve_json));
   CHECK(strstr(curve_json, "\"position\":0,\"length\":0"));
   dt_mobile_free_buffer(curve_json); curve_json = NULL;
+  /* Default-profile export must resolve colorin/colorout from the new runtime;
+   * cached module pointers from the previous document have been unloaded. */
+  ENGINE_OK(dt_mobile_export(session, argv[2], "png", 90));
+  CHECK(png_dimensions(argv[2], &output_width, &output_height));
+  CHECK(output_width == source_width && output_height == source_height);
   CHECK(mobile_color_controls_checks(session));
   CHECK(mobile_tool_controls_checks(session));
+  CHECK(mobile_blending_checks(session));
+  CHECK(mobile_text_controls_checks(session));
+  CHECK(mobile_mask_controls_checks(session));
+  CHECK(mobile_array_checks(session));
+  CHECK(mobile_extended_controls_checks(session));
+  CHECK(mobile_file_controls_checks(session));
   ENGINE_OK(dt_mobile_render_preview(session, 96, 96, &before, &width, &height));
   CHECK(before && width > 0 && height > 0);
   dt_mobile_free_buffer(before);

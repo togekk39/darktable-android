@@ -37,7 +37,9 @@ import org.example.darktableandroid.nativecore.parseModules
 import org.example.darktableandroid.nativecore.instanceSource
 import org.example.darktableandroid.nativecore.retainModuleSelection
 import org.example.darktableandroid.nativecore.previewArgbPixels
+import org.example.darktableandroid.nativecore.accepts
 import org.example.darktableandroid.storage.UriCache
+import org.example.darktableandroid.storage.ToolAssetCache
 
 sealed interface EditorState {
     data object Empty : EditorState
@@ -114,7 +116,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 mutableState.value = EditorState.Working(EditorState.Stage.DECODING)
                 // Keep ownership of a returned handle even if cancellation happens during open.
                 val active = withContext(NonCancellable) {
-                    withContext(nativeDispatcher) { NativeSession(NativeCore.open(cached.file.absolutePath)) }
+                    withContext(nativeDispatcher) { NativeSession(NativeCore.open(cached.file.absolutePath),
+                        File(getApplication<Application>().cacheDir, "tool-assets/${UUID.randomUUID()}")) }
                 }
                 opened = active
                 ensureActive()
@@ -152,6 +155,30 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     fun setModuleEnabled(operation: String, enabled: Boolean) {
         edit { NativeCore.setModuleEnabled(it, operation, enabled) }
+    }
+
+    fun setTextParameter(operation: String, parameter: String, value: String) {
+        val current = mutableState.value as? EditorState.Ready ?: return
+        val control = current.modules.singleOrNull { it.operation == operation }
+            ?.textParameters?.singleOrNull { it.name == parameter } ?: return
+        if(control.accepts(value)) edit { NativeCore.setTextParameter(it, operation, parameter, value) }
+    }
+
+    fun importToolFile(operation: String, parameter: String, uri: Uri, expectedSessionId: Long) {
+        val current = mutableState.value as? EditorState.Ready ?: return
+        if(current.sessionId != expectedSessionId) return
+        val active = session ?: return
+        val control = current.modules.singleOrNull { it.operation == operation }
+            ?.textParameters?.singleOrNull { it.name == parameter && it.isFile } ?: return
+        val request = generation.get()
+        edit { handle ->
+            val file = ToolAssetCache(getApplication()).copyForNative(uri, active.assetsDirectory, control.extensions) {
+                request != generation.get()
+            }
+            check(request == generation.get()) { "The image changed during file import" }
+            check(control.accepts(file.absolutePath)) { "The imported file path exceeds the native tool buffer" }
+            NativeCore.setTextParameter(handle, operation, parameter, file.absolutePath)
+        }
     }
 
     fun selectModule(operation: String?) {
@@ -372,7 +399,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 }
 
 /** Only the owning job uses the handle; close waits for that job to finish. */
-private class NativeSession(private var pointer: Long) {
+private class NativeSession(private var pointer: Long, val assetsDirectory: File) {
     init { check(pointer != 0L) { "The native engine returned an invalid session" } }
     @Synchronized fun handle(): Long = pointer.also { check(it != 0L) { "The image session is closed" } }
     @Synchronized fun cancel() { if(pointer != 0L) NativeCore.cancel(pointer) }
@@ -380,7 +407,7 @@ private class NativeSession(private var pointer: Long) {
         if(pointer != 0L) {
             val closing = pointer
             pointer = 0L
-            NativeCore.close(closing)
+            try { NativeCore.close(closing) } finally { assetsDirectory.deleteRecursively() }
         }
     }
 }

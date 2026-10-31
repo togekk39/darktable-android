@@ -274,9 +274,7 @@ static int mobile_tool_controls_checks(dt_mobile_session *session)
   static const struct { const char *operation, *parameter; double value; } private_fields[] = {
     { "lowpass", "order", 1 }, { "lowpass", "unbound", 0 },
     { "vignette", "unbound", 0 }, { "grain", "channel", 0 },
-    { "colorbalancergb", "midtones_Y", 0 }, { "colorbalancergb", "midtones_C", 1 },
-    { "colorbalancergb", "midtones_H", 90 },
-    { "colorbalancergb", "mask_grey_fulcrum", 0 }, { "colorbalancergb", "grey_fulcrum", 0 },
+    { "colorbalancergb", "midtones_C", 1 }, { "colorbalancergb", "midtones_H", 90 },
   };
   TOOL_OK(dt_mobile_modules(session, &baseline));
   TOOL_OK(dt_mobile_history(session, &history));
@@ -288,6 +286,20 @@ static int mobile_tool_controls_checks(dt_mobile_session *session)
     TOOL_CHECK(dt_mobile_set_parameter(session, private_fields[k].operation,
                                        private_fields[k].parameter, private_fields[k].value)
                 == DT_MOBILE_ERROR_UNSUPPORTED);
+  }
+  /* These controls are now ported, with narrowed domains excluding their
+   * original reciprocal/zero-division singularities. They remain advertised;
+   * invalid values must fail before changing parameters or history. */
+  static const struct { const char *parameter; double value; } singular_values[] = {
+    { "midtones_Y", -1 }, { "mask_grey_fulcrum", 0 }, { "grey_fulcrum", 0 },
+  };
+  for(size_t k = 0; k < sizeof(singular_values) / sizeof(singular_values[0]); k++)
+  {
+    char fragment[128];
+    snprintf(fragment, sizeof(fragment), "\"name\":\"%s\",", singular_values[k].parameter);
+    TOOL_CHECK(module_has(baseline, "colorbalancergb", fragment));
+    TOOL_CHECK(dt_mobile_set_parameter(session, "colorbalancergb", singular_values[k].parameter,
+                                       singular_values[k].value) == DT_MOBILE_ERROR_INVALID_ARGUMENT);
   }
   TOOL_OK(dt_mobile_modules(session, &changed));
   TOOL_CHECK(!strcmp(baseline, changed));

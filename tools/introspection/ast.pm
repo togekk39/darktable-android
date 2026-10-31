@@ -691,17 +691,16 @@ sub get_type
   return "Double";
 }
 
-sub check_tree
-{
-  my $self = shift;
-  $self->print_warning("'double' shouldn't be used due to different padding on 32 and 64 bit platforms");
-  return 0;
-}
+# Numeric metadata uses sizeof(member) and G_STRUCT_OFFSET in the generated C,
+# so the target compiler supplies the actual alignment, including nested and
+# mixed double layouts. Introspection does not change the parameter struct or
+# make architecture-specific binary history layouts interchangeable. In
+# particular, legacy double parameters must retain their original storage.
 
 sub get_limits
 {
   my $self = shift;
-  return ("-G_MINDOUBLE", "G_MAXDOUBLE", "0.0");
+  return ("-G_MAXDOUBLE", "G_MAXDOUBLE", "0.0");
 }
 
 #################### FLOAT COMPLEX TYPE ####################

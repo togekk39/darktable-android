@@ -56,9 +56,15 @@ dt_mobile_status dt_mobile_new_instance(dt_mobile_session *session, const char *
                                         char **new_identifier);
 dt_mobile_status dt_mobile_set_parameter(dt_mobile_session *session, const char *module,
                                           const char *parameter, double value);
+/* UTF-8 for advertised text/file controls. maxBytes excludes the terminating
+ * NUL. file.import selects the original coupled filename/image fields in one
+ * history step. Overlong/malformed values are rejected, never truncated. */
+dt_mobile_status dt_mobile_set_text_parameter(dt_mobile_session *session, const char *module,
+                                               const char *parameter, const char *value);
 typedef struct dt_mobile_curve_point { float x, y; } dt_mobile_curve_point;
-/* Atomic node/interpolation update for the dedicated basecurve/RGB curve editor.
- * Points use normalized coordinates, with 2..20 finite nodes and at least 1e-6
+/* Atomic node/interpolation update for the advertised base/RGB/Lab/color-zone
+ * curves. Points use normalized coordinates, with 2..maxNodes finite nodes
+ * (at most 20, according to the current metadata) and at least 1e-6
  * horizontal separation after conversion to float. Interpolation is 0 (cubic
  * spline), 1 (Catmull-Rom) or 2 (monotone Hermite). Only channels advertised in
  * module JSON are editable; unrelated module parameters remain unchanged. */

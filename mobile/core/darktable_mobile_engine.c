@@ -6,6 +6,7 @@
 #include "common/history.h"
 #include "common/iop_order.h"
 #include "common/whitebalance.h"
+#include "common/utility.h"
 #include "control/conf.h"
 #include "develop/develop.h"
 #include "develop/imageop.h"
@@ -54,6 +55,30 @@ static gchar *runtime_data_directory;
 static gchar *runtime_module_directory;
 static gchar *runtime_temp_root;
 static void sync_temperature_chroma(dt_develop_t *dev);
+static void sync_mobile_overlay_dependencies(dt_develop_t *dev);
+
+/* History replay may visit several former raster sources for one consumer.
+ * Rebuild the ephemeral user/sink tables from the final restored parameters,
+ * so old history entries cannot leave users attached to retired sources. */
+static void sync_raster_mask_registrations(dt_develop_t *dev)
+{
+  const GList *lists[] = { dev->iop, dev->alliop };
+  for(size_t list = 0; list < sizeof(lists) / sizeof(lists[0]); list++)
+    for(const GList *item = lists[list]; item; item = item->next)
+    {
+      dt_iop_module_t *module = item->data;
+      if(module->raster_mask.source.users) g_hash_table_remove_all(module->raster_mask.source.users);
+      module->raster_mask.sink.source = NULL;
+      module->raster_mask.sink.id = INVALID_MASKID;
+    }
+  for(GList *item = dev->iop; item; item = item->next)
+  {
+    dt_iop_module_t *module = item->data;
+    if(!module->blend_params) continue;
+    const dt_develop_blend_params_t current = *module->blend_params;
+    dt_iop_commit_blend_params(module, &current, NULL);
+  }
+}
 
 static void free_history_state(gpointer data)
 {
@@ -360,6 +385,8 @@ dt_mobile_status dt_mobile_engine_open(const char *path, dt_mobile_engine **out,
    * module params before exposing controls or editing a single field, so all
    * other values from imported history and auto presets are preserved. */
   dt_dev_pop_history_items_ext(&engine->develop, engine->develop.history_end);
+  sync_raster_mask_registrations(&engine->develop);
+  sync_mobile_overlay_dependencies(&engine->develop);
   const gboolean decoded = engine->develop.image_storage.load_status == DT_IMAGEIO_OK;
   if(decoded && engine->preview_cancel)
   {
@@ -517,6 +544,7 @@ static void visit_fields(dt_iop_module_t *module, const dt_introspection_field_t
     for(size_t k = 0; k < field->Struct.entries; k++)
     {
       const dt_introspection_field_t *child = field->Struct.fields[k];
+      if(!child || !child->header.field_name) continue;
       gchar *name = path[0] ? g_strconcat(path, ".", child->header.field_name, NULL)
                              : g_strdup(child->header.field_name);
       visit_fields(module, child, delta, name, depth + 1, visitor, data);
@@ -528,8 +556,13 @@ static void visit_fields(dt_iop_module_t *module, const dt_introspection_field_t
     /* Strings and opaque LUTs need purpose-built controls. Do not present a
      * partial list as a complete editor for those parameter types. */
     if(!field->Array.count || field->Array.count > 4096
-       || field->Array.type == DT_INTROSPECTION_TYPE_CHAR) return;
+       || field->Array.type == DT_INTROSPECTION_TYPE_CHAR || !field->Array.field
+       || !field->header.size || field->header.size % field->Array.count
+       || field->header.size > (size_t)module->params_size - delta - field->header.offset) return;
     const size_t stride = field->header.size / field->Array.count;
+    if(field->Array.field->header.offset != field->header.offset
+       || field->Array.field->header.type != field->Array.type
+       || field->Array.field->header.size != stride) return;
     for(size_t k = 0; k < field->Array.count; k++)
     {
       if(k && stride > (SIZE_MAX - delta) / k) break;
@@ -543,17 +576,39 @@ static void visit_fields(dt_iop_module_t *module, const dt_introspection_field_t
     visitor(module, field, field->header.offset + delta, path, data);
 }
 
+/* A few original discrete controls use integer storage rather than a C enum.
+ * Preserve that storage while advertising the desktop's actual menu labels. */
+static const char *mobile_integer_choice_label(const char *operation, const char *path, int value)
+{
+  static const char *fusion[] = { "none", "two exposures", "three exposures" };
+  static const char *interpolators[] = { "contrasted", "faded", "linear", "optimized" };
+  static const char *alignment[] = { "top left", "top", "top right", "left", "center", "right",
+                                   "bottom left", "bottom", "bottom right" };
+  if(!strcmp(operation, "basecurve") && !strcmp(path, "exposure_fusion") && value >= 0 && value < 3)
+    return fusion[value];
+  if(!strcmp(operation, "filmic") && !strcmp(path, "interpolator") && value >= 0 && value < 4)
+    return interpolators[value];
+  if(!strcmp(operation, "filmic") && !strcmp(path, "preserve_color") && value >= 0 && value < 2)
+    return value ? "on" : "off";
+  if((!strcmp(operation, "watermark") || !strcmp(operation, "overlay"))
+     && !strcmp(path, "alignment") && value >= 0 && value < 9) return alignment[value];
+  return NULL;
+}
+
 typedef struct parameter_json { GString *json; gboolean first; } parameter_json;
 static void append_parameter(dt_iop_module_t *module, const dt_introspection_field_t *field,
                              size_t offset, const char *path, void *data)
 {
-  if(!dt_mobile_parameter_allowed(module->op, path, field->header.type)) return;
+  if(!dt_mobile_extended_parameter_applicable(module)
+     || !dt_mobile_parameter_allowed(module->op, path, field->header.type)
+     || !dt_mobile_array_parameter_visible(module, path)) return;
   parameter_json *description = data;
   long double value, minimum, maximum;
   const char *type;
   if(!number_info(field, (const char *)module->params + offset, &value, &minimum, &maximum, &type)
      || !isfinite((double)value)) return;
   dt_mobile_parameter_limits(module->op, path, &minimum, &maximum);
+  dt_mobile_array_parameter_dynamic_limits(module, path, &minimum, &maximum);
   /* Some iops use NaN as an unavailable sensor channel (for example the
    * fourth white-balance coefficient on a three-channel RGB image). Such a
    * sentinel is not an editable numeric control. */
@@ -604,12 +659,32 @@ static void append_parameter(dt_iop_module_t *module, const dt_introspection_fie
   if(field->header.type == DT_INTROSPECTION_TYPE_ENUM)
   {
     g_string_append(json, ",\"choices\":[");
+    gboolean first_choice = TRUE;
     for(size_t k = 0; k < enum_entry_count(field); k++)
     {
       const dt_introspection_type_enum_tuple_t *choice = &field->Enum.values[k];
-      if(k) g_string_append_c(json, ',');
+      if(!dt_mobile_parameter_value_valid(module, path, choice->value)) continue;
+      if(!first_choice) g_string_append_c(json, ',');
+      first_choice = FALSE;
       g_string_append_printf(json, "{\"value\":%d,\"label\":", choice->value);
       json_string(json, choice->description && choice->description[0] ? choice->description : choice->name);
+      g_string_append_c(json, '}');
+    }
+    g_string_append_c(json, ']');
+  }
+  if(field->header.type == DT_INTROSPECTION_TYPE_INT && mobile_integer_choice_label(module->op, path, 0))
+  {
+    g_string_append(json, ",\"choices\":[");
+    gboolean first_choice = TRUE;
+    for(int choice = 0; choice < 9; choice++)
+    {
+      const char *label = mobile_integer_choice_label(module->op, path, choice);
+      if(!label || choice < minimum || choice > maximum
+         || !dt_mobile_parameter_value_valid(module, path, choice)) continue;
+      if(!first_choice) g_string_append_c(json, ',');
+      first_choice = FALSE;
+      g_string_append_printf(json, "{\"value\":%d,\"label\":", choice);
+      json_string(json, label);
       g_string_append_c(json, '}');
     }
     g_string_append_c(json, ']');
@@ -617,12 +692,18 @@ static void append_parameter(dt_iop_module_t *module, const dt_introspection_fie
   g_string_append_c(json, '}');
 }
 
+#include "dt_mobile_blending_controls.h"
+#include "dt_mobile_text_controls.h"
+#include "dt_mobile_zone_controls.h"
+#include "dt_mobile_mask_controls.h"
+#include "dt_mobile_liquify_controls.h"
+
 enum { MOBILE_CURVE_CHANNELS = 3, MOBILE_CURVE_MAX_NODES = 20, MOBILE_CURVE_SAMPLES = 256 };
 static const float mobile_curve_min_spacing = 1e-6f;
 typedef struct mobile_curve_layout
 {
   size_t nodes, channel_stride, node_stride, x, y, counts, types;
-  int channels, editable_channels;
+  int channels, editable_channels, max_nodes;
   gboolean rgb;
 } mobile_curve_layout;
 
@@ -632,7 +713,7 @@ static gboolean curve_field_fits(const dt_iop_module_t *module, const dt_introsp
     && field->header.size <= (size_t)module->params_size - field->header.offset;
 }
 
-/* These two upstream tools share the shape of a 3 x 20 node array plus
+/* These upstream tools share the shape of a 3 x 20 node array plus
  * per-channel counts/interpolation. Resolve that shape through introspection,
  * rather than duplicating version-sensitive iop parameter structs here. */
 static gboolean curve_layout(dt_iop_module_t *module, mobile_curve_layout *layout)
@@ -640,11 +721,13 @@ static gboolean curve_layout(dt_iop_module_t *module, mobile_curve_layout *layou
   if(!module || !module->have_introspection || !module->get_introspection()
      || !module->get_f || !module->params) return FALSE;
   const gboolean rgb = !strcmp(module->op, "rgbcurve");
-  if(!rgb && strcmp(module->op, "basecurve")) return FALSE;
-  const char *node_name = rgb ? "curve_nodes" : "basecurve";
+  const gboolean tone = !strcmp(module->op, "tonecurve");
+  const gboolean zones = !strcmp(module->op, "colorzones");
+  if(!rgb && !tone && !zones && strcmp(module->op, "basecurve")) return FALSE;
+  const char *node_name = rgb ? "curve_nodes" : tone ? "tonecurve" : zones ? "curve" : "basecurve";
   const dt_introspection_field_t *nodes = module->get_f(node_name);
-  const dt_introspection_field_t *counts = module->get_f(rgb ? "curve_num_nodes" : "basecurve_nodes");
-  const dt_introspection_field_t *types = module->get_f(rgb ? "curve_type" : "basecurve_type");
+  const dt_introspection_field_t *counts = module->get_f(rgb || zones ? "curve_num_nodes" : tone ? "tonecurve_nodes" : "basecurve_nodes");
+  const dt_introspection_field_t *types = module->get_f(rgb || zones ? "curve_type" : tone ? "tonecurve_type" : "basecurve_type");
   if(!curve_field_fits(module, nodes) || !curve_field_fits(module, counts)
      || !curve_field_fits(module, types)
      || nodes->header.type != DT_INTROSPECTION_TYPE_ARRAY || nodes->Array.count != MOBILE_CURVE_CHANNELS
@@ -692,9 +775,36 @@ static gboolean curve_layout(dt_iop_module_t *module, mobile_curve_layout *layou
     if(value != 0 && value != 1) return FALSE; /* Upstream linked/independent modes. */
     editable_channels = value == 0 ? 1 : MOBILE_CURVE_CHANNELS;
   }
+  if(tone)
+  {
+    const dt_introspection_field_t *mode = module->get_f("tonecurve_autoscale_ab");
+    if(!curve_field_fits(module, mode) || mode->header.type != DT_INTROSPECTION_TYPE_ENUM
+       || mode->header.size != sizeof(int)) return FALSE;
+    int value;
+    memcpy(&value, (const char *)module->params + mode->header.offset, sizeof(value));
+    if(value < 0 || value > 3) return FALSE;
+    editable_channels = value == 0 ? MOBILE_CURVE_CHANNELS : 1;
+  }
+  int max_nodes = MOBILE_CURVE_MAX_NODES;
+  if(zones)
+  {
+    editable_channels = MOBILE_CURVE_CHANNELS;
+    const dt_introspection_field_t *version = module->get_f("splines_version");
+    const dt_introspection_field_t *selection = module->get_f("channel");
+    if(!curve_field_fits(module, version) || version->header.type != DT_INTROSPECTION_TYPE_INT
+       || version->header.size != sizeof(int) || !curve_field_fits(module, selection)
+       || selection->header.type != DT_INTROSPECTION_TYPE_ENUM || selection->header.size != sizeof(int)) return FALSE;
+    int value, selected;
+    memcpy(&value, (const char *)module->params + version->header.offset, sizeof(value));
+    memcpy(&selected, (const char *)module->params + selection->header.offset, sizeof(selected));
+    if(value < 0 || value > 1 || selected < 0 || selected > 2) return FALSE;
+    /* The historical spline path adds two ghost anchors into the upstream
+     * MAX_ANCHORS=20 buffer. Keep its editable node list within that capacity. */
+    if(value == 0) max_nodes -= 2;
+  }
   *layout = (mobile_curve_layout) { nodes->header.offset, row->header.size, node->header.size,
     x->header.offset - node->header.offset, y->header.offset - node->header.offset,
-    counts->header.offset, types->header.offset, rgb ? MOBILE_CURVE_CHANNELS : 1, editable_channels, rgb };
+    counts->header.offset, types->header.offset, rgb || tone || zones ? MOBILE_CURVE_CHANNELS : 1, editable_channels, max_nodes, rgb };
   return TRUE;
 }
 
@@ -716,7 +826,7 @@ static gboolean read_curve(const dt_iop_module_t *module, const mobile_curve_lay
   const char *params = module->params;
   memcpy(count, params + layout->counts + channel * sizeof(int), sizeof(*count));
   memcpy(interpolation, params + layout->types + channel * sizeof(int), sizeof(*interpolation));
-  if(*count < 2 || *count > MOBILE_CURVE_MAX_NODES) return FALSE;
+  if(*count < 2 || *count > layout->max_nodes) return FALSE;
   for(int k = 0; k < *count; k++)
   {
     const char *node = params + layout->nodes + channel * layout->channel_stride + k * layout->node_stride;
@@ -736,6 +846,45 @@ static gboolean curve_samples(const dt_mobile_curve_point *points, size_t count,
   dt_draw_curve_destroy(curve);
   if(!isfinite(*endpoint)) return FALSE;
   for(size_t k = 0; k < MOBILE_CURVE_SAMPLES; k++) if(!isfinite(values[k])) return FALSE;
+  return TRUE;
+}
+
+/* Color-zones uses the original desktop GUI's wrapped V1 / periodic V2
+ * splines. Nodes remain unscaled in this diagram, matching its desktop editor;
+ * actual strength and pixel processing remain in the original IOP. */
+static gboolean module_curve_samples(dt_iop_module_t *module,
+    const dt_mobile_curve_point *points, size_t count, int interpolation,
+    float *values, float *endpoint)
+{
+  if(strcmp(module->op, "colorzones")) return curve_samples(points, count, interpolation, values, endpoint);
+  const dt_introspection_field_t *version = module->get_f("splines_version");
+  const dt_introspection_field_t *selection = module->get_f("channel");
+  if(!curve_field_fits(module, version) || !curve_field_fits(module, selection)) return FALSE;
+  int spline_version, selected;
+  memcpy(&spline_version, (const char *)module->params + version->header.offset, sizeof(spline_version));
+  memcpy(&selected, (const char *)module->params + selection->header.offset, sizeof(selected));
+  if(count + (spline_version == 0 ? 2 : 0) > MAX_ANCHORS) return FALSE;
+  dt_draw_curve_t *curve = dt_draw_curve_new(0.f, 1.f, (unsigned int)interpolation);
+  if(!curve) return FALSE;
+  if(spline_version == 0)
+    dt_draw_curve_add_point(curve, points[count - 2].x - 1.f,
+      selected == 2 ? points[count - 2].y : points[0].y);
+  for(size_t index = 0; index < count; index++) dt_draw_curve_add_point(curve, points[index].x, points[index].y);
+  if(spline_version == 0)
+  {
+    dt_draw_curve_add_point(curve, points[1].x + 1.f,
+      selected == 2 ? points[1].y : points[count - 1].y);
+    dt_draw_curve_calc_values(curve, 0.f, 1.f, MOBILE_CURVE_SAMPLES, NULL, values);
+    *endpoint = dt_draw_curve_calc_value(curve, 1.f);
+  }
+  else
+  {
+    dt_draw_curve_calc_values_V2(curve, 0.f, 1.f, MOBILE_CURVE_SAMPLES, NULL, values, selected == 2);
+    *endpoint = selected == 2 ? values[0] : values[MOBILE_CURVE_SAMPLES - 1];
+  }
+  dt_draw_curve_destroy(curve);
+  if(!isfinite(*endpoint)) return FALSE;
+  for(size_t index = 0; index < MOBILE_CURVE_SAMPLES; index++) if(!isfinite(values[index])) return FALSE;
   return TRUE;
 }
 
@@ -839,15 +988,17 @@ static void append_curves(dt_iop_module_t *module, GString *json)
     /* Unsupported historical shapes are omitted without changing that history
      * or making an unrelated module's metadata unavailable. */
     if(!read_curve(module, &layout, channel, points, &count, &interpolation)
-       || !curve_samples(points, (size_t)count, interpolation, samples, &endpoint)) continue;
+       || !module_curve_samples(module, points, (size_t)count, interpolation, samples, &endpoint)) continue;
     if(!first) g_string_append_c(json, ',');
     first = FALSE;
     g_string_append_printf(json, "{\"channel\":%d,\"label\":", channel);
-    const char *label = layout.rgb && layout.editable_channels == MOBILE_CURVE_CHANNELS
-      ? (channel == 0 ? "Red" : channel == 1 ? "Green" : "Blue") : "RGB";
+    const char *label = !strcmp(module->op, "tonecurve") ? (channel == 0 ? "Lightness (L)" : channel == 1 ? "Lab a" : "Lab b")
+      : !strcmp(module->op, "colorzones") ? (channel == 0 ? "Lightness" : channel == 1 ? "Chroma" : "Hue")
+      : layout.rgb && layout.editable_channels == MOBILE_CURVE_CHANNELS
+        ? (channel == 0 ? "Red" : channel == 1 ? "Green" : "Blue") : "RGB";
     json_string(json, label);
     g_string_append_printf(json, ",\"editable\":%s,\"interpolation\":%d,\"maxNodes\":%d,\"minSpacing\":",
-      "true", interpolation, MOBILE_CURVE_MAX_NODES);
+      "true", interpolation, layout.max_nodes);
     json_number(json, mobile_curve_min_spacing);
     g_string_append(json, ",\"nodes\":[");
     for(int k = 0; k < count; k++)
@@ -862,7 +1013,25 @@ static void append_curves(dt_iop_module_t *module, GString *json)
       append_curve_point(json, (float)k / MOBILE_CURVE_SAMPLES, samples[k]);
     }
     g_string_append_c(json, ','); append_curve_point(json, 1.0f, endpoint);
-    g_string_append(json, "]}");
+    g_string_append_c(json, ']');
+    if(module->default_params)
+    {
+      dt_iop_module_t defaults = *module;
+      defaults.params = module->default_params;
+      dt_mobile_curve_point reset[MOBILE_CURVE_MAX_NODES];
+      int reset_count, reset_interpolation;
+      if(read_curve(&defaults, &layout, channel, reset, &reset_count, &reset_interpolation))
+      {
+        g_string_append(json, ",\"resetNodes\":[");
+        for(int k = 0; k < reset_count; k++)
+        {
+          if(k) g_string_append_c(json, ',');
+          append_curve_point(json, reset[k].x, reset[k].y);
+        }
+        g_string_append_c(json, ']');
+      }
+    }
+    g_string_append_c(json, '}');
   }
 }
 
@@ -1171,15 +1340,26 @@ dt_mobile_status dt_mobile_engine_modules(dt_mobile_engine *engine, char **json,
   for(GList *item = engine->develop.iop; item; item = g_list_next(item))
   {
     dt_iop_module_t *module = item->data;
+    /* Internal pipeline/history sentinels remain in native topology/history,
+     * but are not user editing tools (notably mask_manager's dummy field). */
+    if(dt_iop_is_hidden(module) || !dt_mobile_extended_parameter_applicable(module)) continue;
     char identifier[128];
     module_identifier(module, identifier, sizeof(identifier));
     if(!first) g_string_append_c(description, ',');
     first = FALSE;
     g_string_append(description, "{\"operation\":"); json_string(description, identifier);
     g_string_append(description, ",\"name\":");
-    gchar *label = module->multi_name[0]
-      ? g_strdup_printf("%s · %s", module->name(), module->multi_name) : g_strdup(module->name());
+    /* Native preset replay may normalize a base module's private automatic
+     * label without changing any settings. The upstream instance-name helper
+     * keeps explicit user names and extra instances, and omits that internal
+     * base-module bookkeeping from the tool's visible identity. */
+    const char *instance_name = dt_iop_get_instance_name(module);
+    gchar *display_name = module->multi_name_hand_edited ? g_strdup(instance_name)
+      : dt_util_localize_segmented_name(instance_name, FALSE);
+    gchar *label = display_name[0]
+      ? g_strdup_printf("%s · %s", module->name(), display_name) : g_strdup(module->name());
     json_string(description, label);
+    g_free(display_name);
     g_free(label);
     g_string_append_printf(description, ",\"enabled\":%s,\"canDisable\":%s,\"canCreateInstance\":%s,\"parameters\":[",
                            module->enabled ? "true" : "false",
@@ -1188,12 +1368,19 @@ dt_mobile_status dt_mobile_engine_modules(dt_mobile_engine *engine, char **json,
     parameter_json fields = { description, TRUE };
     if(module->have_introspection && module->get_introspection())
       visit_fields(module, module->get_introspection()->field, 0, "", 0, append_parameter, &fields);
+    append_mobile_blending_parameters(module, &fields);
+    append_mobile_zone_parameters(module, &fields);
+    append_mobile_mask_parameters(module, &fields);
+    append_mobile_liquify_parameters(module, &fields);
     g_string_append(description, "],\"curves\":[");
     append_curves(module, description);
     g_string_append_c(description, ']');
     append_rgb_curve_options(module, description);
     append_whitebalance(module, description);
     append_crop(module, description);
+    append_mobile_text_parameters(module, description);
+    g_string_append_printf(description, ",\"canReset\":%s",
+      module->default_params && module->params && module->params_size > 0 ? "true" : "false");
     g_string_append_c(description, '}');
   }
   g_string_append_c(description, ']');
@@ -1207,6 +1394,7 @@ static void save_module(dt_mobile_engine *engine, dt_iop_module_t *module, gbool
   /* no_image=TRUE avoids touching GTK viewports in this headless develop. */
   dt_dev_add_history_item_ext(&engine->develop, module, enable, TRUE);
   sync_temperature_chroma(&engine->develop);
+  sync_mobile_overlay_dependencies(&engine->develop);
   dt_dev_write_history(&engine->develop);
   record_history_state(engine);
 }
@@ -1332,6 +1520,8 @@ static dt_mobile_status move_history(dt_mobile_engine *engine, int direction,
      * count-difference mask shortcut and restore the actual active forms once. */
     dev->history_end = state->history_end;
     dt_dev_pop_history_items_ext(dev, state->history_end);
+    sync_raster_mask_registrations(dev);
+    sync_mobile_overlay_dependencies(dev);
     dev->chroma = state->chroma;
     sync_temperature_chroma(dev);
     GList *forms = NULL;
@@ -1380,7 +1570,7 @@ dt_mobile_status dt_mobile_engine_set_curve(dt_mobile_engine *engine, const char
     status = engine_fail(error, error_size, DT_MOBILE_ERROR_UNSUPPORTED, "this module has no supported curve editor");
   else if(channel < 0 || channel >= layout.editable_channels)
     status = engine_fail(error, error_size, DT_MOBILE_ERROR_UNSUPPORTED, "this curve channel is reserved or linked");
-  else if(!valid_curve_points(points, count, interpolation))
+  else if(count > (size_t)layout.max_nodes || !valid_curve_points(points, count, interpolation))
     status = engine_fail(error, error_size, DT_MOBILE_ERROR_INVALID_ARGUMENT, "curve nodes or interpolation are invalid");
   else
   {
@@ -1656,6 +1846,7 @@ static void update_parameter(dt_iop_module_t *module, const dt_introspection_fie
   }
   if(!number_info(field, destination, &current, &minimum, &maximum, &type)) return;
   dt_mobile_parameter_limits(module->op, path, &minimum, &maximum);
+  dt_mobile_array_parameter_dynamic_limits(module, path, &minimum, &maximum);
   if((long double)value < minimum || (long double)value > maximum
      || (field->header.type != DT_INTROSPECTION_TYPE_FLOAT
          && field->header.type != DT_INTROSPECTION_TYPE_DOUBLE && trunc(value) != value)
@@ -1666,6 +1857,15 @@ static void update_parameter(dt_iop_module_t *module, const dt_introspection_fie
     for(size_t k = 0; k < enum_entry_count(field); k++)
       if(value == field->Enum.values[k].value) present = TRUE;
     if(!present) return;
+  }
+  if(!strcmp(module->op, "lens"))
+  {
+    const dt_introspection_field_t *set = module->get_f ? module->get_f("has_been_set") : NULL;
+    if(!set || set->header.type != DT_INTROSPECTION_TYPE_BOOL || set->header.size != sizeof(gboolean)
+       || set->header.offset > (size_t)module->params_size
+       || set->header.size > (size_t)module->params_size - set->header.offset) return;
+    const gboolean modified = TRUE;
+    memcpy((char *)module->params + set->header.offset, &modified, sizeof(modified));
   }
 #define WRITE_NUMBER(tag, ctype) \
   case DT_INTROSPECTION_TYPE_##tag: *(ctype *)destination = (ctype)value; break
@@ -1697,6 +1897,80 @@ dt_mobile_status dt_mobile_engine_set_parameter(dt_mobile_engine *engine, const 
   dt_mobile_status status = begin_operation(engine, error, error_size);
   if(status != DT_MOBILE_OK) return status;
   dt_iop_module_t *module = find_module(engine, identifier);
+  if(module && !strcmp(parameter, "module.reset"))
+  {
+    if(value != 1.0 || !module->params || !module->default_params || module->params_size <= 0
+       || dt_iop_is_hidden(module))
+      status = engine_fail(error, error_size, DT_MOBILE_ERROR_INVALID_ARGUMENT, "this tool cannot reset settings");
+    else
+    {
+      const mobile_mask_sync_function sync = mobile_mask_special(module) ? mobile_mask_sync(module) : NULL;
+      const dt_masks_form_t *group = mobile_mask_special(module) ? mobile_mask_group(module) : NULL;
+      mobile_mask_sync_function retouch_reset = NULL;
+      if(!strcmp(module->op, "retouch") && module->module)
+        g_module_symbol(module->module, "dt_iop_mobile_retouch_reset", (gpointer *)&retouch_reset);
+      if(group && group->points && (!sync || (!strcmp(module->op, "retouch") && !retouch_reset)))
+        status = engine_fail(error, error_size, DT_MOBILE_ERROR_UNSUPPORTED, "reset requires the original mask form reset operations");
+      else
+      {
+        if(retouch_reset) retouch_reset(module);
+        else memcpy(module->params, module->default_params, (size_t)module->params_size);
+        /* Retouch and spots keep their original mask group when resetting
+         * settings. Rebuild their per-form parameter bookkeeping before any
+         * rendering can access those preserved forms. */
+        if(sync) sync(module);
+        /* A reset is one atomic history item, preserving masks, blending and
+         * current enabled state just like resetting settings without power-on. */
+        save_module(engine, module, FALSE);
+      }
+    }
+    end_operation(engine);
+    return status;
+  }
+  const int liquify_update = module ? update_mobile_liquify_parameter(module, parameter, value) : 0;
+  if(liquify_update)
+  {
+    if(liquify_update < 0)
+      status = engine_fail(error, error_size, DT_MOBILE_ERROR_INVALID_ARGUMENT, "unsupported liquify point or warp value");
+    else save_module(engine, module, TRUE);
+    end_operation(engine);
+    return status;
+  }
+  const int mask_update = module ? update_mobile_mask_parameter(module, parameter, value) : 0;
+  if(mask_update)
+  {
+    if(mask_update < 0)
+      status = engine_fail(error, error_size, DT_MOBILE_ERROR_INVALID_ARGUMENT, "unsupported mask shape or geometry value");
+    else
+    {
+      /* Forms must be captured in native history before session snapshots;
+       * a regular parameter history item would omit their deep copy. */
+      dt_dev_add_masks_history_item_ext(&engine->develop, module, TRUE, TRUE);
+      sync_temperature_chroma(&engine->develop);
+      dt_dev_write_history(&engine->develop);
+      record_history_state(engine);
+    }
+    end_operation(engine);
+    return status;
+  }
+  const int zone_update = module ? update_mobile_zone_parameter(module, parameter, value) : 0;
+  if(zone_update)
+  {
+    if(zone_update < 0)
+      status = engine_fail(error, error_size, DT_MOBILE_ERROR_INVALID_ARGUMENT, "unsupported zone partition or boundary value");
+    else save_module(engine, module, TRUE);
+    end_operation(engine);
+    return status;
+  }
+  const int blend_update = module ? update_mobile_blending_parameter(module, parameter, value) : 0;
+  if(blend_update)
+  {
+    if(blend_update < 0)
+      status = engine_fail(error, error_size, DT_MOBILE_ERROR_INVALID_ARGUMENT, "unsupported blending value");
+    else save_module(engine, module, TRUE);
+    end_operation(engine);
+    return status;
+  }
   parameter_update update = { parameter, value, FALSE, FALSE };
   if(module && module->have_introspection && module->get_introspection())
     visit_fields(module, module->get_introspection()->field, 0, "", 0, update_parameter, &update);
@@ -1705,6 +1979,22 @@ dt_mobile_status dt_mobile_engine_set_parameter(dt_mobile_engine *engine, const 
   else if(!update.valid)
     status = engine_fail(error, error_size, DT_MOBILE_ERROR_INVALID_ARGUMENT,
                          "parameter is outside its supported range, choices or invariants");
+  else save_module(engine, module, TRUE);
+  end_operation(engine);
+  return status;
+}
+
+dt_mobile_status dt_mobile_engine_set_text_parameter(dt_mobile_engine *engine, const char *identifier,
+    const char *parameter, const char *value, char *error, size_t error_size)
+{
+  dt_mobile_status status = begin_operation(engine, error, error_size);
+  if(status != DT_MOBILE_OK) return status;
+  dt_iop_module_t *module = find_module(engine, identifier);
+  const int updated = module ? update_mobile_text_parameter(module, parameter, value) : 0;
+  if(!updated)
+    status = engine_fail(error, error_size, DT_MOBILE_ERROR_UNSUPPORTED, "unknown module or text parameter");
+  else if(updated < 0)
+    status = engine_fail(error, error_size, DT_MOBILE_ERROR_INVALID_ARGUMENT, "text exceeds the native field or has invalid contents");
   else save_module(engine, module, TRUE);
   end_operation(engine);
   return status;

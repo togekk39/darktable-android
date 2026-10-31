@@ -115,6 +115,19 @@ dt_mobile_status dt_mobile_engine_set_parameter(dt_mobile_engine *engine, const 
   return called(DT_MOCK_PARAMETER, error, size);
 }
 
+dt_mobile_status dt_mobile_engine_set_text_parameter(dt_mobile_engine *engine, const char *module,
+                                                     const char *parameter, const char *value,
+                                                     char *error, size_t size)
+{
+  (void)engine;
+  (void)module;
+  (void)parameter;
+  (void)value;
+  (void)error;
+  (void)size;
+  return DT_MOBILE_ERROR_UNSUPPORTED;
+}
+
 dt_mobile_status dt_mobile_engine_set_enabled(dt_mobile_engine *engine, const char *module, int enabled,
                                              char *error, size_t size)
 {

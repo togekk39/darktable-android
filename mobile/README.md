@@ -23,76 +23,77 @@ remaining limits.
 
 ## Implemented boundary
 
-`dt_mobile.h` exposes module descriptions, numeric parameter changes, dedicated
-curve edits, atomic white-balance Kelvin/tint and gains/settings, freehand cropping, module enable/disable, session undo/redo,
-new default module instances, preview, installed export formats and full-resolution export settings.
-The engine adapter uses upstream introspection structures, develop history and
-the imageio pixelpipe. It does not duplicate editing formulas. Parameter bounds,
-integer types and enum choices are checked before changes are committed. Numeric
-controls also require an explicit review in `core/dt_mobile_parameter_policy.h`:
-introspection bounds alone do not express curve, array or other cross-field
-invariants. Unknown fields are neither advertised nor writable by the numeric API.
-The reviewed exposure controls additionally reject combinations where the black
-point reaches or exceeds the exposure-derived white point, matching the relation
-maintained by the desktop widget without silently changing another control.
+`dt_mobile.h` exposes original module metadata, numeric and bounded text/file
+updates, dedicated curves, atomic white-balance/crop batches, module defaults,
+instances, session history, preview and native-resolution export. The adapter
+uses upstream introspection, develop history/masks and the imageio pixelpipe.
+Original module hooks maintain retouch/clone forms, standalone liquify warps and
+zone partitions; the bridge does not implement alternate processing formulas.
 
-JSON module descriptions contain `operation`, `name`, `enabled`, `canDisable`, `canCreateInstance`,
-`parameters`, `curves` and optional `crop`/`rgbCurveOptions`/`whiteBalance` descriptions. Parameters contain `name`, `label`, `type`, `value`, `min`,
-`max`, optional `choices` (`value`, `label`), original image-specific `default`,
-and optional desktop `sliderMin`/`sliderMax`. Defaults that conflict with current
-coupled constraints are omitted. The current reviewed subset is 103 fields
-across 21 original modules. See [control coverage](CONTROL_PARITY.md) for the
-exact list, dedicated editors and outstanding desktop controls. The original
-processing code handles all edits; private structural/version fields remain
-inaccessible. Sliders use native bounds and submit one change per completed drag;
-precise input, native choice menus, boolean switches and default-reset buttons
-remain available alongside them. White-balance and crop sliders update drafts
-until their complete values are applied together.
-Float inputs are checked in their native float representation so decimal values
-at a boundary, such as `0.1`, remain usable. Non-finite and overflowing values
-are rejected. Only four exact reviewed nested scalar paths are allowed; other
-nested fields, arrays, curve counts and unreviewed parameters need APIs that
-preserve upstream invariants. The complete module list and enable/disable controls
-remain available, even when a module has no reviewed numeric controls. Descriptions are
-allocated for the caller, who must release them with `dt_mobile_free_buffer`.
+The reviewed policies contain 511 scalar fields and up to 440 fixed-array
+components across 81 modules. The component count includes only reviewed channel/
+band addresses and depends on active patches and image applicability. Dedicated
+curves, masks, blending, synthetic zone/per-form controls, file/text parameters and
+action buttons are additional capabilities, not entries in that count. See
+[control coverage](CONTROL_PARITY.md) and the policy headers for the identities,
+source reviews, hard/soft bounds and exact remaining desktop interactions.
 
-The Android tools panel groups modules with ported editors first, initially
-selects exposure, and labels expansion and unavailable controls explicitly.
-The three Compose component test classes passed all 12 actual interaction
-tests, including slider release, precise input, native choices/defaults and
-atomic crop/white-balance drafts. `NativeAdditionalControlsTest` separately
-passed 50 actual JNI phases on a generated 32x24 RGB PNG, including native
-metadata/default discovery, selected float/enum/bool/nested fields, actual
-tone-map/vignette pixels, exact undo/redo and unchanged source hashes. The
-official ARM64/API 28 guest used the documented host emulation mode. The earlier
-53-phase `NativeColorControlsTest` remains separate color-control evidence.
+JSON descriptions contain `operation`, `name`, `enabled`, `canDisable`,
+`canCreateInstance`, `canReset`, `parameters`, `textParameters`, `curves` and
+optional crop/RGB-curve/white-balance descriptions. Numeric parameters contain
+native type/value/bounds, optional image-specific defaults, optional soft slider
+ranges and native/synthetic choice labels. Parameters with `type: "action"`
+become buttons, not numeric editors. Text fields specify UTF-8 `maxBytes`; file
+imports additionally advertise `file: true` and permitted `extensions`.
 
-The host regression also exercises declared endpoints through the original
-pixelpipe. A separate existing observation remains unresolved: its original PNG
-fixture's first unchanged preview differs from the following nine identical
-previews. The color-control checks explicitly prime once, then require two
-identical baselines and exact undo/redo; no tolerance or production processing
-change was introduced. This is not a claim that the first-preview issue is fixed.
+Metadata and setters share type/field policies and image-dependent checks.
+Sensor black/white preparation and demosaicing controls are omitted for
+inapplicable inputs. Enum sentinel/automatic-picker entries are filtered; Bayer,
+X-Trans, four-Bayer and monochrome method menus follow the original source.
+Native validation maintains ordered levels/bands/curves, exposure and filmic
+luminance relations, AgX targets/gamut, normalized mixer rows, retouch scale
+relationships and sensor white/black separation. Readable imported values do
+not become writable merely because they appear in metadata. Unknown structural
+fields and opaque arrays remain inaccessible to ordinary numeric/text updates.
 
-`dt_mobile_set_curve` updates a complete node list and its interpolation in one
-history change for basecurve and RGB curve. The editor supports 2–20 finite
-nodes in normalized coordinates, with at least `1e-6f` horizontal separation,
-and the upstream cubic spline, Catmull-Rom and monotone Hermite interpolation
-methods. Metadata supplies each supported curve's channel, nodes, interpolation,
-limits and samples calculated by the upstream spline routines. Unsupported
-historical curve states are omitted from this metadata without altering history.
-Basecurve exposes channel 0. RGB curve exposes its combined channel in linked
-mode, or its three channels in independent mode, according to the existing
-module state. Editing preserves the other channels and unrelated parameters.
-`dt_mobile_set_rgb_curve_options` atomically changes linked/independent mode and
-one of the seven original preserve-color methods. The Android editor displays
-the choices advertised by the native module, with preserve-color controls in
-linked mode. All three stored channels are validated before the batch can enable
-the module. When switching from linked to independent, the desktop rule copies
-the shared curve into G and B only if both remain identity curves; otherwise
-both are preserved. One undo restores the mode, method and any copied channels.
-Middle-gray compensation and other advanced curve settings remain pending.
-Internal node counts stay excluded from the generic numeric API.
+Android presents sliders with precise input, choice menus, switches, native reset
+and action buttons, tool/parameter search and the dedicated editors. A numeric
+drag submits one history/preview operation on release. Crop and white balance
+retain dependent values in a draft until one atomic Apply. Internal history/
+diagnostic IOPs are hidden without changing their native identities. The legacy
+`colortransfer` IOP has no current desktop editing widgets either; Android keeps
+its original explanation/enable state instead of exposing private fields.
+
+The bridge now commits uniform blending, available preceding raster-mask
+sources, original circle/ellipse/gradient forms and per-form repair settings via
+their native state operations. External raster imports set the original path and
+basename together; LUT imports set the path and clear obsolete compressed state.
+The original readers accept the retained session documents. Overlay image
+imports use the original image importer, synchronized dependency state and its
+image-ID/filename tuple, with self/cycle rejection. These files must remain
+available while undo/redo can restore references to them. Brush/path and
+parametric-mask editors, linked liquify strokes, automatic sampling and full
+preset workflows still need further integration.
+
+`dt_mobile_set_curve` updates complete node lists and native interpolation for
+basecurve, RGB/Lab tone curves and color zones. Metadata provides native samples,
+channel limits and image-specific reset nodes/interpolation. The RGB options
+batch preserves the original linked/independent-channel transition rule. Fixed
+channel vectors, levels and frequency bands use reviewed component controls;
+zone counts/automatic positions use their original coupled partition operation.
+Resetting module settings preserves enabled state, blending and masks, rebuilding
+retouch/clone bookkeeping through the original module hooks.
+
+Previous ARM64/API 28 Compose/JNI evidence and current host/JVM/build checks are
+reported in [native verification](../android/NATIVE_ENGINE_TESTS.md). They are
+separate scopes; the default Android dependency-only build still disables the
+processing engine. A matching engine, original plugins and complete runtime data
+must be packaged before the interface can process an image.
+
+The separately recorded first-PNG-preview observation remains relevant to pixel
+checks: regressions explicitly prime the unchanged original pipeline before
+requiring stable baselines and exact undo/redo. See the verification record for
+current results rather than inferring processing parity from widget counts.
 
 `dt_mobile_set_whitebalance_gains` applies all active coefficients together,
 selects the original user-defined setting and clears its late color-adaptation
@@ -296,12 +297,13 @@ commands. This is a desktop host test, not Android device validation.
   and integrations. The verified stage retains the configured darktable data
   and Lensfun database; the default three flat Android database assets alone
   remain insufficient.
-* Add purpose-built touch controls and APIs for masks, white-balance spot sampling and camera presets, other curve modules,
-  RGB curve middle-gray compensation, fixed crop proportions, an
-  uncropped touch overlay, other geometry operations, blending,
-  persistent editing history, presets, multiple module instances and other compound or opaque
-  parameters. Generic numeric fields, the two node editors and freehand crop are not full
-  feature parity.
+* Complete advanced brush/path and parametric-mask controls, linked liquify
+  strokes, white-balance spot sampling and camera preset/tuning, automatic
+  sampling/range helpers, fixed crop proportions, an uncropped touch overlay
+  and automatic perspective fitting. Add persistent editing history, styles/
+  presets and instance copy/delete/reorder operations. Existing scalar/vector,
+  curve, mask, repair and blending editors do not establish every desktop
+  widget or canvas gesture.
 * Complete the export settings beyond the current dimensions, PNG/TIFF precision,
   compression, JPEG subsampling, DPI, built-in ICC profiles/rendering intent and
   source-metadata policy: custom ICC files, layers and other codec-specific

@@ -20,6 +20,9 @@ dt_mobile_status dt_mobile_engine_set_module_params(dt_mobile_engine *engine, co
 dt_mobile_status dt_mobile_engine_set_parameter(dt_mobile_engine *engine, const char *module,
                                                const char *parameter, double value,
                                                char *error, size_t error_size);
+dt_mobile_status dt_mobile_engine_set_text_parameter(dt_mobile_engine *engine, const char *module,
+                                                     const char *parameter, const char *value,
+                                                     char *error, size_t error_size);
 dt_mobile_status dt_mobile_engine_set_curve(dt_mobile_engine *engine, const char *module,
                                            int channel, int interpolation,
                                            const dt_mobile_curve_point *points, size_t count,

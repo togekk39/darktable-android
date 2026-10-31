@@ -152,6 +152,18 @@ dt_mobile_status dt_mobile_set_parameter(dt_mobile_session *s, const char *modul
   return fail(s, DT_MOBILE_ERROR_UNSUPPORTED, "this build does not contain the darktable engine");
 #endif
 }
+dt_mobile_status dt_mobile_set_text_parameter(dt_mobile_session *s, const char *module,
+                                               const char *parameter, const char *value)
+{
+  if(!s || !module || !module[0] || !parameter || !parameter[0] || !value)
+    return DT_MOBILE_ERROR_INVALID_ARGUMENT;
+  if(atomic_load(&s->cancelled)) return fail(s, DT_MOBILE_ERROR_CANCELLED, "operation cancelled");
+#ifdef DT_MOBILE_HAS_DARKTABLE_ENGINE
+  return dt_mobile_engine_set_text_parameter(s->engine, module, parameter, value, s->error, sizeof(s->error));
+#else
+  return fail(s, DT_MOBILE_ERROR_UNSUPPORTED, "this build does not contain the darktable engine");
+#endif
+}
 dt_mobile_status dt_mobile_new_instance(dt_mobile_session *s, const char *module, char **new_identifier)
 {
   if(new_identifier) *new_identifier = NULL;

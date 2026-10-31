@@ -18,6 +18,17 @@ class ModuleInstanceTest {
         assertNull(modules.instanceSource("temperature"))
     }
 
+    @Test fun resetRequiresAnExplicitNativeCapability() {
+        val modules = parseModules("""[
+            {"operation":"exposure","name":"exposure","enabled":true,"canReset":true},
+            {"operation":"old","name":"old runtime","enabled":true},
+            {"operation":"malformed","name":"malformed","enabled":true,"canReset":"true"}
+        ]""")
+        assertTrue(modules[0].canReset)
+        assertFalse(modules[1].canReset)
+        assertFalse(modules[2].canReset)
+    }
+
     @Test fun onlyExplicitBooleanCapabilityEnablesCreation() {
         val modules = parseModules("""[
             {"operation":"exposure","name":"exposure","enabled":true,"canCreateInstance":true},

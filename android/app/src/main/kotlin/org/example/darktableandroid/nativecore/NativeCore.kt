@@ -14,6 +14,7 @@ object NativeCore {
     external fun redo(handle: Long)
     external fun newInstance(handle: Long, module: String): String
     external fun setParameter(handle: Long, module: String, parameter: String, value: Double)
+    external fun setTextParameter(handle: Long, module: String, parameter: String, value: String)
     external fun setCurve(handle: Long, module: String, channel: Int, interpolation: Int, coordinates: FloatArray)
     external fun setRgbCurveOptions(handle: Long, module: String, mode: Int, preserveColors: Int)
     external fun setWhiteBalanceGains(handle: Long, module: String, gains: FloatArray)

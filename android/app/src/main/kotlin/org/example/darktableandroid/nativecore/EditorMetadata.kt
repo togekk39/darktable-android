@@ -17,6 +17,16 @@ data class ModuleParameter(
     val sliderMaximum: Double? = null,
     val defaultValue: Double? = null,
 )
+data class ModuleTextParameter(
+    val name: String,
+    val label: String,
+    val value: String,
+    /** Maximum UTF-8 payload bytes, excluding the native terminating NUL. */
+    val maxBytes: Int,
+    val defaultValue: String? = null,
+    val isFile: Boolean = false,
+    val extensions: List<String> = emptyList(),
+)
 data class EditorModule(
     val operation: String,
     val name: String,
@@ -28,6 +38,8 @@ data class EditorModule(
     val rgbCurveOptions: RgbCurveOptions? = null,
     val whiteBalance: WhiteBalance? = null,
     val canCreateInstance: Boolean = false,
+    val canReset: Boolean = false,
+    val textParameters: List<ModuleTextParameter> = emptyList(),
 )
 data class ModuleCrop(val bounds: CropRect, val minSize: Float, val freehand: Boolean)
 data class ModuleCurve(
@@ -39,6 +51,7 @@ data class ModuleCurve(
     val minSpacing: Float,
     val nodes: List<CurvePoint>,
     val samples: List<CurvePoint>,
+    val resetNodes: List<CurvePoint>? = null,
 )
 data class ExportFormat(
     val id: String,
@@ -50,7 +63,7 @@ data class ExportFormat(
 )
 
 internal val EditorModule.hasEditableControls: Boolean
-    get() = parameters.isNotEmpty() || curves.any { it.editable } || crop != null ||
+    get() = parameters.isNotEmpty() || textParameters.isNotEmpty() || curves.any { it.editable } || crop != null ||
         rgbCurveOptions != null || whiteBalance != null
 
 /** Presentation order only; native pixelpipe order remains unchanged. */
@@ -65,6 +78,7 @@ internal fun parseModules(json: String): List<EditorModule> = JSONArray(json).le
         val module = modules.getJSONObject(index)
         val parameters = module.optJSONArray("parameters") ?: JSONArray()
         val curves = module.optJSONArray("curves") ?: JSONArray()
+        val textParameters = module.optJSONArray("textParameters") ?: JSONArray()
         EditorModule(module.getString("operation"), module.getString("name"), module.getBoolean("enabled"), module.optBoolean("canDisable", true),
             List(parameters.length()) { parameterIndex ->
                 val parameter = parameters.getJSONObject(parameterIndex)
@@ -91,6 +105,10 @@ internal fun parseModules(json: String): List<EditorModule> = JSONArray(json).le
             module.optJSONObject("whiteBalance")?.readWhiteBalance(),
             // Older runtimes and malformed optional capabilities stay unavailable.
             module.opt("canCreateInstance") == true,
+            module.opt("canReset") == true,
+            (0 until textParameters.length()).mapNotNull { textIndex ->
+                textParameters.optJSONObject(textIndex)?.readTextParameter()
+            }.distinctBy { it.name },
         )
     }
 }
@@ -118,6 +136,31 @@ internal fun parseExportFormats(json: String): List<ExportFormat> = JSONArray(js
 
 private fun JSONObject.finiteNumber(name: String): Double? =
     if(has(name) && !isNull(name)) optDouble(name).takeIf { it.isFinite() } else null
+
+private fun JSONObject.readTextParameter(): ModuleTextParameter? = try {
+    val name = getString("name")
+    val limit = curveOptionInt("maxBytes")
+    require(name.isNotEmpty() && limit in 1..65535)
+    val value = get("value") as? String ?: throw IllegalArgumentException("Expected text")
+    val file = opt("file")
+    require(file == null || file == JSONObject.NULL || file is Boolean)
+    val isFile = file == true
+    val allowedExtensions = optJSONArray("extensions")?.let { items ->
+        (0 until items.length()).mapNotNull { index ->
+            (items.opt(index) as? String)?.lowercase(java.util.Locale.ROOT)?.removePrefix(".")
+                ?.takeIf { it.length in 1..16 && it.all { char -> char in 'a'..'z' || char in '0'..'9' } }
+        }.distinct()
+    } ?: emptyList()
+    require((name != "file.import" || isFile) && (!isFile || allowedExtensions.isNotEmpty()))
+    ModuleTextParameter(name, optString("label", name), value, limit, opt("default") as? String,
+        isFile, allowedExtensions).let {
+        if(it.defaultValue != null && !it.accepts(it.defaultValue)) it.copy(defaultValue = null) else it
+    }
+} catch(_: org.json.JSONException) {
+    null
+} catch(_: IllegalArgumentException) {
+    null
+}
 
 private fun JSONObject.readWhiteBalance(): WhiteBalance? = try {
     val channels = getJSONArray("channels")
@@ -190,8 +233,13 @@ private fun JSONObject.readCurve(): ModuleCurve? = try {
     val samples = getJSONArray("samples").curvePoints()
     require(samples.size in 2..4096 && samples.all { it.x in 0f..1f } &&
         samples.zipWithNext().all { (left, right) -> right.x > left.x })
+    val resetNodes = optJSONArray("resetNodes")?.let { reset ->
+        try { reset.curvePoints().takeIf { validCurveNodes(it, maxNodes, minSpacing) } }
+        catch(_: org.json.JSONException) { null }
+        catch(_: IllegalArgumentException) { null }
+    }
     ModuleCurve(channel, getString("label"), getBoolean("editable"), interpolation,
-        maxNodes, minSpacing, nodes, samples)
+        maxNodes, minSpacing, nodes, samples, resetNodes)
 } catch(_: org.json.JSONException) {
     null
 } catch(_: IllegalArgumentException) {

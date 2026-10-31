@@ -3,109 +3,61 @@
 
 Open this `android/` directory in Android Studio. Install Android SDK 35, NDK 27.2.12479018, and CMake 3.22.1. Build `devDebug` or run `./gradlew :app:assembleDevDebug`; install with `adb install -r app/build/outputs/apk/dev/debug/app-dev-debug.apk`.
 
-The Android UI opens one document directly into the editor, with no image browser.
-It now includes controls generated from reviewed desktop scalar parameters,
-dedicated basecurve and RGB curve node editors, white-balance temperature/tint and coefficients/settings, a freehand crop editor,
-session undo/redo, and a system document destination for native exports. The
-default Gradle build still sets `DT_MOBILE_WITH_DARKTABLE_ENGINE=OFF`; that
-dependency-only route reports processing unavailable and disables image opening.
-The experimental ARM64/API 26 core, JNI and configured modules now build/link
-with real GTK3 Broadway, and their runtime has been installed and staged.
-The explicit [prebuilt route](PREBUILT_ENGINE.md) packages that stage, and an
-experimental engine-enabled APK has passed final runtime byte/hash verification.
-A preserved APK pair passed the complete JNI Fusion GPR edit/undo/export/reopen
-test on ARM64/API 28 with host single-step emulation and fixed virtual timing;
-the newer default-instance APK pair also passed its complete 41-phase run. See
-[port status](../mobile/dependencies/PORTING_STATUS.md) for exact scope and host
-settings. One fixture/runtime does not establish full desktop parity, physical
-device behavior or performance.
+The Android UI opens one document directly into the editor, with no image
+browser. The tools panel now provides native sliders and precise input, enum
+menus, switches, text fields, document import and action buttons. Tool search
+matches module names and parameter labels; editing a value commits the original
+module/history and requests an original-engine preview. A completed slider drag
+creates one edit. Image-specific parameter resets and tool settings resets use
+native defaults. Progress and cancellation remain visible inside the sheet.
 
-The numeric bridge exposes 103 reviewed fields across 21 original modules,
-including tone mapping, global tone mapping, high/low pass, soften, graduated
-ND, monochrome, vignette, split toning, bloom, grain and additional color-balance
-controls. Continuous parameters offer sliders and precise input, native enums
-offer choice menus, and booleans offer switches. Reset uses image-specific
-original module defaults. See [control coverage](../mobile/CONTROL_PARITY.md)
-for the exact fields and remaining gaps. Internal counts, arrays and unreviewed
-fields still require editors that maintain the desktop parameter invariants.
+The source policies cover 511 reviewed scalar fields and up to 440 fixed-array
+components across 81 modules. Actual controls depend on sensor type, active
+patches, selected mode and installed plugins. These counts exclude curve nodes,
+zone controls, blending, native mask/retouch/liquify operations and text/file
+fields; action buttons are not numeric parameters. See
+[control coverage](../mobile/CONTROL_PARITY.md) for exact scope and remaining
+advanced desktop interactions.
 
-Opening **Editing tools** selects exposure when no tool is selected. Tools with
-editable controls appear first; this presentation does not reorder the native
-pixelpipe. Tap **Adjust ▼** and drag a slider; a completed drag submits one
-native history/preview operation. For precise input, enter a number and press
-**Apply**. Enabling a module
-also opens its editor. Tools without ported controls show an explicit explanation
-even while collapsed. The full-height sheet keeps progress/cancel feedback inside
-the editor and accommodates the keyboard.
+Dedicated editors include base/RGB/Lab tone/color-zone curves, atomic crop and
+white balance, levels and fixed frequency bands, and the original zone system.
+The native bridge also supports blending and preceding raster-mask selection,
+native circle/ellipse/gradient forms, clone/retouch shape controls and standalone
+liquify warps. Watermark text/font/template and camera/lens identifiers use
+bounded native text fields. System document selection imports external raster
+PFM/PNG masks, Cube/3DL/Hald-PNG LUTs and PNG/JPEG/TIFF overlay images into retained
+session assets. The original readers and processing code handle those files;
+overlay selection also updates its original image ID and dependency state. The
+UI supplies no replacement image formulas.
 
-All 12 production Compose component tests passed on ARM64/API 28, including
-drag/release, precise input, choices, switches, resets and grouped crop/white-
-balance application. A separate JNI test passed 50 phases on a small RGB fixture,
-including actual tone-map/vignette changes and exact undo/redo. The earlier
-53-phase original color-control test remains separate evidence. See
-[native test instructions](NATIVE_ENGINE_TESTS.md). This does not establish every
-desktop control or a complete physical-device editing workflow.
+The tools panel hides internal pipeline/diagnostic modules. RAW-only settings
+and methods follow the input's original capabilities, including Bayer/X-Trans/
+four-Bayer/monochrome demosaicing. The removed desktop `colortransfer` editor
+retains its legacy explanation/enable state. Brush/path masks, parametric mask
+thresholds, linked liquify strokes, automatic pickers, full preset browsers and
+other advanced interactions remain outside this coverage.
 
-Modules advertising native instance support offer **New default instance**.
-The original engine creates image-specific default parameters and blending;
-the editor focuses the returned instance and edits its independent settings.
-One undo removes the instance, and redo restores its stable identifier and settings.
-This does not copy the source instance's edits or masks. Copying current settings,
-deleting and reordering instances remain pending. Host native tests and Android JVM
-tests pass, and the exposure-instance JNI sequence also passed on the ARM64/API 28
-Fusion fixture with the recorded host settings. Other modules, UI interactions
-and device/runtime combinations still need validation.
+The default Gradle build still sets `DT_MOBILE_WITH_DARKTABLE_ENGINE=OFF`.
+That dependency-only route reports processing unavailable and disables image
+opening. The explicit [prebuilt route](PREBUILT_ENGINE.md) packages an installed,
+verified engine/runtime stage. Earlier ARM64/API 28 preview/edit/export runs and
+current checks are recorded separately in [native verification](NATIVE_ENGINE_TESTS.md)
+and [port status](../mobile/dependencies/PORTING_STATUS.md). Their exact fixtures,
+execution settings and limitations matter; compilation does not establish full
+desktop parity, physical-device behavior or performance.
 
-The curve editors support 2–20 nodes through dragging or numeric coordinates,
-adding/deleting nodes, resetting to identity, and choosing the upstream cubic
-spline, Catmull-Rom or monotone Hermite interpolation. Applying a curve submits
-its nodes and interpolation together; the displayed samples come from the native
-upstream spline implementation. Basecurve exposes its combined channel. RGB
-curve exposes the combined channel in linked mode or separate red, green and
-blue channels in independent mode. RGB mode and preserve-color choices can be
-applied together. Switching to independent mode inherits the shared curve only
-when both other channels remain identity curves, matching desktop behavior;
-edited channel curves are retained. Middle-gray compensation and other advanced
-curve settings, and other curve modules, still need dedicated editors. These controls
-require an engine-enabled build; the current dependency-only APK cannot process
-or apply them to an image.
+Module instances use image-specific original defaults and keep independent
+settings. Session undo/redo retains up to 64 successful edit steps; editing after
+undo discards redo. Imported files remain available while their session history
+can reference them. Copying current settings/masks and deleting or reordering
+instances remain pending.
 
-White balance applies all active channel coefficients together and offers the
-image's original as-shot, camera-reference and as-shot-to-reference settings
-when available. Manual coefficients use `0.001..8`; native preset values above
-8 remain visible without clipping. Green remains an independent coefficient.
-Three-channel images preserve the inactive fourth value; four-Bayer labels and
-display order come from the native module. True camera-monochrome inputs do not
-offer white balance. When the native module can derive temperature/tint from the
-image's camera matrix and active gains, sliders and precise inputs apply Kelvin and tint
-together through the desktop temperature module's shared calculation core. Android
-does not calculate replacement gains. The native module supplies the current values
-and bounds; applying selects user-defined white balance and normalizes green to 1,
-matching the desktop controls. Unavailable conversion keeps the existing coefficient
-and setting controls. Spot sampling and camera presets remain pending.
-
-The crop editor applies four normalized edges together through the original
-crop module, with a rectangle diagram and a reset to the full input area.
-Applying selects freehand proportions; a message identifies when this will
-replace an existing fixed ratio. The diagram is separate from the cropped
-photo preview. Fixed aspect presets and a touch overlay on an uncropped image
-are still pending.
-
-Undo/redo tracks up to 64 successful Apply steps during the open image session.
-Edits after undo discard redo. Export options come from the installed native
-format's capabilities: maximum dimensions without upscaling, PNG/TIFF precision
-and compression, JPEG quality/subsampling, JPEG/TIFF DPI, built-in output
-profiles, rendering intent and source-metadata copying. The document picker
-retains the complete settings and image identity selected when export started.
-Source metadata suppression does not remove ICC profiles or all fields generated
-by the encoder. Custom ICC files and further codec-specific settings remain
-pending. These features require the processing engine to be built and packaged.
-
-The desktop-backed mobile adapter and the GoPro VC-5 decoder have independent
-native verification targets. See [mobile engine integration](../mobile/README.md)
-for the build options, tests, and remaining work. Do not enable the Android
-engine flag until the core, processing/format plugins and runtime assets can
-actually be built and initialized on the device.
+The export destination uses Android's system document picker. Settings come from
+the installed native formats, including dimensions without upscaling, supported
+precision/compression, JPEG quality/subsampling, DPI, built-in output profiles,
+rendering intent and source-metadata copying. Export renders at native image
+resolution; the preview bitmap is not its input. Further optional format and
+custom ICC-file parity is documented separately.
 
 ## Native runtime data
 

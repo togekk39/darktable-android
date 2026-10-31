@@ -133,8 +133,8 @@ private fun CurveEditor(
                 }
             }, enabled = editable && nodes.size > 2) { Text(stringResource(R.string.curve_delete)) }
             TextButton(onClick = {
-                nodes = listOf(CurvePoint(0f, 0f), CurvePoint(1f, 1f)); selection = 0
-                xText = "0.0"; yText = "0.0"
+                nodes = curve.resetNodes ?: listOf(CurvePoint(0f, 0f), CurvePoint(1f, 1f)); selection = 0
+                xText = nodes.first().x.toString(); yText = nodes.first().y.toString()
             },
                 enabled = editable) { Text(stringResource(R.string.curve_reset)) }
         }

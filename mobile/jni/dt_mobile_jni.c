@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <jni.h>
 #include <stdint.h>
+#include <limits.h>
+#include <stdlib.h>
+#include <string.h>
 #include "dt_mobile.h"
 static void throw_io(JNIEnv *env, const char *message)
 {
@@ -13,6 +16,80 @@ static void throw_status(JNIEnv *env, dt_mobile_session *session, dt_mobile_stat
   const char *error = dt_mobile_last_error(session);
   throw_io(env, status == DT_MOBILE_ERROR_INVALID_ARGUMENT ? "invalid native editor arguments" :
                 (error && error[0] ? error : "native editor operation failed"));
+}
+/* Metadata and editable text use standard UTF-8. JNI's NewStringUTF and
+ * GetStringUTFChars use modified UTF-8, which corrupts supplementary characters
+ * such as emoji in watermark text. Decode metadata with Java's UTF-8 codec. */
+static jstring new_utf8_string(JNIEnv *env, const char *value)
+{
+  const size_t length = strlen(value);
+  if(length > INT_MAX) { throw_io(env, "native editor text is too large"); return NULL; }
+  jclass type = (*env)->FindClass(env, "java/lang/String");
+  if(!type) return NULL;
+  jmethodID constructor = (*env)->GetMethodID(env, type, "<init>", "([BLjava/lang/String;)V");
+  if(!constructor) { (*env)->DeleteLocalRef(env, type); return NULL; }
+  jbyteArray bytes = (*env)->NewByteArray(env, (jsize)length);
+  if(!bytes) { (*env)->DeleteLocalRef(env, type); return NULL; }
+  (*env)->SetByteArrayRegion(env, bytes, 0, (jsize)length, (const jbyte *)value);
+  jstring charset = NULL, result = NULL;
+  if(!(*env)->ExceptionCheck(env)) charset = (*env)->NewStringUTF(env, "UTF-8");
+  if(charset) result = (*env)->NewObject(env, type, constructor, bytes, charset);
+  if(charset) (*env)->DeleteLocalRef(env, charset);
+  (*env)->DeleteLocalRef(env, bytes);
+  (*env)->DeleteLocalRef(env, type);
+  return result;
+}
+
+static char *editor_text_utf8(JNIEnv *env, jstring text)
+{
+  const jsize count = (*env)->GetStringLength(env, text);
+  if(count > 4096) { throw_io(env, "editor text exceeds the native buffer"); return NULL; }
+  const jchar *characters = (*env)->GetStringChars(env, text, NULL);
+  if(!characters) return NULL;
+  char *result = malloc((size_t)count * 3 + 1);
+  if(!result)
+  {
+    (*env)->ReleaseStringChars(env, text, characters);
+    throw_io(env, "unable to allocate editor text"); return NULL;
+  }
+  size_t used = 0;
+  for(jsize k = 0; k < count; k++)
+  {
+    uint32_t code = characters[k];
+    if(!code || (code >= 0xDC00 && code <= 0xDFFF)) goto invalid;
+    if(code >= 0xD800 && code <= 0xDBFF)
+    {
+      if(k + 1 >= count || characters[k + 1] < 0xDC00 || characters[k + 1] > 0xDFFF) goto invalid;
+      code = 0x10000 + ((code - 0xD800) << 10) + (characters[++k] - 0xDC00);
+    }
+    if(code < 0x80) result[used++] = (char)code;
+    else if(code < 0x800)
+    {
+      result[used++] = (char)(0xC0 | (code >> 6));
+      result[used++] = (char)(0x80 | (code & 0x3F));
+    }
+    else if(code < 0x10000)
+    {
+      result[used++] = (char)(0xE0 | (code >> 12));
+      result[used++] = (char)(0x80 | ((code >> 6) & 0x3F));
+      result[used++] = (char)(0x80 | (code & 0x3F));
+    }
+    else
+    {
+      result[used++] = (char)(0xF0 | (code >> 18));
+      result[used++] = (char)(0x80 | ((code >> 12) & 0x3F));
+      result[used++] = (char)(0x80 | ((code >> 6) & 0x3F));
+      result[used++] = (char)(0x80 | (code & 0x3F));
+    }
+  }
+  result[used] = 0;
+  (*env)->ReleaseStringChars(env, text, characters);
+  return result;
+invalid:
+  free(result);
+  (*env)->ReleaseStringChars(env, text, characters);
+  throw_io(env, "editor text must be valid Unicode without NUL characters");
+  return NULL;
 }
 JNIEXPORT jint JNICALL Java_org_example_darktableandroid_nativecore_NativeCore_capabilities(JNIEnv *env, jobject self)
 { (void)env; (void)self; return (jint)dt_mobile_capabilities(); }
@@ -77,7 +154,7 @@ static jstring metadata(JNIEnv *env, jlong handle, int formats)
   dt_mobile_status status = formats ? dt_mobile_export_formats(session, &json) : dt_mobile_modules(session, &json);
   if(status != DT_MOBILE_OK) { dt_mobile_free_buffer(json); throw_status(env, session, status); return NULL; }
   if(!json) { throw_io(env, "native editor metadata is missing"); return NULL; }
-  jstring result = (*env)->NewStringUTF(env, json);
+  jstring result = new_utf8_string(env, json);
   dt_mobile_free_buffer(json);
   return result;
 }
@@ -93,7 +170,7 @@ JNIEXPORT jstring JNICALL Java_org_example_darktableandroid_nativecore_NativeCor
   const dt_mobile_status status = dt_mobile_history(session, &json);
   if(status != DT_MOBILE_OK) { dt_mobile_free_buffer(json); throw_status(env, session, status); return NULL; }
   if(!json) { throw_io(env, "native edit history is missing"); return NULL; }
-  jstring result = (*env)->NewStringUTF(env, json);
+  jstring result = new_utf8_string(env, json);
   dt_mobile_free_buffer(json);
   return result;
 }
@@ -138,6 +215,28 @@ JNIEXPORT void JNICALL Java_org_example_darktableandroid_nativecore_NativeCore_s
   if(!name) { (*env)->ReleaseStringUTFChars(env, module, operation); return; }
   dt_mobile_session *session = (dt_mobile_session *)(intptr_t)handle;
   dt_mobile_status status = dt_mobile_set_parameter(session, operation, name, value);
+  (*env)->ReleaseStringUTFChars(env, parameter, name);
+  (*env)->ReleaseStringUTFChars(env, module, operation);
+  throw_status(env, session, status);
+}
+JNIEXPORT void JNICALL Java_org_example_darktableandroid_nativecore_NativeCore_setTextParameter(JNIEnv *env, jobject self,
+  jlong handle, jstring module, jstring parameter, jstring value)
+{
+  (void)self;
+  if(!module || !parameter || !value) { throw_io(env, "module, parameter and text are required"); return; }
+  const char *operation = (*env)->GetStringUTFChars(env, module, NULL);
+  if(!operation) return;
+  const char *name = (*env)->GetStringUTFChars(env, parameter, NULL);
+  if(!name) { (*env)->ReleaseStringUTFChars(env, module, operation); return; }
+  char *text = editor_text_utf8(env, value);
+  if(!text)
+  {
+    (*env)->ReleaseStringUTFChars(env, parameter, name);
+    (*env)->ReleaseStringUTFChars(env, module, operation); return;
+  }
+  dt_mobile_session *session = (dt_mobile_session *)(intptr_t)handle;
+  const dt_mobile_status status = dt_mobile_set_text_parameter(session, operation, name, text);
+  free(text);
   (*env)->ReleaseStringUTFChars(env, parameter, name);
   (*env)->ReleaseStringUTFChars(env, module, operation);
   throw_status(env, session, status);

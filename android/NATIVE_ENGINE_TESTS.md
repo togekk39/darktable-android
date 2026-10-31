@@ -1,6 +1,51 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Android native engine execution test
 
+## Expanded editor controls: current source validation
+
+The current editor exposes the reviewed scalar and fixed-array parameters,
+curves, blending, native mask forms, retouch/spot forms, liquify point warps,
+text fields and file imports described in
+[control coverage](../mobile/CONTROL_PARITY.md). Runtime metadata depends on
+the image, module instances and native capabilities; source-policy field counts
+are not counts of independently rendered Android controls.
+
+The current validation includes:
+
+- Android production and instrumentation Kotlin compilation, 69 JVM tests in
+  19 classes (zero failures or skips), and `lintDevDebug`.
+- All seven host native CTest cases passed in 104.84 seconds, including the
+  original-engine regression in 104.77 seconds. Its RGB fixture traversed 1,143
+  advertised ordinary parameters, including live-instance and blending fields;
+  this runtime count is distinct from the source-policy field counts.
+- Production JNI compilation with the pinned AArch64/API 26 NDK, plus a host
+  JNI test using the original engine: four Unicode round trips and five invalid
+  UTF-16/NUL rejections. The host JVM uses `-Xint` because desktop darktable's
+  signal handler conflicts with HotSpot JIT; Android already omits that handler.
+- The generated-C enum and aligned-double introspection regressions.
+
+The native engine regression uses the original processing modules with a small
+RGB fixture. It traverses every advertised ordinary parameter, sets allowed
+current values through the public API and verifies exact metadata restoration
+after undo. Imported values outside the reviewed write domain must reject
+without changing metadata or history. Separate comparisons exercise actual
+pixel changes and exact undo/redo for representative expanded modules, native
+blending/mask/liquify controls, and imported LUT/overlay/raster resources. Native
+repair forms additionally have render, reset and metadata/history checks.
+The close/reopen path explicitly exports a PNG using the default color profile
+to guard against retaining unloaded colorin/colorout modules across runtimes.
+The fixture's runtime metadata lists 85 visible RGB modules. Each has specific
+numeric, curve, text or dedicated controls except legacy `colortransfer`, whose
+original desktop editor also retains only enable/disable. RAW-only modules are
+omitted for that RGB fixture.
+
+These checks do not establish execution of the new Compose instrumentation
+tests on Android, complete physical-device picker/edit/export behavior, every
+parameter's pixel effect, or new RAW/GPR coverage. Build the matching
+engine-enabled APK and execute the instrumentation classes on an ARM64 Android
+device for that evidence. Historical Android execution results below apply to
+their named source snapshots only.
+
 ## Sliders and expanded desktop controls
 
 `ParameterControlTest` exercises production numeric drag/release, native-default
@@ -36,8 +81,9 @@ are covered separately by the host fixture and are not all rendered here.
 
 Require the runner's successful counts and a JSON report whose `status` is
 `passed` and `phase` is `complete`. Compiling these tests is not execution
-evidence. See [control coverage](../mobile/CONTROL_PARITY.md) for the exact
-103-field review boundary and outstanding desktop controls.
+evidence. This historical test covers the earlier 103-field review boundary;
+see [control coverage](../mobile/CONTROL_PARITY.md) for the current scope and
+outstanding desktop controls.
 
 The source content committed locally as `ca5a4875d4` passed all 12 production
 Compose component tests and all 50 JNI phases on the official ARM64/API 28

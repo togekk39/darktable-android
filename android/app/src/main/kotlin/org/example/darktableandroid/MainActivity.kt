@@ -11,6 +11,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -201,15 +203,31 @@ private fun MobileRawApp(sourceIntent: SourceIntent?, onSourceSelected: (Uri, In
         if(tools && ready != null) ModalBottomSheet(onDismissRequest = { tools = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
             val moduleList = rememberLazyListState()
-            val shownModules = remember(ready.modules) { ready.modules.controlsFirst() }
+            var toolQuery by rememberSaveable(ready.sessionId) { mutableStateOf("") }
+            var enabledOnly by rememberSaveable(ready.sessionId) { mutableStateOf(false) }
+            val shownModules = remember(ready.modules, toolQuery, enabledOnly) {
+                filterEditingTools(ready.modules, toolQuery, enabledOnly).controlsFirst()
+            }
             LaunchedEffect(ready.sessionId, ready.selectedModule, shownModules) {
                 val index = shownModules.indexOfFirst { it.operation == ready.selectedModule }
                 if(index >= 0 && moduleList.layoutInfo.visibleItemsInfo.none { it.key == "${ready.sessionId}:${ready.selectedModule}" })
                     moduleList.animateScrollToItem(index)
             }
             Column(Modifier.fillMaxHeight(0.9f).imePadding().padding(horizontal = 24.dp)) {
-                Text(stringResource(R.string.edit_tools), style = MaterialTheme.typography.titleLarge)
-                Text(stringResource(R.string.tool_limitations), style = MaterialTheme.typography.bodySmall)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(stringResource(R.string.edit_tools), style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                    TextButton(onClick = { tools = false }) { Text(stringResource(R.string.done)) }
+                }
+                EditingToolSearch(toolQuery, { toolQuery = it }, enabledOnly, { enabledOnly = it },
+                    shownModules.size, ready.modules.size)
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = editor::undo, enabled = !busy && ready.history?.canUndo == true) {
+                        Text(stringResource(R.string.undo))
+                    }
+                    TextButton(onClick = editor::redo, enabled = !busy && ready.history?.canRedo == true) {
+                        Text(stringResource(R.string.redo))
+                    }
+                }
                 (state as? EditorState.Working)?.let { working ->
                     LinearProgressIndicator(Modifier.fillMaxWidth())
                     Text(stringResource(working.stage.labelResource()))
@@ -218,12 +236,15 @@ private fun MobileRawApp(sourceIntent: SourceIntent?, onSourceSelected: (Uri, In
                     }
                 }
                 ready.notice?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                LazyColumn(Modifier.fillMaxWidth(), state = moduleList, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                LazyColumn(Modifier.fillMaxWidth().weight(1f), state = moduleList, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if(shownModules.isEmpty()) item { Text(stringResource(R.string.tools_no_matches), Modifier.padding(vertical = 16.dp)) }
                     items(shownModules, key = { "${ready.sessionId}:${it.operation}" }) { module ->
                         ModuleControls(module, !busy, ready.selectedModule == module.operation,
                             editor::selectModule, editor::newInstance, editor::setModuleEnabled, editor::setParameter,
                             editor::setCurve, editor::setCrop, editor::setRgbCurveOptions,
-                            editor::setWhiteBalanceGains, editor::setWhiteBalanceSetting, editor::setWhiteBalanceTemperature)
+                            editor::setWhiteBalanceGains, editor::setWhiteBalanceSetting, editor::setWhiteBalanceTemperature,
+                            editor::setTextParameter, controlQuery = toolQuery,
+                            onFileParameter = editor::importToolFile, sessionId = ready.sessionId)
                     }
                 }
             }
@@ -281,10 +302,15 @@ internal fun ModuleControls(
     onWhiteBalanceGains: (String, FloatArray) -> Unit,
     onWhiteBalanceSetting: (String, Int) -> Unit,
     onWhiteBalanceTemperature: (String, Double, Double) -> Unit,
+    onTextParameter: (String, String, String) -> Unit = { _, _, _ -> },
+    controlQuery: String = "",
+    onFileParameter: (String, String, Uri, Long) -> Unit = { _, _, _, _ -> },
+    sessionId: Long = -1L,
 ) {
     var expanded by rememberSaveable(module.operation) { mutableStateOf(false) }
     LaunchedEffect(selected) { if(selected) expanded = true }
     val disclosure = stringResource(if(expanded) R.string.module_collapse_controls else R.string.module_expand_controls, module.name)
+    val operation = module.operation.substringBefore('@')
     OutlinedCard(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -304,7 +330,13 @@ internal fun ModuleControls(
                     onEnabled(module.operation, it)
                 }, enabled = editable && module.canDisable)
             }
-            if(!module.hasEditableControls) Text(stringResource(R.string.no_numeric_parameters), style = MaterialTheme.typography.bodySmall)
+            if(operation == "liquify")
+                Text(stringResource(if(module.parameters.any { it.name.startsWith("liquify.") })
+                    R.string.liquify_point_scope else R.string.liquify_canvas_scope), style = MaterialTheme.typography.bodySmall)
+            if(operation == "colortransfer")
+                Text(stringResource(R.string.colortransfer_scope), style = MaterialTheme.typography.bodySmall)
+            else if(!module.hasEditableControls)
+                Text(stringResource(R.string.no_numeric_parameters), style = MaterialTheme.typography.bodySmall)
             if(expanded) {
                 module.crop?.let { crop ->
                     CropEditor(crop, editable) { bounds -> onCrop(module.operation, bounds) }
@@ -323,9 +355,57 @@ internal fun ModuleControls(
                 if(module.curves.isNotEmpty()) ModuleCurves(module.curves, editable) { channel, interpolation, nodes ->
                     onCurve(module.operation, channel, interpolation, nodes)
                 }
-                module.parameters.forEach { parameter ->
+                val controlWords = controlSearchWords(module, controlQuery)
+                val visibleParameters = module.parameters.filter { matchesControlSearch(controlWords, it.name, it.label) }
+                val adjustments = visibleParameters.filterNot { it.name.startsWith("blend.") || it.name.startsWith("mask.") }
+                val blending = visibleParameters.filter { it.name.startsWith("blend.") }
+                val masks = visibleParameters.filter { it.name.startsWith("mask.") }
+                // Original liquify node deletion compacts indexes. Recreate its drafts
+                // after native changes so an old index cannot address another warp.
+                val controlIdentity = if(operation == "liquify") module.parameters else null
+                if(adjustments.isNotEmpty()) {
+                    Text(stringResource(R.string.module_adjustments), style = MaterialTheme.typography.titleSmall)
+                    adjustments.forEach { parameter ->
+                        key(parameter.name, controlIdentity) {
+                            ParameterControl(parameter, editable) { onParameter(module.operation, parameter.name, it) }
+                        }
+                    }
+                }
+                module.textParameters.filter { matchesControlSearch(controlWords, it.name, it.label) }.forEach { parameter ->
                     key(parameter.name) {
-                        ParameterControl(parameter, editable) { onParameter(module.operation, parameter.name, it) }
+                        if(parameter.isFile) FileParameterControl(parameter, editable, sessionId) { uri, expectedSessionId ->
+                            onFileParameter(module.operation, parameter.name, uri, expectedSessionId)
+                        } else TextParameterControl(parameter, editable) { onTextParameter(module.operation, parameter.name, it) }
+                    }
+                }
+                if(blending.isNotEmpty()) {
+                    HorizontalDivider()
+                    Text(stringResource(R.string.module_blending), style = MaterialTheme.typography.titleSmall)
+                    blending.forEach { parameter ->
+                        key(parameter.name) {
+                            ParameterControl(parameter, editable) { onParameter(module.operation, parameter.name, it) }
+                        }
+                    }
+                }
+                if(masks.isNotEmpty()) {
+                    HorizontalDivider()
+                    val shapeTitle = if(module.operation.substringBefore('@') in setOf("retouch", "spots"))
+                        R.string.module_repair_shapes else R.string.module_drawn_masks
+                    Text(stringResource(shapeTitle), style = MaterialTheme.typography.titleSmall)
+                    Text(stringResource(R.string.mask_geometry_hint), style = MaterialTheme.typography.bodySmall)
+                    MaskDiagram(module.parameters.filter { it.name.startsWith("mask.") })
+                    masks.forEach { parameter ->
+                        key(parameter.name) {
+                            ParameterControl(parameter, editable) { onParameter(module.operation, parameter.name, it) }
+                        }
+                    }
+                }
+                if(module.canReset) {
+                    HorizontalDivider()
+                    val description = stringResource(R.string.module_reset_description, module.name)
+                    OutlinedButton(onClick = { onParameter(module.operation, "module.reset", 1.0) }, enabled = editable,
+                        modifier = Modifier.semantics { contentDescription = description }) {
+                        Text(stringResource(R.string.module_reset))
                     }
                 }
                 if(module.canCreateInstance) {
@@ -343,6 +423,9 @@ internal fun ModuleControls(
 internal fun ParameterControl(parameter: ModuleParameter, editable: Boolean, onValue: (Double) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         when {
+            parameter.type == "action" -> Button(onClick = { onValue(1.0) }, enabled = editable) {
+                Text(parameter.label)
+            }
             parameter.type == "bool" || parameter.type == "boolean" -> Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(parameter.label, Modifier.weight(1f))
                 Switch(checked = parameter.value != 0.0, onCheckedChange = { onValue(if(it) 1.0 else 0.0) },
@@ -392,7 +475,7 @@ internal fun ParameterControl(parameter: ModuleParameter, editable: Boolean, onV
                 }
             }
         }
-        parameter.resetValue()?.let { default ->
+        parameter.resetValue()?.takeIf { parameter.type != "action" }?.let { default ->
             val description = stringResource(R.string.parameter_reset_description, parameter.label)
             TextButton(onClick = { onValue(default) }, enabled = editable && default != parameter.value,
                 modifier = Modifier.semantics { contentDescription = description }) {

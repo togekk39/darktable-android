@@ -6,6 +6,8 @@
 #include "develop/imageop.h"
 #include <math.h>
 #include <string.h>
+#include "dt_mobile_array_policy.h"
+#include "dt_mobile_extended_parameter_policy.h"
 
 /* Introspection describes storage, not the invariants maintained by a desktop
  * widget. In particular, curve counts, indexes and coordinates cannot safely be
@@ -188,9 +190,11 @@ static inline int dt_mobile_parameter_allowed(const char *operation, const char 
     { "colorbalancergb", "brilliance_highlights", DT_INTROSPECTION_TYPE_FLOAT },
     { "colorbalancergb", "saturation_formula", DT_INTROSPECTION_TYPE_ENUM },
   };
-  /* Only exact reviewed paths match below, including four explicitly named
-   * nested members. Arrays/counts and all other nested members stay private. */
-  if(!operation || !parameter || strchr(parameter, '[')) return 0;
+  /* Scalars and fixed-array components require exact reviewed identities and
+   * storage types. Structural counts and arbitrary nested fields stay private. */
+  if(!operation || !parameter) return 0;
+  if(dt_mobile_array_parameter_allowed(operation, parameter, type)
+     || dt_mobile_extended_parameter_allowed(operation, parameter, type)) return 1;
   for(size_t k = 0; k < sizeof(approved) / sizeof(approved[0]); k++)
     if(type == approved[k].type && !strcmp(operation, approved[k].operation)
        && !strcmp(parameter, approved[k].parameter)) return 1;
@@ -204,6 +208,8 @@ static inline int dt_mobile_parameter_allowed(const char *operation, const char 
 static inline void dt_mobile_parameter_limits(const char *operation, const char *parameter,
                                               long double *minimum, long double *maximum)
 {
+  dt_mobile_array_parameter_limits(operation, parameter, minimum, maximum);
+  dt_mobile_extended_parameter_limits(operation, parameter, minimum, maximum);
   static const struct {
     const char *operation, *parameter;
     float minimum, maximum;
@@ -228,6 +234,7 @@ static inline void dt_mobile_parameter_limits(const char *operation, const char 
 static inline int dt_mobile_parameter_slider_limits(const char *operation, const char *parameter,
                                                     double *minimum, double *maximum)
 {
+  if(dt_mobile_extended_parameter_slider_limits(operation, parameter, minimum, maximum)) return 1;
   static const struct {
     const char *operation, *parameter;
     double minimum, maximum;
@@ -297,12 +304,15 @@ static inline const char *dt_mobile_parameter_label(const char *operation, const
   for(size_t k = 0; k < sizeof(labels) / sizeof(labels[0]); k++)
     if(!strcmp(operation, labels[k].operation) && !strcmp(parameter, labels[k].parameter))
       return labels[k].label;
-  return fallback;
+  return dt_mobile_array_parameter_label(operation, parameter,
+      dt_mobile_extended_parameter_label(operation, parameter, fallback));
 }
 
 static inline int dt_mobile_parameter_value_valid(dt_iop_module_t *module,
                                                   const char *parameter, double value)
 {
+  if(!dt_mobile_array_parameter_value_valid(module, parameter, value)
+     || !dt_mobile_extended_parameter_value_valid(module, parameter, value)) return 0;
   if(strcmp(module->op, "exposure")
      || (strcmp(parameter, "black") && strcmp(parameter, "exposure"))) return 1;
   if(!module->get_f || !module->get_p) return 0;

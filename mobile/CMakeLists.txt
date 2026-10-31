@@ -138,6 +138,11 @@ if(DT_MOBILE_BUILD_TESTS)
     target_link_libraries(dt_mobile_api_test PRIVATE dt_mobile_core)
   endif()
   add_test(NAME dt_mobile_api_test COMMAND dt_mobile_api_test)
+  add_executable(dt_mobile_zonemap_test tests/dt_mobile_zonemap_test.c)
+  target_include_directories(dt_mobile_zonemap_test PRIVATE ../src)
+  target_compile_features(dt_mobile_zonemap_test PRIVATE c_std_11)
+  target_compile_options(dt_mobile_zonemap_test PRIVATE -Wall -Wextra -Werror)
+  add_test(NAME dt_mobile_zonemap_test COMMAND dt_mobile_zonemap_test)
   # This target substitutes only the adapter boundary, and does not claim RAW
   # decoding coverage. Real pixelpipe and VC-5 tests are separate targets below.
   add_executable(dt_mobile_mock_api_test core/dt_mobile.c
@@ -231,9 +236,9 @@ if(DT_MOBILE_BUILD_TESTS)
       "${CMAKE_CURRENT_BINARY_DIR}/dt-mobile-engine-output.png")
     set_tests_properties(dt_mobile_engine_test PROPERTIES
       ENVIRONMENT "DT_MOBILE_DATADIR=${DARKTABLE_DATADIR};DT_MOBILE_MODULEDIR=${DARKTABLE_LIBDIR};OMP_NUM_THREADS=2"
-      # This real-engine fixture now covers 77 additional scalar/enum controls,
-      # native history and original-pipeline endpoint/undo renders. Allow the
-      # same coverage in Debug builds and on slower CI runners.
+      # This fixture covers reviewed scalar/array controls, native form history,
+      # file imports and original-pipeline pixel/undo renders. Allow the same
+      # coverage in Debug builds and on slower CI runners.
       TIMEOUT 600)
     if(DT_MOBILE_WITH_GPR_SDK)
       add_executable(dt_mobile_rawspeed_gpr_test tests/dt_mobile_rawspeed_gpr_test.cpp)
