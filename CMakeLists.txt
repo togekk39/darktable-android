@@ -37,22 +37,6 @@ endif()
 
 include(DefineOptions.cmake)
 
-option(BUILD_MOBILE_ENGINE "Build the JNI/mobile adapter against libdarktable" OFF)
-option(BUILD_MOBILE_LIBRARY_ONLY "Build the native editor libraries, processing modules and runtime data without desktop applications" OFF)
-if(BUILD_MOBILE_LIBRARY_ONLY)
-  set(BUILD_MOBILE_ENGINE ON)
-  set(BUILD_TOOLS OFF)
-  set(BUILD_RS_IDENTIFY OFF)
-  set(BINARY_PACKAGE_BUILD ON)
-endif()
-
-if(ANDROID AND BUILD_MOBILE_LIBRARY_ONLY)
-  if(CMAKE_VERSION VERSION_LESS 3.22.1)
-    message(FATAL_ERROR "The Android engine build requires CMake 3.22.1 or newer")
-  endif()
-  include(mobile/cmake/AndroidEnginePackages.cmake)
-endif()
-
 # Include GNUInstallDirs, which sets sensible defaults for install directories.
 # See https://cmake.org/cmake/help/v3.0/module/GNUInstallDirs.html for further information.
 # These values can be easily overridden if required.
@@ -161,7 +145,6 @@ if(WIN32)
   set(USE_COLORD OFF)
   set(USE_KWALLET OFF)
   set(BUILD_CMSTEST OFF)
-  set(BUILD_PRINT OFF)
   set(TESTBUILD_OPENCL_PROGRAMS OFF)
   if(BUILD_MSYS2_INSTALL)
     add_definitions(-DMSYS2_INSTALL)
@@ -274,11 +257,9 @@ message(STATUS "Looking for external programs")
 find_program(perl_BIN perl REQUIRED)
 message(STATUS "Found perl")
 
-# Desktop integration files are not installed by the native editor build.
-if(NOT BUILD_MOBILE_LIBRARY_ONLY)
-  find_program(intltool_merge_BIN intltool-merge REQUIRED)
-  message(STATUS "Found intltool-merge")
-endif()
+# we need intltool-merge for org.darktable.darktable.desktop
+find_program(intltool_merge_BIN intltool-merge REQUIRED)
+message(STATUS "Found intltool-merge")
 
 # we need desktop-file-validate to check org.darktable.darktable.desktop
 find_program(desktop_file_validate_BIN desktop-file-validate)
@@ -304,6 +285,9 @@ endif(VALIDATE_APPDATA_FILE)
 if(TESTBUILD_OPENCL_PROGRAMS)
   set(TESTBUILD_OPENCL_PROGRAMS OFF)
 
+  # LLVM's Findzstd.cmake defines only some of zstd's targets, which makes a
+  # later find_package(zstd CONFIG) (via OpenEXR) fail; define them all first
+  find_package(zstd CONFIG QUIET)
   find_package(LLVM CONFIG)
 
   if(LLVM_FOUND)
@@ -350,16 +334,6 @@ if(USE_OPENCL AND TESTBUILD_OPENCL_PROGRAMS)
 elseif(USE_OPENCL)
   message(STATUS "Test-compilation of OpenCL programs is disabled.")
 endif()
-
-# we need jsonschema to check noiseprofiles.json
-find_program(jsonschema_BIN jsonschema)
-if(${jsonschema_BIN} STREQUAL "jsonschema_BIN-NOTFOUND")
-  message(STATUS "Missing jsonschema, problems in noiseprofiles.json might go unnoticed")
-  set(VALIDATE_JSON 0)
-else(${jsonschema_BIN} STREQUAL "jsonschema_BIN-NOTFOUND")
-  message(STATUS "Found jsonschema")
-  set(VALIDATE_JSON 1)
-endif(${jsonschema_BIN} STREQUAL "jsonschema_BIN-NOTFOUND")
 
 # we need an XSLT interpreter to generate preferences_gen.h and darktablerc
 find_program(Xsltproc_BIN xsltproc)
@@ -446,6 +420,15 @@ endif()
 
 if(BUILD_TESTING)
   find_package(cmocka 1.1.0 CONFIG REQUIRED)
+  # cmocka 1.x's config exports a bare "cmocka" target; 2.x exports only the
+  # namespaced "cmocka::cmocka". Alias one to the other so test CMakeLists can
+  # name either and build against both versions -- without this, every
+  # add_cmocka_test() saying plain "cmocka" fails to link on cmocka 2.x.
+  if(TARGET cmocka::cmocka AND NOT TARGET cmocka)
+    add_library(cmocka ALIAS cmocka::cmocka)
+  elseif(TARGET cmocka AND NOT TARGET cmocka::cmocka)
+    add_library(cmocka::cmocka ALIAS cmocka)
+  endif()
   include(AddCMockaTest)
   include(AddCMockaMockTest)
   include_directories(${CMOCKA_INCLUDE_DIR} include)
@@ -469,25 +452,16 @@ set(CMAKE_INSTALL_DEFAULT_COMPONENT_NAME DTApplication)
 # lets continue into build directories
 include(data/supported_extensions.cmake) # this file needs to be included first as it gets amended in bin/
 add_subdirectory(src "${DARKTABLE_BINDIR}") # directory needs to be there before data directory so that the correct CSS file gets installed
-if(BUILD_MOBILE_ENGINE)
-  set(DT_MOBILE_WITH_DARKTABLE_ENGINE ON CACHE BOOL "" FORCE)
-  if(DT_MOBILE_BUILD_TESTS)
-    enable_testing()
-  endif()
-  add_subdirectory(mobile)
-endif()
 add_subdirectory(data "${DARKTABLE_DATADIR}")
-if(NOT BUILD_MOBILE_LIBRARY_ONLY)
-  add_subdirectory(doc)
-  add_subdirectory(tools "${DARKTABLE_DATADIR}/tools")
+add_subdirectory(doc)
+add_subdirectory(tools "${DARKTABLE_DATADIR}/tools")
 
 # This contains fixup_bundle
 # And adding a separate subderectory as a last one will make sure
 # that fixup_bundle will run _after_ all files has been installed
-  add_subdirectory(packaging)
+add_subdirectory(packaging)
 
-  include(cmake/darktable-packaging.cmake)
-endif()
+include(cmake/darktable-packaging.cmake)
 
 # uninstall target
 configure_file(

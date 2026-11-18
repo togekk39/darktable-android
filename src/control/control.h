@@ -55,6 +55,8 @@ gboolean dt_control_configure(GtkWidget *da, GdkEventConfigure *event, gpointer 
 void dt_control_log(const char *msg, ...) __attribute__((format(printf, 1, 2)));
 void dt_control_log_ack_all(void);
 GList *dt_control_log_history_get_entries(void);
+gboolean dt_control_log_history_has_unread_messages(void);
+void dt_control_log_history_clear_unread_messages(void);
 void dt_toast_log(const char *msg, ...) __attribute__((format(printf, 1, 2)));
 void dt_toast_markup_log(const char *msg, ...) __attribute__((format(printf, 1, 2)));
 void dt_control_busy_enter();
@@ -69,6 +71,11 @@ void dt_control_set_temp_cursor(const char *cursor_name);
 // return to the cursor most rececently set by dt_control_change_cursor
 void dt_control_clear_temp_cursor();
 void dt_control_change_cursor(const char *cursor_name);
+/** Log cursor ownership/lifecycle state when -d input is enabled. */
+void dt_control_cursor_debug(const char *owner,
+                            const char *action,
+                            GtkWidget *widget,
+                            const char *cursor_name);
 void dt_control_write_sidecar_files(void);
 void dt_control_delete_images(void);
 
@@ -99,6 +106,8 @@ void dt_control_navigation_redraw(void);
 void dt_ctl_switch_mode(void);
 void dt_ctl_switch_mode_to(const char *mode);
 void dt_ctl_switch_mode_to_by_view(const dt_view_t *view);
+/* Rebuild an existing view without changing the selected mode. */
+void dt_ctl_reload_view(const dt_view_t *view);
 
 struct dt_control_t;
 
@@ -169,6 +178,7 @@ typedef struct dt_control_t
 
   // persistent log history
   GList *log_history;                     // GList of log history entries (newest last)
+  gboolean unread_messages;               // true when some unread messages are present
   dt_pthread_mutex_t log_history_mutex;   // mutex for history access
 
   // gui settings
@@ -243,6 +253,8 @@ void dt_control_cleanup(const gboolean withgui);
 
 // call this to quit dt
 void dt_control_quit(void);
+/* Apply pending quit and relaunch the process after cleanup. */
+void dt_control_restart(void);
 
 /** get threadsafe running state. */
 gboolean dt_control_running(void);

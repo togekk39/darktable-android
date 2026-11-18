@@ -19,6 +19,7 @@
 #include "bauhaus/bauhaus.h"
 #include "common/colorspaces.h"
 #include "common/darktable.h"
+#include "common/dng_opcode.h"
 #include "common/interpolation.h"
 #include "common/opencl.h"
 #include "common/image_cache.h"
@@ -47,7 +48,7 @@
 #include <string.h>
 #include <time.h>
 
-DT_MODULE_INTROSPECTION(6, dt_iop_demosaic_params_t)
+DT_MODULE_INTROSPECTION(8, dt_iop_demosaic_params_t)
 
 #define DT_DEMOSAIC_XTRANS 1024 // masks for non-Bayer demosaic ops
 #define DT_DEMOSAIC_DUAL 2048   // masks for dual demosaicing methods
@@ -145,15 +146,31 @@ typedef struct dt_iop_demosaic_params_t
   dt_iop_demosaic_greeneq_t green_eq;           // $DEFAULT: DT_IOP_GREEN_EQ_NO $DESCRIPTION: "match greens"
   float median_thrs;                            // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "edge threshold"
   dt_iop_demosaic_smooth_t color_smoothing;     // $DEFAULT: DT_DEMOSAIC_SMOOTH_OFF $DESCRIPTION: "color smoothing"
+
+  /** Note that the default DT_IOP_DEMOSAIC_RCD is safe for all sensors as it falls back to
+      DT_IOP_DEMOSAIC_MARKESTEIJN on xtrans and DT_IOP_DEMOSAIC_MONO on true monochromes
+  */
   dt_iop_demosaic_method_t demosaicing_method;  // $DEFAULT: DT_IOP_DEMOSAIC_RCD $DESCRIPTION: "method"
   dt_iop_demosaic_lmmse_t lmmse_refine;         // $DEFAULT: DT_LMMSE_REFINE_1 $DESCRIPTION: "LMMSE refine"
   float dual_thrs;                              // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.2 $DESCRIPTION: "dual threshold"
-  float cs_radius;                              // $MIN: 0.0 $MAX: 1.5 $DEFAULT: 0.0 $DESCRIPTION: "radius"
-  float cs_thrs;                                // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.40 $DESCRIPTION: "contrast sensitivity"
+
+  // allmost all tested sensor/lens combination have a radius of at least 0.5 so let's use that as default.
+  float cs_radius;                              // $MIN: 0.0 $MAX: 1.5 $DEFAULT: 0.5 $DESCRIPTION: "radius"
+
+  /** 0.4 as default is pretty much on the high side, it's corrected to a more realistic value
+      based on ISO and sensor resolution.
+      Those values are safe for almost all sensors so no artifacts because of high chroma noise are introduced.
+  */
+  float cs_thrs;                                // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.4 $DESCRIPTION: "contrast sensitivity"
+
+  // Currently we can't auto-calculate such border data
   float cs_boost;                               // $MIN: 0.0 $MAX: 1.5 $DEFAULT: 0.0 $DESCRIPTION: "corner boost"
   int cs_iter;                                  // $MIN: 1 $MAX: 25 $DEFAULT: 8 $DESCRIPTION: "iterations"
   float cs_center;                              // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "sharp center"
-  gboolean cs_enabled;                          // $DEFAULT: FALSE $DESCRIPTION: "capture sharpen"
+  gboolean cs_enabled;                          // $DEFAULT: FALSE $DESCRIPTION: "enabled"
+  float moire_thrs;                             // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "moire threshold"
+  float moire_mix;                              // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "moire mix"
+  gboolean dng_gainmap;                         // $DEFAULT: TRUE $DESCRIPTION: "DNG GainMap"
 } dt_iop_demosaic_params_t;
 
 typedef struct dt_iop_demosaic_gui_data_t
@@ -177,8 +194,8 @@ typedef struct dt_iop_demosaic_gui_data_t
   gboolean cs_mask;
   gboolean dual_mask;
   gboolean cs_boost_mask;
-  gboolean autoradius;
-  gboolean autothrs;
+  gboolean autotune_request;
+  gboolean autotune_result;
   float new_radius;
   float new_thrs;
 } dt_iop_demosaic_gui_data_t;
@@ -228,6 +245,35 @@ typedef struct dt_iop_demosaic_global_data_t
   int kernel_rcd_step_4_1;
   int kernel_rcd_step_4_2;
   int kernel_rcd_step_4_3;
+  int kernel_amaze_init;
+  int kernel_amaze_grad;
+  int kernel_amaze_cd;
+  int kernel_amaze_cd_bound;
+  int kernel_amaze_vote;
+  int kernel_amaze_hvwt;
+  int kernel_amaze_nyquist2;
+  int kernel_amaze_area;
+  int kernel_amaze_green;
+  int kernel_amaze_nyquist_refine;
+  int kernel_amaze_diag;
+  int kernel_amaze_rbint;
+  int kernel_amaze_green_diag;
+  int kernel_amaze_chroma;
+  int kernel_amaze_output;
+  int kernel_lmmse_init;
+  int kernel_lmmse_diff;
+  int kernel_lmmse_lowpass;
+  int kernel_lmmse_interp;
+  int kernel_lmmse_planes;
+  int kernel_lmmse_rb_at_g;
+  int kernel_lmmse_rb_at_rb;
+  int kernel_lmmse_median;
+  int kernel_lmmse_median_apply;
+  int kernel_lmmse_fill;
+  int kernel_lmmse_refine_g;
+  int kernel_lmmse_refine_rb_at_g;
+  int kernel_lmmse_refine_rb_at_rb;
+  int kernel_lmmse_output;
   int kernel_demosaic_box3;
   int kernel_write_blended_dual;
   int gaussian_9x9_mul;
@@ -236,7 +282,9 @@ typedef struct dt_iop_demosaic_global_data_t
   int modify_blend;
   int show_blend_mask;
   int capture_result;
+  int dilate_mask;
   int final_blend;
+  int capture_radius;
   float *gauss_coeffs;
 } dt_iop_demosaic_global_data_t;
 
@@ -255,6 +303,7 @@ typedef struct dt_iop_demosaic_data_t
   int cs_iter;
   float cs_center;
   gboolean cs_enabled;
+  gboolean dng_gainmap;
 } dt_iop_demosaic_data_t;
 
 static gboolean _get_thumb_quality(const int width, const int height)
@@ -268,20 +317,16 @@ static gboolean _get_thumb_quality(const int width, const int height)
 }
 
 // can we avoid full demosaicing and use a fast interpolator instead?
-static gboolean _demosaic_full(const dt_dev_pixelpipe_iop_t *const piece,
-                               const dt_image_t *const img,
-                               const dt_iop_roi_t *const roi_out)
+static gboolean _demosaic_full(const dt_dev_pixelpipe_t *const pipe,
+                               const dt_image_t *const img)
 {
   if((img->flags & DT_IMAGE_4BAYER)   // half_size_f doesn't support 4bayer images
       || dt_image_is_mono_sraw(img)
-      || piece->pipe->want_detail_mask)
+      || pipe->want_detail_mask)
     return TRUE;
 
-  if(dt_pipe_is_thumb(piece->pipe))
-    return _get_thumb_quality(roi_out->width, roi_out->height);
-
-  if(dt_pipe_is_preview(piece->pipe))
-    return roi_out->scale > (piece->pipe->dsc.filters == 9u ? 0.667f : 0.5f);
+  if(dt_pipe_is_thumb(pipe))
+    return _get_thumb_quality(pipe->final_width, pipe->final_height);
 
   return TRUE;
 }
@@ -303,6 +348,8 @@ void amaze_demosaic(const float *const in,
 #include "iop/demosaicing/lmmse.c"
 #include "iop/demosaicing/capture.c"
 #include "iop/demosaicing/dual.c"
+#include "iop/demosaicing/amaze_cl.c"
+#include "iop/demosaicing/lmmse_cl.c"
 
 const char *name()
 {
@@ -342,6 +389,43 @@ int legacy_params(dt_iop_module_t *self,
                   int32_t *new_params_size,
                   int *new_version)
 {
+  typedef struct dt_iop_demosaic_params_v8_t
+  {
+    dt_iop_demosaic_greeneq_t green_eq;
+    float median_thrs;
+    dt_iop_demosaic_smooth_t color_smoothing;
+    dt_iop_demosaic_method_t demosaicing_method;
+    dt_iop_demosaic_lmmse_t lmmse_refine;
+    float dual_thrs;
+    float cs_radius;
+    float cs_thrs;
+    float cs_boost;
+    int cs_iter;
+    float cs_center;
+    gboolean cs_enabled;
+    float moire_thrs;
+    float moire_mix;
+    gboolean dng_gainmap;
+  } dt_iop_demosaic_params_v8_t;
+
+  typedef struct dt_iop_demosaic_params_v7_t
+  {
+    dt_iop_demosaic_greeneq_t green_eq;
+    float median_thrs;
+    dt_iop_demosaic_smooth_t color_smoothing;
+    dt_iop_demosaic_method_t demosaicing_method;
+    dt_iop_demosaic_lmmse_t lmmse_refine;
+    float dual_thrs;
+    float cs_radius;
+    float cs_thrs;
+    float cs_boost;
+    int cs_iter;
+    float cs_center;
+    gboolean cs_enabled;
+    float moire_thrs;
+    float moire_mix;
+  } dt_iop_demosaic_params_v7_t;
+
   typedef struct dt_iop_demosaic_params_v6_t
   {
     dt_iop_demosaic_greeneq_t green_eq;
@@ -460,6 +544,38 @@ int legacy_params(dt_iop_module_t *self,
    return 0;
   }
 
+  if(old_version == 6)
+  {
+    const dt_iop_demosaic_params_v6_t *o = (dt_iop_demosaic_params_v6_t *)old_params;
+    dt_iop_demosaic_params_v7_t *n = malloc(sizeof(dt_iop_demosaic_params_v7_t));
+    memcpy(n, o, sizeof *o);
+
+    n->moire_thrs = 0.0f;
+    n->moire_mix = 0.0f;
+
+    *new_params = n;
+    *new_params_size = sizeof(dt_iop_demosaic_params_v7_t);
+    *new_version = 7;
+   return 0;
+  }
+
+  if(old_version == 7)
+  {
+    const dt_iop_demosaic_params_v7_t *o = (dt_iop_demosaic_params_v7_t *)old_params;
+    dt_iop_demosaic_params_v8_t *n = malloc(sizeof(dt_iop_demosaic_params_v8_t));
+    memcpy(n, o, sizeof *o);
+
+    /* An existing edit was developed without the OpcodeList3 GainMap, so leave
+       it alone: switching it on here would silently change how every already
+       processed file carrying one looks. New edits default to TRUE. */
+    n->dng_gainmap = FALSE;
+
+    *new_params = n;
+    *new_params_size = sizeof(dt_iop_demosaic_params_v8_t);
+    *new_version = 8;
+    return 0;
+  }
+
   return 1;
 }
 
@@ -571,16 +687,20 @@ static gboolean _tiling_requirements(dt_iop_module_t *self,
       border = 10;
       break;
     case DT_IOP_DEMOSAIC_LMMSE:
-      perpix = 2;
-      border = 10;
+      // the OpenCL code keeps 6 planes with the 4 pixel border of the CPU
+      // tiles, and its passes reach 25 pixels from a tile edge in refine mode
+      perpix = gpu ? 8 : 2;
+      border = gpu ? 26 : 10;
       break;
     case DT_IOP_DEMOSAIC_PPG:
       perpix = 4;
       border = 8;
       break;
     case DT_IOP_DEMOSAIC_AMAZE:
-      perpix = 2;
-      border = 6;
+      // the OpenCL code keeps 12 planes, each CPU tile stored on its own
+      // (160x160 per 128x128 pixels), plus input and output
+      perpix = gpu ? 21 : 2;
+      border = gpu ? 16 : 6;
       break;
     case DT_IOP_DEMOSAIC_VNG4:
       perpix = 4;
@@ -610,7 +730,7 @@ static gboolean _tiling_requirements(dt_iop_module_t *self,
   if(capture)
   {
     perpix = MAX(perpix, 6);
-    border = MAX(border, 18);
+    border = border + 6;
   }
 
   const int per_row = perpix * sizeof(float) * width;
@@ -636,6 +756,58 @@ static gboolean _tiling_requirements(dt_iop_module_t *self,
   return TRUE;
 }
 
+/* The DNG OpcodeList3 GainMap applies "just after the image has been
+   demosaiced" (DNG 1.7.1, tag 51022), which is here. Only CFA raws are handled
+   in this module; linear DNGs never reach a demosaicer and are corrected in
+   rawprepare instead, so the two paths cannot both fire on the same image. */
+static const dt_dng_gain_map_t *_gain_map(dt_iop_module_t *self,
+                                          dt_dev_pixelpipe_iop_t *const piece)
+{
+  const dt_iop_demosaic_data_t *d = piece->data;
+  if(!d->dng_gainmap || piece->filters == 0) return NULL;
+  return dt_dng_gain_map_opcode3(&self->dev->image_storage);
+}
+
+/* Apply the map to a 4-channel float buffer covering roi, in raw sensor
+   coordinates. step is how many raw pixels one buffer pixel spans. */
+static void _apply_gain_map(dt_iop_module_t *self,
+                            dt_dev_pixelpipe_iop_t *const piece,
+                            const dt_dng_gain_map_t *gm,
+                            float *const buf,
+                            const dt_iop_roi_t *const roi,
+                            const int devid)
+{
+  const dt_image_t *const image = &self->dev->image_storage;
+  const float x0 = (float)image->crop_x + roi->x / roi->scale;
+  const float y0 = (float)image->crop_y + roi->y / roi->scale;
+  const float step = 1.0f / roi->scale;
+  dt_print_pipe(DT_DEBUG_PIPE, "dng gainmap", piece->pipe, self, devid, roi, NULL,
+                "OpcodeList3 %ux%u map, %u planes; raw origin=%.1f,%.1f step=%.3f",
+                gm->map_points_h, gm->map_points_v, gm->map_planes, x0, y0, step);
+  dt_dng_gain_map_apply(gm, image, buf, buf, roi->width, roi->height, x0, y0, step);
+}
+
+#ifdef HAVE_OPENCL
+static int _apply_gain_map_cl(dt_iop_module_t *self,
+                              dt_dev_pixelpipe_iop_t *const piece,
+                              const dt_dng_gain_map_t *gm,
+                              cl_mem src,
+                              cl_mem dst,
+                              const dt_iop_roi_t *const roi,
+                              const int devid)
+{
+  const dt_image_t *const image = &self->dev->image_storage;
+  const float x0 = (float)image->crop_x + roi->x / roi->scale;
+  const float y0 = (float)image->crop_y + roi->y / roi->scale;
+  const float step = 1.0f / roi->scale;
+  dt_print_pipe(DT_DEBUG_PIPE, "dng gainmap", piece->pipe, self, devid, roi, NULL,
+                "OpcodeList3 %ux%u map, %u planes; raw origin=%.1f,%.1f step=%.3f",
+                gm->map_points_h, gm->map_points_v, gm->map_planes, x0, y0, step);
+  return dt_dng_gain_map_apply_cl(devid, gm, image, src, dst,
+                                  roi->width, roi->height, x0, y0, step);
+}
+#endif
+
 void process(dt_iop_module_t *self,
              dt_dev_pixelpipe_iop_t *const piece,
              const void *const i,
@@ -652,11 +824,11 @@ void process(dt_iop_module_t *self,
   const gboolean fullpipe = dt_pipe_is_full(pipe);
 
   const uint8_t(*const xtrans)[6] = piece->xtrans;
-  const dt_iop_demosaic_data_t *d = piece->data;
-  const dt_iop_demosaic_gui_data_t *g = self->gui_data;
+  dt_iop_demosaic_data_t *d = piece->data;
+  dt_iop_demosaic_gui_data_t *g = self->gui_data;
   const uint32_t filters = piece->filters;
 
-  const gboolean fullscale = _demosaic_full(piece, img, roi_out);
+  const gboolean fullscale = _demosaic_full(pipe, img);
   const gboolean is_xtrans = filters == 9u;
   const gboolean is_4bayer = img->flags & DT_IMAGE_4BAYER;
   const gboolean is_bayer = !is_4bayer && !is_xtrans && filters != 0;
@@ -674,8 +846,10 @@ void process(dt_iop_module_t *self,
   gboolean show_dual = FALSE;
   gboolean show_capture = FALSE;
   gboolean show_sigma = FALSE;
-  if(self->dev->gui_attached && fullpipe)
+  const gboolean full_gui = self->dev->gui_attached && fullpipe;
+  if(full_gui)
   {
+    dt_iop_gui_enter_critical_section(self);
     if(g->dual_mask)
     {
       show_dual = TRUE;
@@ -691,6 +865,7 @@ void process(dt_iop_module_t *self,
       show_sigma = TRUE;
       pipe->mask_display = DT_DEV_PIXELPIPE_DISPLAY_MASK;
     }
+    dt_iop_gui_leave_critical_section(self);
   }
 
   float *in = (float *)i;
@@ -703,6 +878,12 @@ void process(dt_iop_module_t *self,
       dt_iop_clip_and_zoom_demosaic_third_size_xtrans_f((float *)o, in, roi_out, roi_in, roi_out->width, width, xtrans);
     else
       dt_iop_clip_and_zoom_demosaic_half_size_f((float *)o, in, roi_out, roi_in, roi_out->width, width, filters);
+
+    /* this path never materialises a full scale buffer, so the GainMap is
+       applied to the approximated output instead */
+    const dt_dng_gain_map_t *gm_fast = _gain_map(self, piece);
+    if(gm_fast)
+      _apply_gain_map(self, piece, gm_fast, (float *)o, roi_out, DT_DEVICE_CPU);
 
     return;
   }
@@ -718,14 +899,58 @@ void process(dt_iop_module_t *self,
 
   const float procmax = dt_iop_get_processed_maximum(piece);
   const float procmin = dt_iop_get_processed_minimum(piece);
-  const int exif_iso = img->exif_iso;
+  const float exif_iso = img->exif_iso;
 
   if(do_capture)
   {
-    if(_noise_requested(self, piece))
-      _capture_noise(self, piece);
-    if(_radius_requested(self, piece))
-      _capture_radius(self, piece, in, roi_in, xtrans, filters);
+    /** This is a design compromise. Why is this required here and in OpenCL code?
+        We want to support user presets that enforce tuning the capture sharpen parameters
+        for radius and noise threshold while being auto-applied while importing the
+        image or if we apply that preset being in darkroom.
+
+        A preset enforces auto-calculation of capture parameters if the found capture radius
+        is zero (a capture radius of zero while capture is enabled isn't a valid use case).
+
+        The test for an un-altered image is based on database information and if the user
+        changes any module parameter in the first seconds on a fresh history, those changes
+        might not yet be written to the database.
+
+        So there is one minor UI problem coming with this approach.
+        If we manually set the capture radius to zero in that timespan it will be re-autotuned.
+
+        After that timespan we can freely choose any radius without re-calculation either
+        if we intend to do so for some reason or if we are preparing for a user preset that
+        wants auto-calculation
+    */
+    gboolean autotune = d->cs_enabled && d->cs_radius == 0.0f && !dt_image_altered(img->id);
+    if(g)
+    {
+      dt_iop_gui_enter_critical_section(self);
+      if(autotune && fullpipe)
+        g->autotune_request = TRUE;
+      autotune = fullpipe && g->autotune_request;
+      dt_iop_gui_leave_critical_section(self);
+    }
+
+    if(autotune)
+    {
+      const float cs_thrs = _capture_noise(self, piece);
+      const float cs_radius = _capture_radius(self, piece, in, roi_in, xtrans, filters);
+      d->cs_radius = cs_radius;
+      d->cs_thrs = cs_thrs;
+
+      if(g)
+      {
+        dt_iop_gui_enter_critical_section(self);
+        g->autotune_result = TRUE;
+        g->new_radius = cs_radius;
+        g->new_thrs = cs_thrs;
+        dt_iop_gui_leave_critical_section(self);
+      }
+
+      dt_print_pipe(DT_DEBUG_PIPE, "autotuned capture",
+        pipe, self, pipe->devid, NULL, NULL, "threshold=%.2f radius=%.2f", cs_thrs, cs_radius);
+    }
   }
 
   int overlap = 0;
@@ -807,7 +1032,7 @@ void process(dt_iop_module_t *self,
   {
     dt_free_align(green_in);
     if(!direct) dt_free_align(out);
-    dt_print(DT_DEBUG_ALWAYS, "can't create output buffer for demosaic");
+    dt_print(DT_DEBUG_PIPE, "can't create output buffer for demosaic");
     dt_control_log(_("can't allocate demosaic buffer"));
     return;
   }
@@ -887,6 +1112,13 @@ void process(dt_iop_module_t *self,
   if(tiling) dt_free_align(t_out);
   dt_free_align(green_in);
 
+  /* The GainMap is defined on the sensor grid, so it is applied to the full
+     scale demosaiced data before any resampling to canvas or export size, and
+     before the detail mask is derived from it. */
+  const dt_dng_gain_map_t *gm = _gain_map(self, piece);
+  if(gm)
+    _apply_gain_map(self, piece, gm, out, roi_in, DT_DEVICE_CPU);
+
   if(pipe->want_detail_mask)
     dt_dev_write_scharr_mask(piece, out, roi_in, TRUE);
 
@@ -918,14 +1150,14 @@ int process_cl(dt_iop_module_t *self,
   cl_mem dev_xtrans = NULL;
 
   const uint32_t filters = piece->filters;
-  const gboolean fullscale = _demosaic_full(piece, img, roi_out);
+  const gboolean fullscale = _demosaic_full(pipe, img);
   const gboolean is_xtrans = filters == 9u;
   const gboolean is_bayer = !is_xtrans && filters != 0 && !true_monochrome;
 
   dt_dev_clear_scharr_mask(pipe);
 
-  const dt_iop_demosaic_data_t *d = piece->data;
-  const dt_iop_demosaic_gui_data_t *g = self->gui_data;
+  dt_iop_demosaic_data_t *d = piece->data;
+  dt_iop_demosaic_gui_data_t *g = self->gui_data;
   const dt_iop_demosaic_global_data_t *gd = self->global_data;
 
   const int demosaicing_method = d->demosaicing_method;
@@ -943,8 +1175,10 @@ int process_cl(dt_iop_module_t *self,
   gboolean show_dual = FALSE;
   gboolean show_capture = FALSE;
   gboolean show_sigma = FALSE;
-  if(self->dev->gui_attached && fullpipe)
+  const gboolean full_gui = self->dev->gui_attached && fullpipe;
+  if(full_gui)
   {
+    dt_iop_gui_enter_critical_section(self);
     if(g->dual_mask)
     {
       show_dual = TRUE;
@@ -960,6 +1194,7 @@ int process_cl(dt_iop_module_t *self,
       show_sigma = TRUE;
       pipe->mask_display = DT_DEV_PIXELPIPE_DISPLAY_MASK;
     }
+    dt_iop_gui_leave_critical_section(self);
   }
 
   const int devid = pipe->devid;
@@ -979,29 +1214,57 @@ int process_cl(dt_iop_module_t *self,
   if(!fullscale)
   {
     dt_print_pipe(DT_DEBUG_PIPE, "demosaic approx zoom", pipe, self, devid, roi_in, roi_out);
-    if(is_xtrans)
+
+    /* this path never materialises a full scale buffer, so the GainMap is
+       applied to the approximated output */
+    const dt_dng_gain_map_t *gm_fast = _gain_map(self, piece);
+
+    /* The GainMap kernel reads and writes one pixel per work item, but an
+       image cannot be both read from and written to by the same kernel, so
+       let the zoom write a scratch image and take dev_out from there. */
+    cl_mem dev_zoomed = dev_out;
+    cl_mem dev_scratch = NULL;
+    if(gm_fast)
     {
+      dev_scratch = dt_opencl_alloc_device(devid,
+                                           dt_opencl_get_image_width(dev_out),
+                                           dt_opencl_get_image_height(dev_out),
+                                           dt_opencl_get_image_element_size(dev_out));
+      if(dev_scratch == NULL)
+      {
+        dt_opencl_release_mem_object(dev_xtrans);
+        return DT_OPENCL_SYSMEM_ALLOCATION;
+      }
+      dev_zoomed = dev_scratch;
+    }
+
+    if(is_xtrans)
       // sample third-size image
       err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_zoom_third_size, roi_out->width, roi_out->height,
-          CLARG(dev_in), CLARG(dev_out), CLARG(roi_out->width), CLARG(roi_out->height),
+          CLARG(dev_in), CLARG(dev_zoomed), CLARG(roi_out->width), CLARG(roi_out->height),
           CLARG(iwidth), CLARG(iheight), CLARG(roi_out->scale), CLARG(dev_xtrans));
-      dt_opencl_release_mem_object(dev_xtrans);
-      return err;
-    }
     else if(method == DT_IOP_DEMOSAIC_PASSTHROUGH_MONOCHROME)
-      return dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_zoom_passthrough_monochrome, roi_out->width, roi_out->height,
-          CLARG(dev_in), CLARG(dev_out), CLARG(roi_out->width), CLARG(roi_out->height),
+      err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_zoom_passthrough_monochrome, roi_out->width, roi_out->height,
+          CLARG(dev_in), CLARG(dev_zoomed), CLARG(roi_out->width), CLARG(roi_out->height),
           CLARG(iwidth), CLARG(iheight), CLARG(roi_out->scale));
     else // bayer
-      return dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_zoom_half_size, roi_out->width, roi_out->height,
-          CLARG(dev_in), CLARG(dev_out), CLARG(roi_out->width), CLARG(roi_out->height),
+      err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_zoom_half_size, roi_out->width, roi_out->height,
+          CLARG(dev_in), CLARG(dev_zoomed), CLARG(roi_out->width), CLARG(roi_out->height),
           CLARG(iwidth), CLARG(iheight), CLARG(roi_out->scale), CLARG(filters));
+
+    if(err == CL_SUCCESS && gm_fast)
+      err = _apply_gain_map_cl(self, piece, gm_fast, dev_scratch, dev_out, roi_out, devid);
+
+    dt_opencl_release_mem_object(dev_scratch);
+    dt_opencl_release_mem_object(dev_xtrans);
+    return err;
   }
 
   const gboolean direct = roi_out->width == iwidth && roi_out->height == iheight && feqf(roi_in->scale, roi_out->scale, 1e-8f);
   const gboolean no_masking = dt_pipe_no_mask_display(pipe);
   const gboolean demosaic_mask = pipe->mask_display == DT_DEV_PIXELPIPE_DISPLAY_PASSTHRU;
-  const gboolean dual = (demosaicing_method & DT_DEMOSAIC_DUAL) && !run_fast && !show_sigma && !show_capture && !demosaic_mask;
+  const gboolean want_dual = (demosaicing_method & DT_DEMOSAIC_DUAL) && d->dual_thrs > 0.0f;
+  const gboolean dual = want_dual && !run_fast && !show_sigma && !show_capture && !demosaic_mask;
   const gboolean passthru = method == DT_IOP_DEMOSAIC_PASSTHROUGH_MONOCHROME
                          || method == DT_IOP_DEMOSAIC_PASSTHROUGH_COLOR;
   const gboolean do_capture = !passthru && !run_fast && !show_dual && d->cs_enabled;
@@ -1009,10 +1272,35 @@ int process_cl(dt_iop_module_t *self,
 
   if(do_capture)
   {
-    if(_noise_requested(self, piece))
-      _capture_noise(self, piece);
-    if(_radius_requested(self, piece))
-      _capture_radius_cl(self, piece, dev_in, roi_in, xtrans, filters, true_monochrome);
+    gboolean autotune = d->cs_enabled && d->cs_radius == 0.0f && !dt_image_altered(img->id);
+    if(g)
+    {
+      dt_iop_gui_enter_critical_section(self);
+      if(autotune && fullpipe)
+        g->autotune_request = TRUE;
+      autotune = fullpipe && g->autotune_request;
+      dt_iop_gui_leave_critical_section(self);
+    }
+
+    if(autotune)
+    {
+      const float cs_thrs = _capture_noise(self, piece);
+      const float cs_radius = _capture_radius_cl(self, piece, dev_in, dev_xtrans, roi_in, xtrans, filters);
+      d->cs_radius = cs_radius;
+      d->cs_thrs = cs_thrs;
+
+      if(g)
+      {
+        dt_iop_gui_enter_critical_section(self);
+        g->autotune_result = TRUE;
+        g->new_radius = cs_radius;
+        g->new_thrs = cs_thrs;
+        dt_iop_gui_leave_critical_section(self);
+      }
+
+      dt_print_pipe(DT_DEBUG_PIPE, "autotuned capture",
+        pipe, self, devid, roi_in, NULL, "threshold=%.2f radius=%.2f", cs_thrs, cs_radius);
+    }
   }
 
   gboolean tiling = FALSE;
@@ -1123,6 +1411,10 @@ int process_cl(dt_iop_module_t *self,
         err = process_default_cl(self, piece, t_in, t_high, dev_xtrans, iwidth, t_rows, method, filters);
       else if(method == DT_IOP_DEMOSAIC_RCD)
         err = process_rcd_cl(self, piece, t_in, t_high, iwidth, t_rows, filters);
+      else if(method == DT_IOP_DEMOSAIC_AMAZE)
+        err = process_amaze_cl(self, piece, t_in, t_high, iwidth, t_rows, filters);
+      else if(method == DT_IOP_DEMOSAIC_LMMSE)
+        err = process_lmmse_cl(self, piece, t_in, t_high, iwidth, t_rows, filters, d->lmmse_refine);
       else if(method == DT_IOP_DEMOSAIC_VNG4 || method == DT_IOP_DEMOSAIC_VNG)
         err = process_vng_cl(self, piece, t_in, t_high, dev_xtrans, xtrans, iwidth, t_rows, filters, 0, FALSE);
       else if(method == DT_IOP_DEMOSAIC_MARKESTEIJN || method == DT_IOP_DEMOSAIC_MARKESTEIJN_3)
@@ -1179,6 +1471,32 @@ int process_cl(dt_iop_module_t *self,
     t_low = NULL;
   }
 
+  /* The GainMap is defined on the sensor grid, so it is applied to the full
+     scale demosaiced data before any resampling to canvas or export size, and
+     before the detail mask is derived from it. An image cannot be both read
+     from and written to by one kernel, so the result goes to a scratch image
+     and is copied back; out_image is dev_out when the pipe asked for the data
+     in place, so it cannot simply be swapped for the scratch one. */
+  const dt_dng_gain_map_t *gm = _gain_map(self, piece);
+  if(gm)
+  {
+    cl_mem dev_scratch = dt_opencl_alloc_device(devid, iwidth, iheight, sizeof(float) * 4);
+    if(dev_scratch == NULL)
+    {
+      err = DT_OPENCL_SYSMEM_ALLOCATION;
+      goto finish;
+    }
+    err = _apply_gain_map_cl(self, piece, gm, out_image, dev_scratch, roi_in, devid);
+    if(err == CL_SUCCESS)
+    {
+      const size_t region[] = { iwidth, iheight };
+      err = dt_opencl_enqueue_copy_image(devid, dev_scratch, out_image,
+                                         CLIMG_ORIGIN, CLIMG_ORIGIN, region);
+    }
+    dt_opencl_release_mem_object(dev_scratch);
+    if(err != CL_SUCCESS) goto finish;
+  }
+
   if(pipe->want_detail_mask)
   {
     err = dt_dev_write_scharr_mask_cl(piece, out_image, roi_in, TRUE);
@@ -1211,6 +1529,7 @@ finish:
   }
   return err;
 }
+
 #endif
 #undef MIN_TILE_ROWS
 
@@ -1271,6 +1590,39 @@ void init_global(dt_iop_module_so_t *self)
   gd->kernel_rcd_step_4_1 = dt_opencl_create_kernel(rcd, "rcd_step_4_1");
   gd->kernel_rcd_step_4_2 = dt_opencl_create_kernel(rcd, "rcd_step_4_2");
   gd->kernel_rcd_step_4_3 = dt_opencl_create_kernel(rcd, "rcd_step_4_3");
+
+  const int amaze = 51; // from programs.conf
+  gd->kernel_amaze_init = dt_opencl_create_kernel(amaze, "amaze_init");
+  gd->kernel_amaze_grad = dt_opencl_create_kernel(amaze, "amaze_grad");
+  gd->kernel_amaze_cd = dt_opencl_create_kernel(amaze, "amaze_cd");
+  gd->kernel_amaze_cd_bound = dt_opencl_create_kernel(amaze, "amaze_cd_bound");
+  gd->kernel_amaze_vote = dt_opencl_create_kernel(amaze, "amaze_vote");
+  gd->kernel_amaze_hvwt = dt_opencl_create_kernel(amaze, "amaze_hvwt");
+  gd->kernel_amaze_nyquist2 = dt_opencl_create_kernel(amaze, "amaze_nyquist2");
+  gd->kernel_amaze_area = dt_opencl_create_kernel(amaze, "amaze_area");
+  gd->kernel_amaze_green = dt_opencl_create_kernel(amaze, "amaze_green");
+  gd->kernel_amaze_nyquist_refine = dt_opencl_create_kernel(amaze, "amaze_nyquist_refine");
+  gd->kernel_amaze_diag = dt_opencl_create_kernel(amaze, "amaze_diag");
+  gd->kernel_amaze_rbint = dt_opencl_create_kernel(amaze, "amaze_rbint");
+  gd->kernel_amaze_green_diag = dt_opencl_create_kernel(amaze, "amaze_green_diag");
+  gd->kernel_amaze_chroma = dt_opencl_create_kernel(amaze, "amaze_chroma");
+  gd->kernel_amaze_output = dt_opencl_create_kernel(amaze, "amaze_output");
+
+  const int lmmse = 52; // from programs.conf
+  gd->kernel_lmmse_init = dt_opencl_create_kernel(lmmse, "lmmse_init");
+  gd->kernel_lmmse_diff = dt_opencl_create_kernel(lmmse, "lmmse_diff");
+  gd->kernel_lmmse_lowpass = dt_opencl_create_kernel(lmmse, "lmmse_lowpass");
+  gd->kernel_lmmse_interp = dt_opencl_create_kernel(lmmse, "lmmse_interp");
+  gd->kernel_lmmse_planes = dt_opencl_create_kernel(lmmse, "lmmse_planes");
+  gd->kernel_lmmse_rb_at_g = dt_opencl_create_kernel(lmmse, "lmmse_rb_at_g");
+  gd->kernel_lmmse_rb_at_rb = dt_opencl_create_kernel(lmmse, "lmmse_rb_at_rb");
+  gd->kernel_lmmse_median = dt_opencl_create_kernel(lmmse, "lmmse_median");
+  gd->kernel_lmmse_median_apply = dt_opencl_create_kernel(lmmse, "lmmse_median_apply");
+  gd->kernel_lmmse_fill = dt_opencl_create_kernel(lmmse, "lmmse_fill");
+  gd->kernel_lmmse_refine_g = dt_opencl_create_kernel(lmmse, "lmmse_refine_g");
+  gd->kernel_lmmse_refine_rb_at_g = dt_opencl_create_kernel(lmmse, "lmmse_refine_rb_at_g");
+  gd->kernel_lmmse_refine_rb_at_rb = dt_opencl_create_kernel(lmmse, "lmmse_refine_rb_at_rb");
+  gd->kernel_lmmse_output = dt_opencl_create_kernel(lmmse, "lmmse_output");
   gd->kernel_demosaic_box3 = dt_opencl_create_kernel(rcd, "demosaic_box3");
   gd->kernel_write_blended_dual  = dt_opencl_create_kernel(rcd, "write_blended_dual");
 
@@ -1281,7 +1633,9 @@ void init_global(dt_iop_module_so_t *self)
   gd->modify_blend = dt_opencl_create_kernel(capt, "modify_blend");
   gd->show_blend_mask = dt_opencl_create_kernel(capt, "show_blend_mask");
   gd->capture_result = dt_opencl_create_kernel(capt, "capture_result");
+  gd->dilate_mask = dt_opencl_create_kernel(capt, "capture_dilatemask");
   gd->final_blend = dt_opencl_create_kernel(capt, "final_blend");
+  gd->capture_radius = dt_opencl_create_kernel(capt, "capture_radius");
 
   gd->gauss_coeffs = dt_alloc_align_float(CAPTURE_KERNEL_ALIGN * (UCHAR_MAX+1));
   for(int i = 0; i <= UCHAR_MAX; i++)
@@ -1333,6 +1687,35 @@ void cleanup_global(dt_iop_module_so_t *self)
   dt_opencl_free_kernel(gd->kernel_rcd_step_4_1);
   dt_opencl_free_kernel(gd->kernel_rcd_step_4_2);
   dt_opencl_free_kernel(gd->kernel_rcd_step_4_3);
+  dt_opencl_free_kernel(gd->kernel_amaze_init);
+  dt_opencl_free_kernel(gd->kernel_amaze_grad);
+  dt_opencl_free_kernel(gd->kernel_amaze_cd);
+  dt_opencl_free_kernel(gd->kernel_amaze_cd_bound);
+  dt_opencl_free_kernel(gd->kernel_amaze_vote);
+  dt_opencl_free_kernel(gd->kernel_amaze_hvwt);
+  dt_opencl_free_kernel(gd->kernel_amaze_nyquist2);
+  dt_opencl_free_kernel(gd->kernel_amaze_area);
+  dt_opencl_free_kernel(gd->kernel_amaze_green);
+  dt_opencl_free_kernel(gd->kernel_amaze_nyquist_refine);
+  dt_opencl_free_kernel(gd->kernel_amaze_diag);
+  dt_opencl_free_kernel(gd->kernel_amaze_rbint);
+  dt_opencl_free_kernel(gd->kernel_amaze_green_diag);
+  dt_opencl_free_kernel(gd->kernel_amaze_chroma);
+  dt_opencl_free_kernel(gd->kernel_amaze_output);
+  dt_opencl_free_kernel(gd->kernel_lmmse_init);
+  dt_opencl_free_kernel(gd->kernel_lmmse_diff);
+  dt_opencl_free_kernel(gd->kernel_lmmse_lowpass);
+  dt_opencl_free_kernel(gd->kernel_lmmse_interp);
+  dt_opencl_free_kernel(gd->kernel_lmmse_planes);
+  dt_opencl_free_kernel(gd->kernel_lmmse_rb_at_g);
+  dt_opencl_free_kernel(gd->kernel_lmmse_rb_at_rb);
+  dt_opencl_free_kernel(gd->kernel_lmmse_median);
+  dt_opencl_free_kernel(gd->kernel_lmmse_median_apply);
+  dt_opencl_free_kernel(gd->kernel_lmmse_fill);
+  dt_opencl_free_kernel(gd->kernel_lmmse_refine_g);
+  dt_opencl_free_kernel(gd->kernel_lmmse_refine_rb_at_g);
+  dt_opencl_free_kernel(gd->kernel_lmmse_refine_rb_at_rb);
+  dt_opencl_free_kernel(gd->kernel_lmmse_output);
   dt_opencl_free_kernel(gd->kernel_demosaic_box3);
   dt_opencl_free_kernel(gd->kernel_write_blended_dual);
   dt_opencl_free_kernel(gd->gaussian_9x9_mul);
@@ -1341,7 +1724,9 @@ void cleanup_global(dt_iop_module_so_t *self)
   dt_opencl_free_kernel(gd->modify_blend);
   dt_opencl_free_kernel(gd->show_blend_mask);
   dt_opencl_free_kernel(gd->capture_result);
+  dt_opencl_free_kernel(gd->dilate_mask);
   dt_opencl_free_kernel(gd->final_blend);
+  dt_opencl_free_kernel(gd->capture_radius);
   dt_free_align(gd->gauss_coeffs);
   free(self->data);
   self->data = NULL;
@@ -1370,6 +1755,7 @@ void commit_params(dt_iop_module_t *self,
   d->cs_boost = p->cs_boost;
   d->cs_center = p->cs_center;
   d->cs_enabled = p->cs_enabled;
+  d->dng_gainmap = p->dng_gainmap;
   // magic function to have CS iterations with fine granularity for values <= 11 and then rising up to 50
   d->cs_iter = p->cs_iter + (int)(0.000065f * powf((float)p->cs_iter, 4.0f));
   const gboolean xmethod = use_method & DT_DEMOSAIC_XTRANS;
@@ -1418,15 +1804,6 @@ void commit_params(dt_iop_module_t *self,
   // as some demosaicers don't have OpenCL implementations
   switch(d->demosaicing_method)
   {
-    case DT_IOP_DEMOSAIC_AMAZE:
-      piece->process_cl_ready = FALSE;
-      break;
-    case DT_IOP_DEMOSAIC_LMMSE:
-      piece->process_cl_ready = FALSE;
-      break;
-    case DT_IOP_DEMOSAIC_AMAZE_DUAL:
-      piece->process_cl_ready = FALSE;
-      break;
     case DT_IOP_DEMOSAIC_FDC:
       piece->process_cl_ready = FALSE;
       break;
@@ -1465,7 +1842,6 @@ void cleanup_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelp
 void reload_defaults(dt_iop_module_t *self)
 {
   dt_iop_demosaic_params_t *d = self->default_params;
-  dt_iop_demosaic_gui_data_t *g = self->gui_data;
   const dt_image_t *img = &self->dev->image_storage;
 
   if(dt_image_is_monochrome(img))
@@ -1485,10 +1861,14 @@ void reload_defaults(dt_iop_module_t *self)
   if(self->widget)
     gtk_stack_set_visible_child_name(GTK_STACK(self->widget), self->default_enabled ? "raw" : "non_raw");
 
+  dt_iop_demosaic_gui_data_t *g = self->gui_data;
   if(g)
   {
-    g->autoradius = FALSE;
-    g->autothrs = FALSE;
+    dt_iop_gui_enter_critical_section(self);
+    g->autotune_result = FALSE;
+    g->new_radius = 0.0f;
+    g->new_thrs = 0.0f;
+    dt_iop_gui_leave_critical_section(self);
   }
 }
 
@@ -1536,15 +1916,14 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
   gtk_widget_set_visible(g->demosaic_method_xtrans, xtrans);
   gtk_widget_set_visible(g->demosaic_method_mono, true_monochrome);
 
-  gtk_widget_set_visible(g->cs_radius, do_capture);
-  gtk_widget_set_visible(g->cs_thrs, do_capture);
-  gtk_widget_set_visible(g->cs_boost, do_capture);
-  gtk_widget_set_visible(g->cs_center, do_capture && p->cs_boost);
-  gtk_widget_set_visible(g->cs_iter, do_capture);
+  gtk_widget_set_sensitive(g->cs_radius, do_capture);
+  gtk_widget_set_sensitive(g->cs_thrs, do_capture);
+  gtk_widget_set_sensitive(g->cs_boost, do_capture);
+  gtk_widget_set_sensitive(g->cs_center, do_capture && p->cs_boost);
+  gtk_widget_set_sensitive(g->cs_iter, do_capture);
 
   dt_bauhaus_toggle_set(g->cs_enabled, p->cs_enabled);
-  gtk_widget_set_visible(g->cs_enabled, capture_support);
-  gtk_widget_set_visible(GTK_WIDGET(g->capture.expander), do_capture);
+  gtk_widget_set_sensitive(g->cs_enabled, capture_support);
 
   // we might have a wrong method due to xtrans/bayer - mode mismatch
   const gboolean method_mismatch = use_method != p->demosaicing_method;
@@ -1614,8 +1993,6 @@ void gui_update(dt_iop_module_t *self)
   dt_iop_demosaic_gui_data_t *g = self->gui_data;
   g->new_radius = 0.0f;
   g->new_thrs = 0.0f;
-  g->autoradius = FALSE;
-  g->autothrs = FALSE;
 }
 
 static void _dual_thrs_callback(GtkWidget *quad, dt_iop_module_t *self)
@@ -1623,12 +2000,14 @@ static void _dual_thrs_callback(GtkWidget *quad, dt_iop_module_t *self)
   DT_GUARD_GUI_UPDATE();
   dt_iop_demosaic_gui_data_t *g = self->gui_data;
 
+  dt_iop_gui_enter_critical_section(self);
   g->dual_mask = dt_bauhaus_widget_get_quad_active(quad);
+  g->cs_mask = FALSE;
+  g->cs_boost_mask = FALSE;
+  dt_iop_gui_leave_critical_section(self);
 
   dt_bauhaus_widget_set_quad_active(g->cs_thrs, FALSE);
-  g->cs_mask = FALSE;
   dt_bauhaus_widget_set_quad_active(g->cs_boost, FALSE);
-  g->cs_boost_mask = FALSE;
 
   dt_dev_reprocess_center(self->dev, self->iop_order);
 }
@@ -1637,12 +2016,15 @@ static void _cs_thrs_callback(GtkWidget *quad, dt_iop_module_t *self)
 {
   DT_GUARD_GUI_UPDATE();
   dt_iop_demosaic_gui_data_t *g = self->gui_data;
+
+  dt_iop_gui_enter_critical_section(self);
   g->cs_mask = dt_bauhaus_widget_get_quad_active(quad);
+  g->dual_mask = FALSE;
+  g->cs_boost_mask = FALSE;
+  dt_iop_gui_leave_critical_section(self);
 
   dt_bauhaus_widget_set_quad_active(g->dual_thrs, FALSE);
-  g->dual_mask = FALSE;
   dt_bauhaus_widget_set_quad_active(g->cs_boost, FALSE);
-  g->cs_boost_mask = FALSE;
 
   dt_dev_reprocess_center(self->dev, self->iop_order);
 }
@@ -1651,21 +2033,25 @@ static void _cs_boost_callback(GtkWidget *quad, dt_iop_module_t *self)
 {
   DT_GUARD_GUI_UPDATE();
   dt_iop_demosaic_gui_data_t *g = self->gui_data;
+
+  dt_iop_gui_enter_critical_section(self);
   g->cs_boost_mask = dt_bauhaus_widget_get_quad_active(quad);
+  g->dual_mask = FALSE;
+  g->cs_mask = FALSE;
+  dt_iop_gui_leave_critical_section(self);
 
   dt_bauhaus_widget_set_quad_active(g->dual_thrs, FALSE);
-  g->dual_mask = FALSE;
   dt_bauhaus_widget_set_quad_active(g->cs_thrs, FALSE);
-  g->cs_mask = FALSE;
 
   dt_dev_reprocess_center(self->dev, self->iop_order);
 }
 
 static void _cs_radius_callback(GtkWidget *quad, dt_iop_module_t *self)
 {
-  DT_GUARD_GUI_UPDATE();
+  dt_iop_gui_enter_critical_section(self);
   dt_iop_demosaic_gui_data_t *g = self->gui_data;
-  g->new_radius = -1.0f;
+  g->autotune_request = TRUE;
+  dt_iop_gui_leave_critical_section(self);
   dt_dev_reprocess_center(self->dev, self->iop_order);
 }
 
@@ -1674,35 +2060,55 @@ static void _ui_pipe_done(gpointer instance, dt_iop_module_t *self)
   dt_iop_demosaic_gui_data_t *g = self->gui_data;
   if(!g) return;
 
+  dt_iop_gui_enter_critical_section(self);
+  if(!g->autotune_result)
+  {
+    dt_iop_gui_leave_critical_section(self);
+    return;
+  }
+  const gboolean result = g->autotune_request;
+  const float new_radius = g->new_radius;
+  const float new_thrs = g->new_thrs;
+  g->autotune_result = FALSE;
+  g->autotune_request = FALSE;
+  g->new_radius = g->new_thrs = 0.0f;
+  dt_iop_gui_leave_critical_section(self);
+
+  if(!result) return;
+
+  dt_iop_demosaic_params_t *p = self->params;
+
+  dt_develop_t *dev = self->dev;
   DT_TRY_GUI_UPDATE();
 
-  const gboolean new_radius = g->new_radius > 0.0f;
-  const gboolean new_thrs = g->new_thrs > 0.0f;
-  if(new_radius)
-     dt_bauhaus_slider_set_val(g->cs_radius, g->new_radius);
+  dt_bauhaus_slider_set_val(g->cs_radius, new_radius);
+  dt_bauhaus_slider_set_val(g->cs_thrs, new_thrs);
 
-  if(new_thrs)
-    dt_bauhaus_slider_set_val(g->cs_thrs, g->new_thrs);
+  dt_dev_pixelpipe_stop_and_lock_all(dev);
+  p->cs_radius = new_radius;
+  p->cs_thrs = new_thrs;
+  dt_dev_pixelpipe_unlock_all(dev);
 
   DT_LEAVE_GUI_UPDATE();
 
-  if(new_radius || new_thrs)
-  {
-    dt_print(DT_DEBUG_PIPE, "demosaic UI pipe sets radius=%.3f thrs=%.3f",
-      g->new_radius, g->new_thrs);
-    g->new_radius = g->new_thrs = 0.0f;
-
-    dt_dev_add_history_item(darktable.develop, self, TRUE);
-  }
+  dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
 
 static void _preset_applied_callback(gpointer instance, dt_iop_module_t *self)
 {
+  if(!(dt_view_get_current() == DT_VIEW_DARKROOM))
+    return;
+
+  dt_iop_demosaic_gui_data_t *g = self->gui_data;
+  if(!g) return;
+
   const dt_iop_demosaic_params_t *p = self->params;
-  if(p->cs_enabled && (p->cs_radius <= 0.0f || p->cs_thrs <= 0.0f))
+  const gboolean tune = self->enabled && p->cs_enabled && p->cs_radius == 0.0f;
+  if(tune)
   {
-    dt_print(DT_DEBUG_PIPE, "demosaic auto preset applied, radius=%.3f thrs=%.3f",
-      p->cs_radius, p->cs_thrs);
+    dt_iop_gui_enter_critical_section(self);
+    g->autotune_request = TRUE;
+    dt_iop_gui_leave_critical_section(self);
     dt_dev_reprocess_center(self->dev, self->iop_order);
   }
 }
@@ -1712,13 +2118,16 @@ void gui_focus(dt_iop_module_t *self, const gboolean in)
   dt_iop_demosaic_gui_data_t *g = self->gui_data;
   if(!in)
   {
+    dt_iop_gui_enter_critical_section(self);
     const gboolean was_masking = g->dual_mask || g->cs_mask || g->cs_boost_mask;
-    dt_bauhaus_widget_set_quad_active(g->dual_thrs, FALSE);
     g->dual_mask = FALSE;
-    dt_bauhaus_widget_set_quad_active(g->cs_thrs, FALSE);
     g->cs_mask = FALSE;
-    dt_bauhaus_widget_set_quad_active(g->cs_boost, FALSE);
     g->cs_boost_mask = FALSE;
+    dt_iop_gui_leave_critical_section(self);
+
+    dt_bauhaus_widget_set_quad_active(g->dual_thrs, FALSE);
+    dt_bauhaus_widget_set_quad_active(g->cs_thrs, FALSE);
+    dt_bauhaus_widget_set_quad_active(g->cs_boost, FALSE);
 
     if(was_masking) dt_dev_reprocess_center(self->dev, self->iop_order);
   }
@@ -1773,14 +2182,12 @@ void gui_init(dt_iop_module_t *self)
   g->greeneq = dt_bauhaus_combobox_from_params(self, "green_eq");
   gtk_widget_set_tooltip_text(g->greeneq, _("green channels matching method. only applies for some old sensors"));
 
+  dt_gui_box_add(self->widget, dt_ui_section_label_new(_("capture sharpen controls")));
+
   g->cs_enabled = dt_bauhaus_toggle_from_params(self, "cs_enabled");
   gtk_widget_set_tooltip_text(g->cs_enabled, _("capture sharpen recovers details lost due to in-camera blurring\n"
                                             "which can be caused by diffraction, the anti-aliasing filter or other\n"
                                             "sources of gaussian-type blur"));
-
-  dt_gui_new_collapsible_section(&g->capture, "plugins/darkroom/demosaic/expand_capture",
-                                 _("capture sharpen controls"), GTK_BOX(box_raw), DT_ACTION(self));
-  self->widget = GTK_WIDGET(g->capture.container);
 
   g->cs_iter = dt_bauhaus_slider_from_params(self, "cs_iter");
   gtk_widget_set_tooltip_text(g->cs_iter, _("set effect strength by iterations"));
@@ -1791,17 +2198,15 @@ void gui_init(dt_iop_module_t *self)
   gtk_widget_set_tooltip_text(g->cs_radius, _("capture sharpen radius should reflect the overall gaussian type blur\n"
                                               "of the camera sensor, possibly the anti-aliasing filter and the lens.\n"
                                               "increasing this too far will soon lead to artifacts like halos and\n"
-                                              "ringing especially when used with a large 'iterations' setting.\n\n"
-                                              "Note: a radius set to zero will be recalculated automatically the next run. use for presets"));
+                                              "ringing especially when used with a large 'iterations' setting.\n"
+                                              "set it to zero for presets that should enforce auto calculation"));
   dt_bauhaus_widget_set_quad(g->cs_radius, self, dtgtk_cairo_paint_reset, FALSE, _cs_radius_callback,
-                                            _("calculate the capture sharpen radius from available raw sensor data.\n"
-                                              "for best results avoid cropping or darkroom zooming in"));
+                                            _("calculate the capture sharpen radius from raw sensor data"));
 
   g->cs_thrs = dt_bauhaus_slider_from_params(self, "cs_thrs");
   gtk_widget_set_tooltip_text(g->cs_thrs, _("restrict capture sharpening to areas with high local contrast,\n"
                                             "increase to exclude flat areas in very dark or noisy images,\n"
-                                            "decrease for well exposed and low noise images.\n\n"
-                                            "Note: a threshold set to zero will be reset to defaults the next run. use for presets"));
+                                            "decrease for well exposed and low noise images"));
   dt_bauhaus_widget_set_quad(g->cs_thrs, self, dtgtk_cairo_paint_showmask, TRUE, _cs_thrs_callback, _("visualize sharpened areas"));
 
   g->cs_boost = dt_bauhaus_slider_from_params(self, "cs_boost");

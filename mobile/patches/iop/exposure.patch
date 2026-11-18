@@ -1,0 +1,11 @@
+--- a/src/iop/exposure.c
++++ b/src/iop/exposure.c
+@@ -867,6 +867,8 @@
+ 
+   return _total_adjustment_ev(self, p);
+ }
++
++#include "mobile/adapters/iop/exposure.inc"
+ 
+ static void _exposure_proxy_handle_event(int n_press,
+                                          gdouble delta,

@@ -25,7 +25,9 @@
 #include "develop/imageop.h"
 #include "gui/gtk.h"
 #include "gui/draw.h"
+#include "gui/presets.h"
 #include "gui/styles.h"
+
 #ifdef GDK_WINDOWING_QUARTZ
 #include "osx/osx.h"
 #endif
@@ -113,9 +115,9 @@ static gboolean _gui_styles_is_update_module_order_set(dt_gui_styles_dialog_t *d
   return active && (num == -1);
 }
 
-void _gui_styles_get_active_items(dt_gui_styles_dialog_t *sd,
-                                  GList **enabled,
-                                  GList **update)
+static void _gui_styles_get_active_items(dt_gui_styles_dialog_t *sd,
+                                         GList **enabled,
+                                         GList **update)
 {
   /* run through all items and add active ones to result */
   GtkTreeIter iter;
@@ -195,6 +197,18 @@ static void _gui_styles_select_all_items(dt_gui_styles_dialog_t *d,
   }
 }
 
+// dt_gui_presets_confirm_pixel_masks() for the masks a style takes from
+// history rows `nums` of `imgid` (all of them when NULL). TRUE to save it
+static gboolean _confirm_pixel_masks(const dt_imgid_t imgid, GList *nums)
+{
+  gchar *modules = dt_is_valid_imgid(imgid)
+    ? dt_styles_history_pixel_mask_modules(imgid, nums)
+    : NULL;
+  const gboolean save = !modules || dt_gui_presets_confirm_pixel_masks(modules);
+  g_free(modules);
+  return save;
+}
+
 static void _gui_styles_new_style_response(GtkDialog *dialog,
                                            const gint response_id,
                                            dt_gui_styles_dialog_t *g)
@@ -226,6 +240,14 @@ static void _gui_styles_new_style_response(GtkDialog *dialog,
 
     if(newname && *newname)
     {
+      // before anything changes: no on the prompt returns to the dialog
+      if(!_confirm_pixel_masks(g->imgid, result))
+      {
+        g_list_free(result);
+        if(!g->newname) g_free(newname);
+        return;
+      }
+
       /* show prompt dialog when style already exists */
       if(newname && (dt_styles_exists(newname)) != 0)
       {
@@ -239,6 +261,8 @@ static void _gui_styles_new_style_response(GtkDialog *dialog,
         else
         {
          /* on RESPONSE_NO and escape key return to dialog */
+          g_list_free(result);
+          if(!g->newname) g_free(newname);
           return;
         }
       }
@@ -268,12 +292,10 @@ static void _gui_styles_new_style_response(GtkDialog *dialog,
       gtk_window_set_title(GTK_WINDOW(dlg_changename), _("unnamed style"));
       gtk_dialog_run(GTK_DIALOG(dlg_changename));
       gtk_widget_destroy(dlg_changename);
-      return;
     }
+    g_list_free(result);
+    if(!g->newname) g_free(newname);
   }
-
-  // finalize the dialog
-  g_free(g->nameorig);
 }
 
 static void _gui_styles_edit_style_response(GtkDialog *dialog,
@@ -307,6 +329,20 @@ static void _gui_styles_edit_style_response(GtkDialog *dialog,
 
     if(newname && *newname)
     {
+      // the items updated from the image, which bring its masks along
+      GList *updated = NULL;
+      for(GList *l = update; l; l = g_list_next(l))
+        if(GPOINTER_TO_INT(l->data)) updated = g_list_append(updated, l->data);
+      const gboolean save = !updated || _confirm_pixel_masks(g->imgid, updated);
+      g_list_free(updated);
+      if(!save)
+      {
+        g_list_free(result);
+        g_list_free(update);
+        if(!g->newname) g_free(newname);
+        return;
+      }
+
       if(gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g->duplicate)))
       {
         dt_styles_create_from_style(g->nameorig,
@@ -347,12 +383,11 @@ static void _gui_styles_edit_style_response(GtkDialog *dialog,
       gtk_window_set_title(GTK_WINDOW(dlg_changename), _("unnamed style"));
       gtk_dialog_run(GTK_DIALOG(dlg_changename));
       gtk_widget_destroy(dlg_changename);
-      return;
     }
+    g_list_free(result);
+    g_list_free(update);
+    if(!g->newname) g_free(newname);
   }
-
-  // finalize the dialog
-  g_free(g->nameorig);
 }
 
 static void _gui_styles_item_toggled(GtkCellRendererToggle *cell,
@@ -374,7 +409,7 @@ static void _gui_styles_item_toggled(GtkCellRendererToggle *cell,
                      DT_STYLE_ITEMS_COL_UPDATE_NUM, &update_num,
                      -1);
 
-  toggle_item = (toggle_item == TRUE) ? FALSE : TRUE;
+  toggle_item = (toggle_item) ? FALSE : TRUE;
 
   if(update_num != -1 && toggle_item) // include so not updated
     gtk_list_store_set(GTK_LIST_STORE(model), &iter, DT_STYLE_ITEMS_COL_UPDATE, FALSE, -1);
@@ -400,7 +435,7 @@ static void _gui_styles_item_autoinit_toggled(GtkCellRendererToggle *cell,
                      DT_STYLE_ITEMS_COL_AUTOINIT,  &toggle_item,
                      -1);
 
-  toggle_item = (toggle_item == TRUE) ? FALSE : TRUE;
+  toggle_item = (toggle_item) ? FALSE : TRUE;
 
   gtk_list_store_set(GTK_LIST_STORE(model), &iter,
                      DT_STYLE_ITEMS_COL_AUTOINIT, toggle_item, -1);
@@ -430,7 +465,7 @@ static void _gui_styles_item_new_autoinit_toggled(GtkCellRendererToggle *cell,
                      DT_STYLE_ITEMS_COL_AUTOINIT,  &toggle_item,
                      -1);
 
-  toggle_item = (toggle_item == TRUE) ? FALSE : TRUE;
+  toggle_item = (toggle_item) ? FALSE : TRUE;
 
   gtk_list_store_set(GTK_LIST_STORE(model), &iter,
                      DT_STYLE_ITEMS_COL_AUTOINIT, toggle_item, -1);
@@ -457,7 +492,7 @@ static void _gui_styles_item_new_toggled(GtkCellRendererToggle *cell,
   gtk_tree_model_get_iter(model, &iter, path);
   gtk_tree_model_get(model, &iter, DT_STYLE_ITEMS_COL_ENABLED, &toggle_item, -1);
 
-  toggle_item = (toggle_item == TRUE) ? FALSE : TRUE;
+  toggle_item = (toggle_item) ? FALSE : TRUE;
 
   gtk_list_store_set(GTK_LIST_STORE(model), &iter,
                      DT_STYLE_ITEMS_COL_ENABLED, toggle_item, -1);
@@ -484,7 +519,7 @@ static void _gui_styles_update_toggled(GtkCellRendererToggle *cell,
   gtk_tree_model_get_iter(model, &iter, path);
   gtk_tree_model_get(model, &iter, DT_STYLE_ITEMS_COL_UPDATE, &toggle_item, -1);
 
-  toggle_item = (toggle_item == TRUE) ? FALSE : TRUE;
+  toggle_item = (toggle_item) ? FALSE : TRUE;
 
   gtk_list_store_set(GTK_LIST_STORE(model), &iter,
                      DT_STYLE_ITEMS_COL_ENABLED, !toggle_item, -1);
@@ -837,6 +872,12 @@ static gboolean _gui_styles_dialog_run(const gboolean edit,
     else
     {
       dt_control_log(_("can't create style out of unaltered image"));
+      gtk_widget_destroy(GTK_WIDGET(dialog));
+      g_object_unref(is_active_pb);
+      g_object_unref(is_inactive_pb);
+      g_object_unref(mask);
+      g_free(sd->nameorig);
+      g_free(sd);
       return TRUE;
     }
   }
@@ -872,6 +913,8 @@ static gboolean _gui_styles_dialog_run(const gboolean edit,
   gtk_widget_destroy(GTK_WIDGET(dialog));
   g_object_unref(is_active_pb);
   g_object_unref(is_inactive_pb);
+  g_object_unref(mask);
+  g_free(sd->nameorig);
   g_free(sd);
 
   return res;
@@ -926,7 +969,7 @@ GtkWidget *dt_gui_style_content_dialog(char *name, const dt_imgid_t imgid)
   if(imgid != data.imgid
      || g_strcmp0(data.style_name, name)
      || data.hash_len != hash.current_len
-     || memcmp(data.hash, hash.current, data.hash_len))
+     || (data.hash_len && memcmp(data.hash, hash.current, data.hash_len)))
   {
     if(data.surface)
     {

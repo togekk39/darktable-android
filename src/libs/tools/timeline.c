@@ -664,8 +664,9 @@ static int _block_get_at_zoom(dt_lib_module_t *self, int width)
   sqlite3_stmt *stmt;
   // clang-format off
   gchar *query = g_strdup_printf("SELECT db.datetime_taken AS dt,"
-                                 " col.imgid FROM main.images AS db "
-                                 "LEFT JOIN memory.collected_images AS col ON db.id=col.imgid "
+                                 " CASE WHEN db.id IN (SELECT imgid FROM memory.collected_images)"
+                                 " THEN db.id END "
+                                 "FROM main.images AS db "
                                  "WHERE dt > %lld "
                                  "ORDER BY dt ASC",
                                  (long long)_time_format_for_db(strip->time_pos, strip->zoom));
@@ -1165,8 +1166,8 @@ static void _lib_timeline_button_release_callback(GtkGestureSingle *gesture,
     }
     strip->selecting = FALSE;
 
-    GdkModifierType state;
-    gtk_get_current_event_state(&state);
+    const GdkModifierType state =
+      dt_gui_get_current_event_state(GTK_EVENT_CONTROLLER(gesture));
     if(!strip->move_edge && dt_modifier_is(state, GDK_SHIFT_MASK))
       _selection_collect(strip, DT_LIB_TIMELINE_MODE_RESET);
     else
@@ -1268,6 +1269,7 @@ static void _lib_timeline_motion_notify_cb(GtkEventControllerMotion *controller,
                                               gdouble y,
                                               dt_lib_module_t *self)
 {
+  GtkWidget *widget = dt_gui_get_widget(controller);
   dt_lib_timeline_t *strip = self->data;
 
   strip->in = TRUE;
@@ -1289,22 +1291,22 @@ static void _lib_timeline_motion_notify_cb(GtkEventControllerMotion *controller,
   {
     strip->stop_x = x;
     strip->stop_t = _time_get_from_pos(x, strip);
-    dt_control_change_cursor("default");
+    dt_gui_cursor_set(widget, NULL, "timeline");
   }
   else
   {
     // we change the cursor if we are close enough of a selection limit
     if(x - strip->start_x < 2 && x - strip->start_x > -2)
     {
-      dt_control_change_cursor("w-resize");
+      dt_gui_cursor_set(widget, "w-resize", "timeline");
     }
     else if(x - strip->stop_x < 2 && x - strip->stop_x > -2)
     {
-      dt_control_change_cursor("e-resize");
+      dt_gui_cursor_set(widget, "e-resize", "timeline");
     }
     else
     {
-      dt_control_change_cursor("default");
+      dt_gui_cursor_set(widget, NULL, "timeline");
     }
   }
   gtk_widget_queue_draw(strip->timeline);
@@ -1317,8 +1319,8 @@ static void _lib_timeline_scroll_cb(GtkEventControllerScroll *controller,
 {
   dt_lib_timeline_t *strip = self->data;
 
-  GdkModifierType state;
-  gtk_get_current_event_state(&state);
+  const GdkModifierType state =
+    dt_gui_get_current_event_state(GTK_EVENT_CONTROLLER(controller));
 
   // zoom change (with Ctrl key)
   if(dt_modifier_is(state, GDK_CONTROL_MASK))
@@ -1374,6 +1376,7 @@ static void _lib_timeline_mouse_leave_cb(GtkEventControllerMotion *controller,
   dt_lib_timeline_t *strip = self->data;
 
   strip->in = FALSE;
+  dt_gui_cursor_set(dt_gui_get_widget(controller), NULL, "timeline");
 
   gtk_widget_queue_draw(strip->timeline);
 }

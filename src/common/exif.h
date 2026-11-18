@@ -80,6 +80,13 @@ void dt_exif_sanitize_datetime(char *datetime);
  * struct. returns TRUE if no success. */
 gboolean dt_exif_read(dt_image_t *img, const char *path);
 
+/** the pixel dimensions of `path`, from its metadata alone: no pixels are
+    decoded. Unlike dt_exif_read(), it reads no IPTC, XMP or other metadata
+    (creator, rights, tags, GPS), which --harvest-masks-xmp promises not to
+    read. FALSE if the file cannot be opened or declares no size, leaving
+    *width and *height untouched */
+gboolean dt_exif_get_dimensions(const char *path, int *width, int *height);
+
 /** read exif data to image struct from given data blob, wherever you got it from.
     returns TRUE in case of an error */
 gboolean dt_exif_read_from_blob(dt_image_t *img, uint8_t *blob, const int size);
@@ -94,6 +101,11 @@ void dt_exif_img_check_additional_tags(dt_image_t *img, const char *filename);
 
 /** write blob to file exif. merges with existing exif information.*/
 int dt_exif_write_blob(uint8_t *blob, uint32_t size, const char *path, const int compressed);
+
+/** stamp the file as neural restore output. call AFTER
+ * dt_exif_write_blob(), which would otherwise overwrite it with the
+ * source image's metadata. */
+gboolean dt_exif_xmp_write_neural_restore(const char *path, const char *task);
 
 /** write xmp sidecar file. */
 /** if force_write is FALSE, the current contents of the sidecar file are compared against what

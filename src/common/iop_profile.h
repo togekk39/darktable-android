@@ -22,6 +22,7 @@
 #include "common/chromatic_adaptation.h"
 #include "common/colorspaces_inline_conversions.h"
 #include "common/colorspaces.h"
+#include "common/hdr-transfer.h"
 #include "common/file_location.h"
 #include "common/dttypes.h"
 #include "develop/imageop.h"
@@ -39,6 +40,7 @@ typedef struct dt_iop_order_iccprofile_info_t
 {
   dt_colorspaces_color_profile_type_t type;
   char filename[DT_IOP_COLOR_ICC_LEN];
+  cmsHPROFILE profile; // the registry's profile the info was made from
   dt_iop_color_intent_t intent;
   dt_colormatrix_t matrix_in; // don't align on more than 16 bits or OpenCL will fail
   dt_colormatrix_t matrix_out;
@@ -62,22 +64,46 @@ void dt_ioppr_init_profile_info(dt_iop_order_iccprofile_info_t *profile_info,
 void dt_ioppr_cleanup_profile_info(dt_iop_order_iccprofile_info_t *profile_info);
 
 /** returns the profile info from dev profiles info list that matches
- * (profile_type, profile_filename) NULL if not found
+ * (profile_type, profile_filename, profile), NULL if not found
  */
 dt_iop_order_iccprofile_info_t *
 dt_ioppr_get_profile_info_from_list(struct dt_develop_t *dev,
                                     dt_colorspaces_color_profile_type_t profile_type,
-                                    const char *profile_filename);
+                                    const char *profile_filename,
+                                    cmsHPROFILE profile);
 
-/** adds the profile info from (profile_type, profile_filename) to the
- * dev profiles info list if not already exists returns the generated
- * profile or the existing one
+/** adds the profile info from (profile_type, profile_filename), with the
+ * profile the registry holds for it now, to the dev profiles info list if
+ * not already exists returns the generated profile or the existing one
  */
 dt_iop_order_iccprofile_info_t *
 dt_ioppr_add_profile_info_to_list(struct dt_develop_t *dev,
                                   const dt_colorspaces_color_profile_type_t profile_type,
                                   const char *profile_filename,
                                   const int intent);
+
+/** the same for values made with profile, as an encoding names it: the
+ * profile counts for the system display types, which a new screen profile
+ * replaces under the same name (dt_colorspaces_replaced_in_session())
+ */
+dt_iop_order_iccprofile_info_t *
+dt_ioppr_add_profile_info_for_content(struct dt_develop_t *dev,
+                                      const dt_colorspaces_color_profile_type_t profile_type,
+                                      const char *profile_filename,
+                                      cmsHPROFILE profile,
+                                      const int intent);
+
+/** a profile info for values made with profile, owned by the caller, who
+ * releases it with dt_ioppr_free_profile_info(): for conversions outside a
+ * develop, whose list goes away with it. with a profile, a FILE profile's
+ * file need not exist any more. NULL if the profile is not usable
+ */
+dt_iop_order_iccprofile_info_t *
+dt_ioppr_new_profile_info(const dt_colorspaces_color_profile_type_t profile_type,
+                          const char *profile_filename,
+                          cmsHPROFILE profile,
+                          const int intent);
+void dt_ioppr_free_profile_info(dt_iop_order_iccprofile_info_t *profile_info);
 
 /** returns a reference to the work profile info as set on colorin iop
  * only if module is between colorin and colorout, otherwise returns NULL
@@ -113,7 +139,16 @@ dt_ioppr_set_pipe_output_profile_info(struct dt_develop_t *dev,
                                       struct dt_dev_pixelpipe_t *pipe,
                                       const dt_colorspaces_color_profile_type_t type,
                                       const char *filename,
+                                      cmsHPROFILE profile,
                                       const int intent);
+
+/** the headroom above reference white an output in this profile type has:
+   1 unless its transfer function is HDR (PQ, HLG) */
+float dt_ioppr_profile_headroom(const dt_colorspaces_color_profile_type_t type);
+
+/** set the PQ peak, in nits, for the pipes processed by the calling thread,
+   or 0 to read it from the export module's setting again */
+void dt_ioppr_set_thread_pq_peak_nits(const int nits);
 
 /** Record the export profile, used as a cache-identity tag. Returns the (possibly NULL)
    interned profile-info pointer, no fallback for sRGB in case of failure. */
@@ -124,7 +159,16 @@ dt_ioppr_set_pipe_export_profile_info(struct dt_develop_t *dev,
                                       const char *filename,
                                       const int intent);
 
-/** returns a reference to the histogram profile info
+/** the profile the scopes, color pickers and readouts show values in: in
+ * proof mode what the preview pipe rendered, rendered (the encoding a pipe
+ * recorded for its run), otherwise, or without one, the histogram setting.
+ * must not be cleanup() */
+dt_iop_order_iccprofile_info_t *
+dt_ioppr_get_scope_profile_info(struct dt_develop_t *dev,
+                                const dt_color_encoding_t *rendered);
+
+/** dt_ioppr_get_scope_profile_info() with the encoding of the preview pipe's
+ * last frame, for readers outside the preview's run
  * histogram profile must not be cleanup()
  */
 dt_iop_order_iccprofile_info_t *
@@ -137,6 +181,20 @@ dt_iop_order_iccprofile_info_t *
 dt_ioppr_get_pipe_input_profile_info(const struct dt_dev_pixelpipe_t *pipe);
 dt_iop_order_iccprofile_info_t *
 dt_ioppr_get_pipe_output_profile_info(const struct dt_dev_pixelpipe_t *pipe);
+
+/** the profile module GUIs draw colors on GTK in: the main window's device
+ * encoding, or sRGB where that profile has no matrices */
+dt_iop_order_iccprofile_info_t *dt_ioppr_get_gui_profile_info(struct dt_develop_t *dev);
+
+/** converts values authored as device values of the pipe's window, UI
+ * tones such as gamma's views and the clipping indicators, in place to what
+ * the pipe's output values are (output_encoding, resolved when a run
+ * starts). leaves them as they are where the pipe has no window */
+void dt_ioppr_device_to_output(struct dt_develop_t *dev,
+                               const struct dt_dev_pixelpipe_t *pipe,
+                               float *const rgb,
+                               const int width,
+                               const int height);
 
 /** Get the relevant RGB -> XYZ profile at the position of current module */
 dt_iop_order_iccprofile_info_t *
@@ -204,6 +262,7 @@ typedef struct dt_colorspaces_iccprofile_info_cl_t
   cl_float unbounded_coeffs_out[3][3];
   cl_int nonlinearlut;
   cl_float grey;
+  cl_int hdr_transfer;
 } dt_colorspaces_iccprofile_info_cl_t;
 
 dt_colorspaces_cl_global_t *dt_colorspaces_init_cl_global(void);
@@ -229,6 +288,22 @@ gboolean dt_ioppr_transform_image_colorspace_cl
    const int devid,
    cl_mem dev_img_in,
    cl_mem dev_img_out,
+   const int width,
+   const int height,
+   const dt_iop_colorspace_type_t cst_from,
+   const dt_iop_colorspace_type_t cst_to,
+   dt_iop_colorspace_type_t *converted_cst,
+   const dt_iop_order_iccprofile_info_t *const profile_info);
+
+/** Convert an image whose source and target are the same buffer.
+ * A kernel may not take one image object as both its read_only source and its write_only
+ * target, so these convert into a second image and hand it back in place of the original,
+ * releasing the original. Peak use is two images for the duration of the call.
+ * On failure the original is left untouched and still owned by the caller. */
+gboolean dt_ioppr_transform_image_colorspace_replace_cl
+  (struct dt_iop_module_t *self,
+   const int devid,
+   cl_mem *dev_img,
    const int width,
    const int height,
    const dt_iop_colorspace_type_t cst_from,
@@ -290,6 +365,62 @@ static inline void dt_ioppr_apply_trc(const dt_aligned_pixel_t rgb_in,
          : eval_exp(unbounded_coeffs[c], rgb_in[c]))
       : rgb_in[c];
   }
+}
+
+/* Apply the transfer at an RGB boundary, before/after the gamut matrix. */
+static inline void dt_ioppr_decode_rgb(const float *const in,
+                                      float *const out,
+                                      const dt_iop_order_iccprofile_info_t *const profile)
+{
+  const int hdr = dt_colorspaces_hdr_transfer(profile->type);
+  if(hdr)
+  {
+    copy_pixel(out, in);
+    dt_hdr_decode(out, hdr);
+  }
+  else
+  {
+    dt_ioppr_apply_trc(in, out, profile->lut_in,
+                       profile->unbounded_coeffs_in, profile->lutsize);
+    out[3] = in[3];
+  }
+}
+
+static inline void dt_ioppr_encode_rgb(const float *const in,
+                                      float *const out,
+                                      const dt_iop_order_iccprofile_info_t *const profile)
+{
+  const int hdr = dt_colorspaces_hdr_transfer(profile->type);
+  if(hdr)
+  {
+    copy_pixel(out, in);
+    dt_hdr_encode(out, hdr);
+  }
+  else
+  {
+    dt_ioppr_apply_trc(in, out, profile->lut_out,
+                       profile->unbounded_coeffs_out, profile->lutsize);
+    out[3] = in[3];
+  }
+}
+
+static inline void dt_ioppr_rgb_to_xyz(const float *const rgb,
+                                      float *const xyz,
+                                      const dt_iop_order_iccprofile_info_t *const profile)
+{
+  dt_aligned_pixel_t linear;
+  dt_ioppr_decode_rgb(rgb, linear, profile);
+  dt_apply_transposed_color_matrix(linear, profile->matrix_in_transposed, xyz);
+}
+
+static inline float dt_ioppr_rgb_luminance(const float *const rgb,
+                                          const dt_iop_order_iccprofile_info_t *const profile)
+{
+  dt_aligned_pixel_t linear;
+  dt_ioppr_decode_rgb(rgb, linear, profile);
+  return profile->matrix_in[1][0] * linear[0]
+       + profile->matrix_in[1][1] * linear[1]
+       + profile->matrix_in[1][2] * linear[2];
 }
 
 DT_OMP_DECLARE_SIMD(
@@ -442,13 +573,10 @@ static inline float dt_ioppr_compensate_middle_grey
   // we transform the curve nodes from the image colorspace to lab
   dt_aligned_pixel_t lab = { 0.0f };
   const dt_aligned_pixel_t rgb = { x, x, x };
-  dt_ioppr_rgb_matrix_to_lab(rgb,
-                             lab,
-                             profile_info->matrix_in_transposed,
-                             profile_info->lut_in,
-                             profile_info->unbounded_coeffs_in,
-                             profile_info->lutsize,
-                             profile_info->nonlinearlut);
+  dt_aligned_pixel_t linear, xyz;
+  dt_ioppr_decode_rgb(rgb, linear, profile_info);
+  dt_apply_transposed_color_matrix(linear, profile_info->matrix_in_transposed, xyz);
+  dt_XYZ_to_Lab(xyz, lab);
   return lab[0] * .01f;
 }
 
@@ -461,12 +589,11 @@ static inline float dt_ioppr_uncompensate_middle_grey
   const dt_aligned_pixel_t lab = { x * 100.f, 0.0f, 0.0f };
   dt_aligned_pixel_t rgb = { 0.0f };
 
-  dt_ioppr_lab_to_rgb_matrix(lab,
-                             rgb,
-                             profile_info->matrix_out_transposed,
-                             profile_info->lut_out,
-                             profile_info->unbounded_coeffs_out,
-                             profile_info->lutsize, profile_info->nonlinearlut);
+  dt_aligned_pixel_t xyz, linear;
+  dt_Lab_to_XYZ(lab, xyz);
+  dt_apply_transposed_color_matrix(xyz, profile_info->matrix_out_transposed, linear);
+  linear[3] = 0.0f;
+  dt_ioppr_encode_rgb(linear, rgb, profile_info);
   return rgb[0];
 }
 

@@ -38,6 +38,7 @@
               wrapGAppsHook3
               saxon # Use Saxon instead of libxslt to fix XSLT generate-id() consistency issues
               potrace
+              gdb
             ];
 
             buildInputs =
@@ -54,7 +55,6 @@
                 graphicsmagick
                 gtk3
                 icu
-                ilmbase
                 isocodes
                 jasper
                 json-glib
@@ -62,6 +62,7 @@
                 lensfun
                 lerc
                 libaom
+                libarchive
                 #libavif # TODO re-enable once cmake files are fixed (#425306)
                 libdatrie
                 libepoxy
@@ -80,7 +81,7 @@
                 libtiff
                 libwebp
                 libxml2
-                lua
+                lua5_4
                 openexr
                 openjpeg
                 osm-gps-map

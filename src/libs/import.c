@@ -15,6 +15,7 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
+
 #include "common/collection.h"
 #include "common/darktable.h"
 #include "common/file_location.h"
@@ -23,9 +24,11 @@
 #include "common/datetime.h"
 #include "control/conf.h"
 #include "control/control.h"
+
 #ifdef HAVE_GPHOTO2
 #include "control/jobs/camera_jobs.h"
 #endif
+
 #include "dtgtk/button.h"
 #include "gui/accelerators.h"
 #include "gui/gtk.h"
@@ -35,15 +38,14 @@
 #include "imageio/imageio_common.h"  // for dt_imageio_is_raw_by_extension()
 #include "libs/lib.h"
 #include "libs/lib_api.h"
+
 #ifdef GDK_WINDOWING_QUARTZ
 #include "osx/osx.h"
 #endif
-#ifdef _WIN32
-//MSVCRT does not have strptime implemented
-#include "win/strptime.h"
-#endif
+
 #include <strings.h>
 #include <librsvg/rsvg.h>
+
 // ugh, ugly hack. why do people break stuff all the time?
 #ifndef RSVG_CAIRO_H
 #include <librsvg/rsvg-cairo.h>
@@ -52,6 +54,7 @@
 #ifdef USE_LUA
 #include "lua/widget/widget.h"
 #endif
+
 DT_MODULE(1)
 
 static void _import_from_dialog_new(dt_lib_module_t* self);
@@ -291,7 +294,7 @@ void gui_update(dt_lib_module_t *self)
 
       /* add camera actions buttons */
       GtkWidget *vbx = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-      if(camera->can_import == TRUE)
+      if(camera->can_import)
       {
         button = dt_action_button_new(self, _import_text[DT_IMPORT_CAMERA],
                                       _lib_import_from_camera_callback, self, NULL, 0, 0);
@@ -300,7 +303,7 @@ void gui_update(dt_lib_module_t *self)
         gtk_widget_set_halign(gtk_bin_get_child(GTK_BIN(button)), GTK_ALIGN_CENTER);
         dt_gui_add_help_link(button, "import_camera");
       }
-      if(camera->can_tether == TRUE)
+      if(camera->can_tether)
       {
         button = dt_action_button_new(self, _import_text[DT_IMPORT_TETHER],
                                       _lib_import_tethered_callback, camera, NULL, 0, 0);
@@ -882,9 +885,9 @@ static void _import_add_file_callback(GObject *direnum,
   g_list_free(file_list);
 }
 
-void _import_enum_callback(GObject* source_object,
-                           GAsyncResult* res,
-                           gpointer user_data)
+static void _import_enum_callback(GObject* source_object,
+                                  GAsyncResult* res,
+                                  gpointer user_data)
 {
   dt_lib_module_t* self = (dt_lib_module_t *)user_data;
   dt_lib_import_t *d = self->data;
@@ -1320,8 +1323,8 @@ static void _folders_button_press_cb(GtkGestureSingle *gesture, int n_press,
   gtk_tree_view_convert_widget_to_bin_window_coords(GTK_TREE_VIEW(view),
                                                     (gint)x, (gint)y, &bin_x, &bin_y);
 
-  GdkModifierType state;
-  gtk_get_current_event_state(&state);
+  const GdkModifierType state =
+    dt_gui_get_current_event_state(GTK_EVENT_CONTROLLER(gesture));
 
   if(n_press == 1
      && gtk_gesture_single_get_current_button(gesture) == GDK_BUTTON_PRIMARY
@@ -1439,25 +1442,28 @@ static void _set_places_list(GtkWidget *places_paned,
   g_free(markup);
   gtk_box_pack_start(GTK_BOX(places_header), places_label, FALSE, FALSE, 0);
 
-  GtkWidget *places_reset = dtgtk_button_new(dtgtk_cairo_paint_reset, 0, NULL);
-  gtk_widget_set_tooltip_text
-    (places_reset,
-     _("restore all default places you have removed"));
-  g_signal_connect(places_reset, "clicked", G_CALLBACK(_places_reset_callback), self);
+  GtkWidget *places_reset = dtgtk_button_new_full(dtgtk_cairo_paint_reset, 0, NULL,
+      &(dtgtk_button_config_t){
+        .tooltip = _("restore all default places you have removed"),
+        .clicked_cb = G_CALLBACK(_places_reset_callback),
+        .clicked_data = self,
+      });
   gtk_box_pack_end(GTK_BOX(places_header), places_reset, FALSE, FALSE, 0);
 
-  d->remove_place_button = dtgtk_button_new(dtgtk_cairo_paint_minus_simple, 0, NULL);
-  gtk_widget_set_tooltip_text
-    (d->remove_place_button,
-     _("remove the selected custom place"));
-  g_signal_connect(d->remove_place_button, "clicked", G_CALLBACK(_remove_selected_place), self);
+  d->remove_place_button = dtgtk_button_new_full(dtgtk_cairo_paint_minus_simple, 0, NULL,
+      &(dtgtk_button_config_t){
+        .tooltip = _("remove the selected custom place"),
+        .clicked_cb = G_CALLBACK(_remove_selected_place),
+        .clicked_data = self,
+      });
   gtk_box_pack_end(GTK_BOX(places_header), d->remove_place_button, FALSE, FALSE, 0);
 
-  GtkWidget *places_add = dtgtk_button_new(dtgtk_cairo_paint_plus_simple, 0, NULL);
-  gtk_widget_set_tooltip_text
-    (places_add,
-     _("add a custom place"));
-  g_signal_connect(places_add, "clicked", G_CALLBACK(_lib_import_select_folder), self);
+  GtkWidget *places_add = dtgtk_button_new_full(dtgtk_cairo_paint_plus_simple, 0, NULL,
+      &(dtgtk_button_config_t){
+        .tooltip = _("add a custom place"),
+        .clicked_cb = G_CALLBACK(_lib_import_select_folder),
+        .clicked_data = self,
+      });
   gtk_box_pack_end(GTK_BOX(places_header), places_add, FALSE, FALSE, 0);
 
   gtk_box_pack_start(GTK_BOX(places_top_box), places_header, FALSE, FALSE, 0);
@@ -1991,13 +1997,15 @@ static void _set_expander_content(GtkWidget *rbox,
   gtk_container_remove(GTK_CONTAINER(grid), basedir);
   gtk_box_pack_start(GTK_BOX(hbox), basedir, TRUE, TRUE, 0);
   g_object_unref(basedir);
-  GtkWidget *browsedir = dtgtk_button_new(dtgtk_cairo_paint_directory, CPF_NONE, NULL);
+  GtkWidget *browsedir = dtgtk_button_new_full(dtgtk_cairo_paint_directory, CPF_NONE, NULL,
+      &(dtgtk_button_config_t){
+        .tooltip = _("select directory"),
+        .clicked_cb = G_CALLBACK(_browse_basedir_clicked),
+        .clicked_data = basedir,
+      });
   gtk_widget_set_name(browsedir, "non-flat");
-  gtk_widget_set_tooltip_text(browsedir, _("select directory"));
 
   gtk_box_pack_start(GTK_BOX(hbox), browsedir, FALSE, FALSE, 0);
-  g_signal_connect(G_OBJECT(browsedir), "clicked", G_CALLBACK(_browse_basedir_clicked),
-                   basedir);
   gtk_grid_attach_next_to(grid, hbox, gtk_grid_get_child_at(grid, 0, line - 1),
                           GTK_POS_RIGHT, 1, 1);
 
@@ -2039,8 +2047,7 @@ static void _import_from_dialog_new(dt_lib_module_t* self)
 #endif
   dt_gui_dialog_restore_size(GTK_DIALOG(d->from.dialog), "import");
   gtk_window_set_transient_for(GTK_WINDOW(d->from.dialog), GTK_WINDOW(win));
-  g_signal_connect(d->from.dialog, "key-press-event",
-                   G_CALLBACK(dt_handle_dialog_enter), self);
+  dt_gui_connect_key(d->from.dialog, dt_handle_dialog_enter, self);
 
   // images numbers in action-box
   GtkWidget *box = dt_gui_container_first_child(GTK_CONTAINER(d->from.dialog));

@@ -1,0 +1,12 @@
+--- a/src/develop/masks/masks.c
++++ b/src/develop/masks/masks.c
+@@ -2290,8 +2290,7 @@
+ 
+   while(dev->forms)
+   {
+-    darktable.develop->allforms =
+-      g_list_append(darktable.develop->allforms, dev->forms->data);
++    dev->allforms = g_list_append(dev->allforms, dev->forms->data);
+     dev->forms = g_list_delete_link(dev->forms, dev->forms);
+   }
+ 

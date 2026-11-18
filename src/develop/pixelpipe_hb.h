@@ -37,10 +37,35 @@ G_BEGIN_DECLS
 typedef struct dt_dev_distorted_mask_cache_t
 {
   float *data;      // the cached distorted mask at this piece's output
+  size_t size;      // allocated size of data, accounted in pipe->mask_cache_size
   dt_iop_roi_t roi; // the roi this mask corresponds to (piece->processed_roi_out)
   dt_hash_t hash;     // hash of pipe/geometry state for invalidation
   dt_hash_t src_hash; // hash of source data (e.g. threshold) for invalidation
 } dt_dev_distorted_mask_cache_t;
+
+/** make sure a mask cacheline can hold num_floats, reallocating as required,
+ *  and account the memory in pipe->mask_cache_size. Returns FALSE if we can't
+ *  or don't want to cache (low memory), having released any data it held.
+ *  Every mask cacheline must be filled through this and released through
+ *  dt_dev_pixelpipe_clear_mask_cache(), or its memory escapes the pipe's cache
+ *  budget and the low-memory opt-out. */
+gboolean dt_dev_pixelpipe_prepare_mask_cache(struct dt_dev_pixelpipe_iop_t *piece,
+                                             dt_dev_distorted_mask_cache_t *c,
+                                             const size_t num_floats);
+void dt_dev_pixelpipe_clear_mask_cache(struct dt_dev_pixelpipe_t *pipe,
+                                       dt_dev_distorted_mask_cache_t *c);
+
+/** the pipe's snapshot of the refinements previewed as off. The set itself
+ *  (dt_iop_gui_blend_data_t.masks_refine_bypassed) changes on the GTK thread,
+ *  where the renderer must not read it, so dt_masks_refine_bypass_commit()
+ *  copies it here under the blend data's lock, in commit_params. The keys
+ *  (dt_masks_refine_key_*() in blend.h) are sorted, so that lookups can bisect
+ *  and the hash does not depend on the set's order */
+typedef struct dt_dev_refine_bypass_t
+{
+  guint32 *keys;  // sorted bypass keys, or NULL when nothing is bypassed
+  int nkeys;
+} dt_dev_refine_bypass_t;
 
 typedef struct dt_dev_pixelpipe_iop_t
 {
@@ -78,6 +103,26 @@ typedef struct dt_dev_pixelpipe_iop_t
   // cached distorted masks at geometric module boundaries
   dt_dev_distorted_mask_cache_t detail_mask_cache;
   dt_dev_distorted_mask_cache_t raster_mask_cache;
+  // the output of dt_masks_group_render_roi, before the whole-mask refinement
+  // and inversion (key: see _render_drawn_mask_cached in blend.c). src_hash is
+  // pipe->scharr.hash, for element details thresholds. Not filled when the
+  // group's parametric members or feathering read the module's pixels
+  dt_dev_distorted_mask_cache_t drawn_mask_cache;
+
+  // the module's input and output images, lent to the group renderer for its
+  // parametric members and feathering while dt_develop_blend_process runs;
+  // NULL otherwise
+  const float *blend_refine_guide_in;
+  const float *blend_refine_guide_out;
+  const dt_iop_roi_t *blend_refine_roi_in;
+  const dt_iop_roi_t *blend_refine_roi_out;
+  // the same images on the device while dt_develop_blend_process_cl runs,
+  // where the guides above are not read back; NULL otherwise
+  struct dt_develop_blend_cl_context_t *blend_refine_cl;
+
+  // the refinements previewed as off, copied at commit time so that the
+  // renderer never reads the GUI's set from a worker thread
+  dt_dev_refine_bypass_t refine_bypass;
 } dt_dev_pixelpipe_iop_t;
 
 typedef enum dt_dev_pixelpipe_change_t
@@ -129,7 +174,11 @@ typedef enum dt_dev_pixelpipe_status_t
     as we do for above shutdown modes.
 
     DT_DEV_PIXELPIPE_STOP_DATA
-    A request to restart with different module parameters.
+    A request to restart with different module parameters,
+    writing back input cl_mem to host for a faster restart if possible.
+
+    DT_DEV_PIXELPIPE_STOP_PIECE
+    A module has stopped within the piece process() variants.
     As we missed processing the correct output and all following modules
     will give different results accordingly we clear cachelines for following
     modules (possibly writing back input cl_mem to host for a faster restart).
@@ -143,6 +192,7 @@ typedef enum dt_dev_pixelpipe_stopper_t
   DT_DEV_PIXELPIPE_STOP_HQ,
   DT_DEV_PIXELPIPE_STOP_ZOOM,
   DT_DEV_PIXELPIPE_STOP_DATA,
+  DT_DEV_PIXELPIPE_STOP_PIECE,
 } dt_dev_pixelpipe_stopper_t;
 
 typedef struct dt_dev_detail_mask_t
@@ -150,6 +200,7 @@ typedef struct dt_dev_detail_mask_t
   dt_iop_roi_t roi;
   dt_hash_t hash;
   float *data;
+  size_t size;
 } dt_dev_detail_mask_t;
 
 /**
@@ -178,6 +229,11 @@ typedef struct dt_dev_pixelpipe_t
   // and should be modified by process*(), if necessary.
   dt_iop_buffer_dsc_t dsc;
 
+  // white balance of the generation this pipe is rendering, written by
+  // temperature's commit_params. dev->chroma is shared by all pipes and can
+  // change while this one runs, so modules must read it from here, not from dev
+  dt_dev_wb_t wb;
+
   /** work profile info of the image */
   struct dt_iop_order_iccprofile_info_t *work_profile_info;
   /** input profile info **/
@@ -186,6 +242,24 @@ typedef struct dt_dev_pixelpipe_t
   struct dt_iop_order_iccprofile_info_t *output_profile_info;
   /** used only as a cache-identity tag to invalidate the cache **/
   struct dt_iop_order_iccprofile_info_t *export_profile_info;
+  /** peak luminance of the output relative to the 203 nit reference white,
+      1.0 for SDR; set with the output profile, read by tone mappers **/
+  float output_headroom;
+  /** the window the pipe renders for, DT_COLORSPACE_DISPLAY or DISPLAY2,
+      recorded where the pipe is created; DT_COLORSPACE_NONE if none **/
+  dt_colorspaces_color_profile_type_t window;
+  /** what a presented pipe renders to, its window's output taken at the
+      start of each run; image type DT_COLORSPACE_NONE for pipes nobody
+      presents **/
+  dt_display_output_t output;
+  /** what the transform colorout built produces, recorded by its
+      commit_params(); type DT_COLORSPACE_NONE when no profile describes
+      what it writes **/
+  dt_color_encoding_t colorout_encoding;
+  /** what the pipe's output values mean, resolved when a run starts:
+      colorout_encoding, or the final working profile when colorout does
+      not run. output_profile_info is its stand-in for matrix-only code **/
+  dt_color_encoding_t output_encoding;
 
   // instances of pixelpipe, stored in GList of dt_dev_pixelpipe_iop_t
   GList *nodes;
@@ -195,12 +269,12 @@ typedef struct dt_dev_pixelpipe_t
   dt_dev_pixelpipe_status_t status;
   gboolean loading;
   gboolean input_changed;
-  // backbuffer (output)
-  uint8_t *backbuf;
-  size_t backbuf_size;
+  // output: the last frame a screen pipe published, under backbuf_mutex
+  // (dt_dev_pixelpipe_frame()), which holds its geometry; the last
+  // module's output for the others. the size describes either
+  struct dt_frame_t *frame;
+  void *backbuf;
   int backbuf_width, backbuf_height;
-  float backbuf_scale;
-  dt_dev_zoom_pos_t backbuf_zoom_pos;
   dt_hash_t backbuf_hash;
   dt_pthread_mutex_t mutex, backbuf_mutex, busy_mutex;
   int final_width, final_height;
@@ -231,11 +305,14 @@ typedef struct dt_dev_pixelpipe_t
   gboolean tiling;
   // should this pixelpipe display a mask in the end?
   dt_dev_pixelpipe_display_mask_t mask_display;
+  // the focused module's requested mask overlay is empty (uniform mask), so
+  // none is drawn; kept from the last run that reached its blend step
+  gboolean mask_display_empty;
   // should this pixelpipe completely suppressed the blendif module?
   gboolean bypass_blendif;
   // input data based on this timestamp:
   int input_timestamp;
-  uint32_t average_delay;
+  gint64 average_delay;
   dt_dev_pixelpipe_type_t type;
   // the final output pixel format this pixelpipe will be converted to
   dt_imageio_levels_t levels;
@@ -258,13 +335,14 @@ typedef struct dt_dev_pixelpipe_t
   // module blending cache
   float *bcache_data;
   dt_hash_t bcache_hash;
+  size_t bcache_size;
 
   // reusable ping-pong buffers for mask distortion walks
   float *mask_distort_buf[2];
   size_t mask_distort_buf_size[2];
-  /* Optional caller-owned, synchronous on-image tone sample. Never retained
-   * outside this pipeline; ordinary desktop/export pipes leave it NULL. */
-  struct dt_imageio_toneequal_sample_t *toneequal_sample;
+  // sum of all per-piece detail/raster mask caches currently allocated in this pipe
+  size_t mask_cache_size;
+  gint64 started_time; // monotonic timestamp (in microseconds) when the pipe started
 } dt_dev_pixelpipe_t;
 
 struct dt_develop_t;
@@ -337,6 +415,8 @@ const char *dt_dev_pixelpipe_shutdown_to_str(const dt_dev_pixelpipe_stopper_t st
 
 // sets pipe->shutdown in atomic CAS mode so only one mode is possible per pipe run
 void dt_dev_pixelpipe_set_shutdown(dt_dev_pixelpipe_t *pipe, const dt_dev_pixelpipe_stopper_t stopper);
+// Is there a pending shutdown request for the piece's pipe?
+gboolean dt_dev_piece_shutdown(dt_dev_pixelpipe_iop_t *piece, const gboolean test);
 
 // inits the pixelpipe with plain passthrough input/output and empty input and default caching settings.
 gboolean dt_dev_pixelpipe_init(dt_dev_pixelpipe_t *pipe);
@@ -361,12 +441,6 @@ gboolean dt_dev_pixelpipe_init_thumbnail(dt_dev_pixelpipe_t *pipe,
 gboolean dt_dev_pixelpipe_init_dummy(dt_dev_pixelpipe_t *pipe,
                                      const int32_t width,
                                      const int32_t height);
-// inits the pixelpipe with given cacheline size and number of
-// entries. returns TRUE in case of success
-gboolean dt_dev_pixelpipe_init_cached(dt_dev_pixelpipe_t *pipe,
-                                      const size_t size,
-                                      const int32_t entries,
-                                      const size_t memlimit);
 // returns available memory for the pipe
 size_t dt_get_available_pipe_mem(const dt_dev_pixelpipe_t *pipe);
 // constructs a new input buffer from given RGB float array.
@@ -381,6 +455,10 @@ void dt_dev_pixelpipe_set_icc(dt_dev_pixelpipe_t *pipe,
                               const dt_colorspaces_color_profile_type_t icc_type,
                               const gchar *icc_filename,
                               const dt_iop_color_intent_t icc_intent);
+
+/** a reference to the last frame a screen pipe published, or NULL: release
+ * it with dt_frame_unref() */
+struct dt_frame_t *dt_dev_pixelpipe_frame(dt_dev_pixelpipe_t *pipe);
 
 // returns the dimensions of the full image after processing.
 void dt_dev_pixelpipe_get_dimensions(dt_dev_pixelpipe_t *pipe,
@@ -407,6 +485,18 @@ void dt_dev_pixelpipe_synch_all(dt_dev_pixelpipe_t *pipe, struct dt_develop_t *d
 void dt_dev_pixelpipe_synch_top(dt_dev_pixelpipe_t *pipe, struct dt_develop_t *dev);
 // force a rebuild of the pipe, needed when a module order is changed for example
 void dt_dev_pixelpipe_rebuild(struct dt_develop_t *dev);
+
+/* drop the deleted, disabled or out-of-sync consumers from `module`'s raster
+   mask users, judging each consumer by its node in this pipe.
+
+   Called by synch_all and synch_top, and declared here only so the tests can
+   call it directly. It must handle two kinds of consumer, the raster sink and
+   a raster element of a mask, in every pipe, the export one included, where
+   piece->enabled is right and module->enabled is not. A wrong answer drops a
+   live consumer's mask, silently and only on export (integration test
+   0167-raster-mask) */
+void dt_dev_pixelpipe_prune_stale_raster_users(dt_dev_pixelpipe_t *pipe,
+                                               struct dt_iop_module_t *module);
 
 // process region of interest of pixels. returns TRUE if pipe was altered during processing.
 gboolean dt_dev_pixelpipe_process(dt_dev_pixelpipe_t *pipe,

@@ -1,0 +1,15 @@
+.gradle/
+.kotlin/
+**/build/
+.cxx/
+local.properties
+gradle/wrapper/gradle-wrapper.jar
+*.apk
+*.aab
+*.apks
+*.so
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pkcs12

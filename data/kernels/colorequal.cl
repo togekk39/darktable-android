@@ -47,7 +47,7 @@ static inline float gamut_map_HSB(const float4 HSB, global float *gamut_LUT, con
 {
   const float4 JCH = dt_UCS_HSB_to_JCH(HSB);
   const float max_colorfulness = lookup_gamut(gamut_LUT, JCH.z);
-  const float max_chroma = 15.932993652962535f * dtcl_pow(JCH.x * L_white, 0.6523997524738018f) * dtcl_pow(max_colorfulness, 0.6007557017508491f) / L_white;
+  const float max_chroma = 15.932993652962535f * pow(JCH.x * L_white, 0.6523997524738018f) * fp32_div(pow(max_colorfulness, 0.6007557017508491f), L_white);
   const float4 JCH_gamut_boundary = { JCH.x, max_chroma, JCH.z, 0.0f };
   const float4 HSB_gamut_boundary = dt_UCS_JCH_to_HSB(JCH_gamut_boundary);
 
@@ -108,7 +108,7 @@ __kernel void prepare_prefilter(global float2 *uv,
 
   if(fabs(det) > 4.0f * FLT_EPSILON)
   {
-    const float4 sigma_inv = { sigma.w / det, -sigma.y / det, -sigma.z / det, sigma.x / det };
+    const float4 sigma_inv = { fp32_div(sigma.w, det), fp32_div(-sigma.y, det), fp32_div(-sigma.z, det), fp32_div(sigma.x, det) };
     a[k].x = covariance[k].x * sigma_inv.x + covariance[k].y * sigma_inv.y;
     a[k].y = covariance[k].x * sigma_inv.z + covariance[k].y * sigma_inv.w;
     a[k].z = covariance[k].z * sigma_inv.x + covariance[k].w * sigma_inv.y;
@@ -212,7 +212,7 @@ __kernel void final_guide(global float4 *covariance,
 
   if(fabs(det) > 4.0f * FLT_EPSILON)
   {
-    const float4 sigma_inv = { sigma.w / det, -sigma.y / det, -sigma.z / det, sigma.x / det };
+    const float4 sigma_inv = { fp32_div(sigma.w, det), fp32_div(-sigma.y, det), fp32_div(-sigma.z, det), fp32_div(sigma.x, det) };
     a[k].x = correlations[k].x * sigma_inv.x + correlations[k].y * sigma_inv.y;
     a[k].y = correlations[k].x * sigma_inv.z + correlations[k].y * sigma_inv.w;
     a[k].z = correlations[k].z * sigma_inv.x + correlations[k].w * sigma_inv.y;
@@ -267,7 +267,7 @@ __kernel void sample_input(__read_only image2d_t dev_in,
 
   const int k = mad24(row, width, col);
 
-  const float4 pix_in = read_imagef(dev_in, samplerA, (int2)(col, row));
+  const float4 pix_in = Areadpixel(dev_in, col, row);
   // calc saturation from input data
   const float dmin = fmin(pix_in.x, fmin(pix_in.y, pix_in.z));
   const float dmax = fmax(pix_in.x, fmax(pix_in.y, pix_in.z));
@@ -448,158 +448,4 @@ __kernel void process_data(global float2 *uv,
     corrections[k].y = 1.0f;
     b_corrections[k] = 0.0f;
   }
-}
-
-// bilinear interpolators on global buffers
-kernel void bilinear4(global float4 *in,
-                      const int width_in,
-                      const int height_in,
-                      global float4 *out,
-                      const int width_out,
-                      const int height_out)
-{
-  const int x = get_global_id(0);
-  const int y = get_global_id(1);
-
-  if(x >= width_out || y >= height_out) return;
-
-  // Relative coordinates of the pixel in output space
-  const float x_out = (float)x /(float)width_out;
-  const float y_out = (float)y /(float)height_out;
-
-  // Corresponding absolute coordinates of the pixel in input space
-  const float x_in = x_out * (float)width_in;
-  const float y_in = y_out * (float)height_in;
-
-  // Nearest neighbours coordinates in input space
-  int x_prev = (int)floor(x_in);
-  int x_next = x_prev + 1;
-  int y_prev = (int)floor(y_in);
-  int y_next = y_prev + 1;
-
-  x_prev = (x_prev < width_in) ? x_prev : width_in - 1;
-  x_next = (x_next < width_in) ? x_next : width_in - 1;
-  y_prev = (y_prev < height_in) ? y_prev : height_in - 1;
-  y_next = (y_next < height_in) ? y_next : height_in - 1;
-
-
-  // Nearest pixels in input array (nodes in grid)
-  const float4 Q_NW = in[mad24(y_prev, width_in, x_prev)]; //read_imagef(in, samplerA, (int2)(x_prev, y_prev));
-  const float4 Q_NE = in[mad24(y_prev, width_in, x_next)]; //read_imagef(in, samplerA, (int2)(x_next, y_prev));
-  const float4 Q_SE = in[mad24(y_next, width_in, x_next)]; // read_imagef(in, samplerA, (int2)(x_next, y_next));
-  const float4 Q_SW = in[mad24(y_next, width_in, x_prev)]; // read_imagef(in, samplerA, (int2)(x_prev, y_next));
-
-  // Spatial differences between nodes
-  const float Dy_next = (float)y_next - y_in;
-  const float Dy_prev = 1.f - Dy_next; // because next - prev = 1
-  const float Dx_next = (float)x_next - x_in;
-  const float Dx_prev = 1.f - Dx_next; // because next - prev = 1
-
-  // Interpolate
-  const float4 pix_out = Dy_prev * (Q_SW * Dx_next + Q_SE * Dx_prev) +
-                         Dy_next * (Q_NW * Dx_next + Q_NE * Dx_prev);
-
-  out[mad24(y, width_out, x)] = pix_out;
-}
-
-kernel void bilinear2(global float2 *in,
-                      const int width_in,
-                      const int height_in,
-                      global float2 *out,
-                      const int width_out,
-                      const int height_out)
-{
-  const int x = get_global_id(0);
-  const int y = get_global_id(1);
-
-  if(x >= width_out || y >= height_out) return;
-
-  // Relative coordinates of the pixel in output space
-  const float x_out = (float)x /(float)width_out;
-  const float y_out = (float)y /(float)height_out;
-
-  // Corresponding absolute coordinates of the pixel in input space
-  const float x_in = x_out * (float)width_in;
-  const float y_in = y_out * (float)height_in;
-
-  // Nearest neighbours coordinates in input space
-  int x_prev = (int)floor(x_in);
-  int x_next = x_prev + 1;
-  int y_prev = (int)floor(y_in);
-  int y_next = y_prev + 1;
-
-  x_prev = (x_prev < width_in) ? x_prev : width_in - 1;
-  x_next = (x_next < width_in) ? x_next : width_in - 1;
-  y_prev = (y_prev < height_in) ? y_prev : height_in - 1;
-  y_next = (y_next < height_in) ? y_next : height_in - 1;
-
-
-  // Nearest pixels in input array (nodes in grid)
-  const float2 Q_NW = in[mad24(y_prev, width_in, x_prev)]; //read_imagef(in, samplerA, (int2)(x_prev, y_prev));
-  const float2 Q_NE = in[mad24(y_prev, width_in, x_next)]; //read_imagef(in, samplerA, (int2)(x_next, y_prev));
-  const float2 Q_SE = in[mad24(y_next, width_in, x_next)]; // read_imagef(in, samplerA, (int2)(x_next, y_next));
-  const float2 Q_SW = in[mad24(y_next, width_in, x_prev)]; // read_imagef(in, samplerA, (int2)(x_prev, y_next));
-
-  // Spatial differences between nodes
-  const float Dy_next = (float)y_next - y_in;
-  const float Dy_prev = 1.f - Dy_next; // because next - prev = 1
-  const float Dx_next = (float)x_next - x_in;
-  const float Dx_prev = 1.f - Dx_next; // because next - prev = 1
-
-  // Interpolate
-  const float2 pix_out = Dy_prev * (Q_SW * Dx_next + Q_SE * Dx_prev) +
-                         Dy_next * (Q_NW * Dx_next + Q_NE * Dx_prev);
-
-  out[mad24(y, width_out, x)] = pix_out;
-}
-
-kernel void bilinear1(global float *in,
-                      const int width_in,
-                      const int height_in,
-                      global float *out,
-                      const int width_out,
-                      const int height_out)
-{
-  const int x = get_global_id(0);
-  const int y = get_global_id(1);
-
-  if(x >= width_out || y >= height_out) return;
-
-  // Relative coordinates of the pixel in output space
-  const float x_out = (float)x /(float)width_out;
-  const float y_out = (float)y /(float)height_out;
-
-  // Corresponding absolute coordinates of the pixel in input space
-  const float x_in = x_out * (float)width_in;
-  const float y_in = y_out * (float)height_in;
-
-  // Nearest neighbours coordinates in input space
-  int x_prev = (int)floor(x_in);
-  int x_next = x_prev + 1;
-  int y_prev = (int)floor(y_in);
-  int y_next = y_prev + 1;
-
-  x_prev = (x_prev < width_in) ? x_prev : width_in - 1;
-  x_next = (x_next < width_in) ? x_next : width_in - 1;
-  y_prev = (y_prev < height_in) ? y_prev : height_in - 1;
-  y_next = (y_next < height_in) ? y_next : height_in - 1;
-
-
-  // Nearest pixels in input array (nodes in grid)
-  const float Q_NW = in[mad24(y_prev, width_in, x_prev)]; //read_imagef(in, samplerA, (int2)(x_prev, y_prev));
-  const float Q_NE = in[mad24(y_prev, width_in, x_next)]; //read_imagef(in, samplerA, (int2)(x_next, y_prev));
-  const float Q_SE = in[mad24(y_next, width_in, x_next)]; // read_imagef(in, samplerA, (int2)(x_next, y_next));
-  const float Q_SW = in[mad24(y_next, width_in, x_prev)]; // read_imagef(in, samplerA, (int2)(x_prev, y_next));
-
-  // Spatial differences between nodes
-  const float Dy_next = (float)y_next - y_in;
-  const float Dy_prev = 1.f - Dy_next; // because next - prev = 1
-  const float Dx_next = (float)x_next - x_in;
-  const float Dx_prev = 1.f - Dx_next; // because next - prev = 1
-
-  // Interpolate
-  const float pix_out = Dy_prev * (Q_SW * Dx_next + Q_SE * Dx_prev) +
-                        Dy_next * (Q_NW * Dx_next + Q_NE * Dx_prev);
-
-  out[mad24(y, width_out, x)] = pix_out;
 }

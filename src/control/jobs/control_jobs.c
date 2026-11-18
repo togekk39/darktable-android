@@ -23,8 +23,10 @@
 #include "common/exif.h"
 #include "common/film.h"
 #include "common/gpx.h"
+#include "common/hdr_alignment.h"
 #include "common/history.h"
 #include "common/history_snapshot.h"
+#include "common/dtdata.h"
 #include "common/image.h"
 #include "common/image_cache.h"
 #include "common/mipmap_cache.h"
@@ -49,12 +51,15 @@
 #include <gio/gio.h>
 #include <glib.h>
 #include <glib/gstdio.h>
+
 #ifndef _WIN32
 #include <glob.h>
 #endif
+
 #ifdef __APPLE__
 #include "osx/osx.h"
 #endif
+
 #ifdef _WIN32
 #include "win/dtwin.h"
 #include <utime.h>
@@ -100,6 +105,7 @@ typedef struct dt_control_export_t
   dt_colorspaces_color_profile_type_t icc_type;
   gchar *icc_filename;
   dt_iop_color_intent_t icc_intent;
+  int pq_peak_nits;
   gchar *metadata_export;
 } dt_control_export_t;
 
@@ -154,19 +160,8 @@ static void _update_progress(dt_job_t *job, double fraction, double *prev_time)
 static void _control_image_enumerator_job_film_init(dt_control_image_enumerator_t *t,
                                                       const int32_t filmid)
 {
-  sqlite3_stmt *stmt;
   /* get a list of images in filmroll */
-  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),
-                              "SELECT id FROM main.images WHERE film_id = ?1", -1,
-                              &stmt, NULL);
-  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, filmid);
-
-  while(sqlite3_step(stmt) == SQLITE_ROW)
-  {
-    const dt_imgid_t imgid = sqlite3_column_int(stmt, 0);
-    t->index = g_list_append(t->index, GINT_TO_POINTER(imgid));
-  }
-  sqlite3_finalize(stmt);
+  t->index = g_list_concat(t->index, dt_film_get_images(filmid));
 }
 
 static void _collection_update(double *last_update,
@@ -362,13 +357,6 @@ static int32_t _control_write_sidecar_files_job_run(dt_job_t *job)
   dt_control_job_set_progress_message(job,
              ngettext("writing sidecar file","writing %zu sidecar files",nb_imgs), nb_imgs);
 
-  sqlite3_stmt *stmt;
-  DT_DEBUG_SQLITE3_PREPARE_V2
-    (dt_database_get(darktable.db),
-     "UPDATE main.images"
-     " SET write_timestamp = STRFTIME('%s', 'now')"
-     " WHERE id = ?1", -1,
-     &stmt, NULL);
   size_t count = 0;
   double prev_time = 0;
   for(GList *t = params->index ; t && !_job_cancelled(job) ; t = g_list_next(t))
@@ -388,23 +376,19 @@ static int32_t _control_write_sidecar_files_job_run(dt_job_t *job)
       {
         // put the timestamp into db. this can't be done in exif.cc
         // since that code gets called for the copy exporter, too
-        DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);
-        sqlite3_step(stmt);
-        sqlite3_reset(stmt);
-        sqlite3_clear_bindings(stmt);
+        dt_image_set_write_timestamp_now(imgid);
       }
       dt_image_cache_read_release(img);
     }
     const double fraction = ++count / (double)nb_imgs;
     _update_progress(job, fraction, &prev_time);
   }
-  sqlite3_finalize(stmt);
   return 0;
 }
 
 typedef struct dt_control_merge_hdr_t
 {
-  uint32_t first_imgid;
+  dt_imgid_t first_imgid;
   uint32_t first_filter;
   uint8_t first_xtrans[6][6];
 
@@ -419,6 +403,18 @@ typedef struct dt_control_merge_hdr_t
   dt_aligned_pixel_t wb_coeffs;
   float adobe_XYZ_to_CAM[4][3];
   char camera_makermodel[128];
+
+  // auto-alignment of exposure brackets (handheld / shaky tripod). When
+  // enabled, the first frame seeds the reference and every later frame is
+  // registered onto it before accumulation. NULL/disabled => legacy behavior.
+  dt_hdr_align_t *align;
+  gboolean align_enabled;
+  float *aligned_buf;  // scratch holding the warped moving frame (wd*ht)
+
+  // auto-reference pre-pass: pick the richest-feature frame as the reference.
+  gboolean probe_mode;          // set during the feature-probe pre-pass
+  int probe_best_count;         // best SIFT feature count seen so far
+  dt_imgid_t probe_best_imgid;  // imgid of the richest frame
 
   // 0 - ok; 1 - errors, abort
   gboolean abort;
@@ -486,6 +482,27 @@ static int _control_merge_hdr_process(dt_imageio_module_data_t *datai,
   const dt_image_t image = *img;
   dt_image_cache_read_release(img);
 
+  // Auto-reference pre-pass: just probe each frame's feature richness and keep
+  // the richest as the reference; do not accumulate anything.
+  if(d->probe_mode)
+  {
+    if(image.buf_dsc.filters != 0u
+       && image.buf_dsc.channels == 1
+       && image.buf_dsc.datatype == TYPE_UINT16)
+    {
+      const int n = dt_hdr_alignment_probe_features((const float *)ivoid,
+                                                    datai->width, datai->height);
+      dt_print(DT_DEBUG_HDR_MERGE,
+               "[hdr merge] auto-reference probe: imgid %d -> %d features", imgid, n);
+      if(n > d->probe_best_count)
+      {
+        d->probe_best_count = n;
+        d->probe_best_imgid = imgid;
+      }
+    }
+    return 0;
+  }
+
   if(!d->pixels)
   {
     d->first_imgid = imgid;
@@ -532,6 +549,11 @@ static int _control_merge_hdr_process(dt_imageio_module_data_t *datai,
     return 1;
   }
 
+  // Authoritative per-frame guard on the *decoded* buffer.
+  // _control_merge_hdr_validate() only sees cached image flags, which are
+  // metadata-derived and can lag the decode -- a monochrome raw carries
+  // DT_IMAGE_RAW yet decodes to filters == 0. The loop below indexes a raw CFA
+  // mosaic and writes a CFA DNG, so anything else must abort here.
   if(image.buf_dsc.filters == 0u
      || image.buf_dsc.channels != 1
      || image.buf_dsc.datatype != TYPE_UINT16)
@@ -540,9 +562,11 @@ static int _control_merge_hdr_process(dt_imageio_module_data_t *datai,
     d->abort = TRUE;
     return 1;
   }
-  else if(datai->width != d->wd
-          || datai->height != d->ht
-          || d->orientation != image.orientation)
+  // Re-check size / orientation too: the accumulation loop indexes the current
+  // frame's buffer with the first frame's stride.
+  if(datai->width != d->wd
+     || datai->height != d->ht
+     || d->orientation != image.orientation)
   {
     dt_control_log(_("images have to be of same size and orientation!"));
     d->abort = TRUE;
@@ -562,13 +586,39 @@ static int _control_merge_hdr_process(dt_imageio_module_data_t *datai,
   const float photoncnt = 100.0f * aperture * exp / iso;
   float saturation = 1.0f;
   d->whitelevel = fmaxf(d->whitelevel, saturation * cal);
+
+  // Auto-align this frame onto the reference before accumulation.  The first
+  // frame becomes the reference; every later frame is registered onto it and
+  // accumulated from a warped scratch buffer.  On any failure (or when
+  // alignment is disabled / built without OpenCV) we fall back to the raw
+  // unaligned mosaic, i.e. the legacy behavior.
+  const float *in_buf = (const float *)ivoid;
+  if(d->align_enabled && d->align)
+  {
+    dt_print(DT_DEBUG_HDR_MERGE, "Processing image %d/%d: imgid %d", num, total, imgid);
+    if(imgid == d->first_imgid)
+    {
+      dt_print(DT_DEBUG_HDR_MERGE, "  Reference image (no alignment needed)");
+      if(dt_hdr_alignment_set_reference(d->align, (const float *)ivoid, d->wd, d->ht,
+                                        d->first_filter, d->first_xtrans))
+        d->aligned_buf = dt_alloc_align_float((size_t)d->wd * d->ht);
+    }
+    else if(d->aligned_buf)
+    {
+      if(dt_hdr_alignment_align_frame(d->align, (const float *)ivoid, d->aligned_buf,
+                                      d->wd, d->ht, d->first_filter, d->first_xtrans, NULL))
+        in_buf = d->aligned_buf;
+    }
+  }
+
   DT_OMP_FOR(collapse(2))
   for(int y = 0; y < d->ht; y++)
     for(int x = 0; x < d->wd; x++)
     {
       // read unclamped raw value with subtracted black and rescaled
-      // to 1.0 saturation.  this is the output of the rawprepare iop.
-      const float in = ((float *)ivoid)[x + d->wd * y];
+      // to 1.0 saturation.  this is the output of the rawprepare iop
+      // (optionally registered onto the reference frame, see in_buf above).
+      const float in = in_buf[x + d->wd * y];
       // weights based on siggraph 12 poster zijian zhu, zhengguo li,
       // susanto rahardja, pasi fraenti 2d denoising factor for high
       // dynamic range imaging
@@ -588,8 +638,8 @@ static int _control_merge_hdr_process(dt_imageio_module_data_t *datai,
         for(int i = 0; i < 3; i++)
           for(int j = 0; j < 3; j++)
           {
-            M = MAX(M, ((float *)ivoid)[xx + i + d->wd * (yy + j)]);
-            m = MIN(m, ((float *)ivoid)[xx + i + d->wd * (yy + j)]);
+            M = MAX(M, in_buf[xx + i + d->wd * (yy + j)]);
+            m = MIN(m, in_buf[xx + i + d->wd * (yy + j)]);
           }
         // move envelope a little to allow non-zero weight even for
         // clipped regions.  this is because even if the 2x2 block is
@@ -631,16 +681,98 @@ static int _control_merge_hdr_process(dt_imageio_module_data_t *datai,
   return 0;
 }
 
+// Validate that the selected images form a consistent raw exposure bracket.
+// Reject non-raw inputs, already-merged HDR DNGs, or images with mismatched
+// resolution/orientation before expensive decode/align work. Returns TRUE if
+// mergeable, otherwise logs the odd file and returns FALSE.
+static gboolean _control_merge_hdr_validate(GList *images)
+{
+  gboolean have_ref = FALSE;
+  int32_t ref_width = 0, ref_height = 0;
+  dt_image_orientation_t ref_orientation = ORIENTATION_NONE;
+
+  for(GList *l = images; l; l = g_list_next(l))
+  {
+    const dt_imgid_t imgid = GPOINTER_TO_INT(l->data);
+    const dt_image_t *img = dt_image_cache_get(imgid, 'r');
+    if(!img) continue;
+
+    const int32_t flags = img->flags;
+    const int32_t width = img->width;
+    const int32_t height = img->height;
+    const dt_image_orientation_t orientation = img->orientation;
+    char filename[DT_MAX_FILENAME_LEN];
+    g_strlcpy(filename, img->filename, sizeof(filename));
+    dt_image_cache_read_release(img);
+
+    // Exposure bracketing operates on the raw CFA mosaic, so reject non-raws,
+    // already-merged HDR DNGs (float raws carry DT_IMAGE_HDR) and monochrome
+    // raws (no CFA). These flags are metadata-derived and may not be set yet for
+    // an undecoded frame; _control_merge_hdr_process() is the real guard.
+    if(!(flags & DT_IMAGE_RAW) || (flags & DT_IMAGE_HDR) || (flags & DT_IMAGE_MONOCHROME))
+    {
+      dt_control_log(_("HDR merge aborted: `%s' is not a raw exposure"
+                       " (already merged HDR, monochrome or non-raw image)"), filename);
+      return FALSE;
+    }
+
+    if(!have_ref)
+    {
+      ref_width = width;
+      ref_height = height;
+      ref_orientation = orientation;
+      have_ref = TRUE;
+    }
+    else if(width != ref_width
+            || height != ref_height
+            || orientation != ref_orientation)
+    {
+      dt_control_log(_("HDR merge aborted: `%s' has a different size"
+                       " or orientation"), filename);
+      return FALSE;
+    }
+  }
+  return TRUE;
+}
+
 static int32_t _control_merge_hdr_job_run(dt_job_t *job)
 {
   dt_control_image_enumerator_t *params = dt_control_job_get_params(job);
   GList *t = params->index;
   const guint total = g_list_length(t);
   double fraction = 0;
+
+  // reject mismatched selections (already-merged HDR DNGs, differing resolution
+  // or orientation) before doing any expensive decode / alignment work
+  if(!_control_merge_hdr_validate(t))
+    return 0;
+
   dt_control_job_set_progress_message(job, ngettext("merging %d image",
                                                     "merging %d images", total), total);
 
   dt_control_merge_hdr_t d = (dt_control_merge_hdr_t){.epsw = 1e-8f, .abort = FALSE };
+
+  // Opt-in auto-alignment of the brackets (only when built with OpenCV).
+#ifdef HAVE_OPENCV
+  d.align_enabled = dt_conf_get_bool("plugins/lighttable/hdr_merge_auto_align");
+  if(d.align_enabled)
+  {
+    // Seed the runtime parameters from preferences (falling back to the built-in
+    // defaults for any value the user has not changed).
+    dt_hdr_align_params_t align_params;
+    dt_hdr_alignment_default_params(&align_params);
+    align_params.proxy_scale = dt_conf_get_float("plugins/lighttable/hdr_merge_proxy_scale");
+    align_params.feature_gamma = dt_conf_get_float("plugins/lighttable/hdr_merge_feature_gamma");
+    align_params.clahe_clip = dt_conf_get_float("plugins/lighttable/hdr_merge_clahe_clip");
+    align_params.sift_keypoints = dt_conf_get_int("plugins/lighttable/hdr_merge_sift_keypoints");
+    align_params.debug_images = dt_conf_get_bool("plugins/lighttable/hdr_merge_debug_images");
+    d.align = dt_hdr_alignment_new(&align_params);
+    if(d.align)
+      dt_control_log(_("merging HDR: auto-aligning exposure brackets"));
+    else
+      d.align_enabled = FALSE;
+  }
+#endif
 
   dt_imageio_module_format_t buf = (dt_imageio_module_format_t)
     {.mime = _control_merge_hdr_mime,
@@ -650,6 +782,50 @@ static int32_t _control_merge_hdr_job_run(dt_job_t *job)
 
   dt_control_merge_hdr_format_t dat =
     (dt_control_merge_hdr_format_t){.parent = { 0 }, .d = &d };
+
+  // Auto-reference pre-pass: probe every frame's feature richness and move the
+  // richest one to the front, so it becomes both the geometry seed and the
+  // alignment reference. Costs one extra decode pass, hence opt-in.
+#ifdef HAVE_OPENCV
+  if(d.align_enabled && total > 1
+     && dt_conf_get_bool("plugins/lighttable/hdr_merge_auto_reference"))
+  {
+    dt_control_job_set_progress_message(job, _("examining frames for HDR auto-reference"));
+    d.probe_mode = TRUE;
+    d.probe_best_count = -1;
+    d.probe_best_imgid = NO_IMGID;
+    int pnum = 1;
+    for(GList *p = t; p && !d.abort
+        && dt_control_job_get_state(job) != DT_JOB_STATE_CANCELLED;
+        p = g_list_next(p))
+    {
+      const dt_imgid_t pimgid = GPOINTER_TO_INT(p->data);
+      dt_imageio_export_with_flags(pimgid, "unused", &buf, (dt_imageio_module_data_t *)&dat,
+                                   TRUE, FALSE, TRUE, TRUE, FALSE, 1.0,
+                                   FALSE, "pre:rawprepare", FALSE,
+                                   FALSE, DT_COLORSPACE_NONE, NULL, DT_INTENT_LAST, NULL,
+                                   NULL, pnum, total, NULL, -1);
+      // the probe pre-pass is a full extra decode sweep; advance the bar over it
+      // so a large bracket does not look hung, and honor a cancel between frames
+      dt_control_job_set_progress(job, (double)pnum / (double)total);
+      pnum++;
+    }
+    d.probe_mode = FALSE;
+    if(d.abort || dt_control_job_get_state(job) == DT_JOB_STATE_CANCELLED)
+      goto end;
+    if(dt_is_valid_imgid(d.probe_best_imgid))
+    {
+      params->index = g_list_remove(params->index, GINT_TO_POINTER(d.probe_best_imgid));
+      params->index = g_list_prepend(params->index, GINT_TO_POINTER(d.probe_best_imgid));
+      t = params->index;
+      dt_print(DT_DEBUG_HDR_MERGE,
+               "[hdr merge] auto-reference: imgid %d selected (%d features)",
+               d.probe_best_imgid, d.probe_best_count);
+    }
+    dt_control_job_set_progress_message(job, ngettext("merging %d image",
+                                                      "merging %d images", total), total);
+  }
+#endif
 
   int num = 1;
   while(t)
@@ -692,7 +868,15 @@ static int32_t _control_merge_hdr_job_run(dt_job_t *job)
   const int exif_len = dt_exif_read_blob(&exif, pathname, d.first_imgid, FALSE, d.wd, d.ht, TRUE);
   char *c = pathname + strlen(pathname);
   while(*c != '.' && c > pathname) c--;
-  g_strlcpy(c, "-hdr.dng", sizeof(pathname) - (c - pathname));
+  const size_t free_space = sizeof(pathname) - (c - pathname);
+
+  // don't overwrite an existing merge: append a numeric suffix
+  // (-hdr_01.dng, -hdr_02.dng, ...) until we find a free filename,
+  // matching the behavior of export and raw denoise
+  g_strlcpy(c, "-hdr.dng", free_space);
+  for(int seq = 1; g_file_test(pathname, G_FILE_TEST_EXISTS); seq++)
+    snprintf(c, free_space, "-hdr_%02d.dng", seq);
+
   dt_imageio_dng_write_float(pathname,
                              d.pixels,
                              d.wd,
@@ -728,6 +912,8 @@ static int32_t _control_merge_hdr_job_run(dt_job_t *job)
 end:
   free(d.pixels);
   free(d.weight);
+  if(d.aligned_buf) dt_free_align(d.aligned_buf);
+  if(d.align) dt_hdr_alignment_free(d.align);
 
   return 0;
 }
@@ -848,9 +1034,31 @@ static int32_t _control_monochrome_images_job_run(dt_job_t *job)
 
 static char *_get_image_list(GList *l)
 {
+  // checking for an empty GList
+  if(l == NULL)
+  {
+    // is logged because such a call is a sign of a logical error elsewhere in the code
+    dt_print(DT_DEBUG_ALWAYS,
+             "[control_jobs] _get_image_list was called with empty GList, this should not happen");
+    return strdup("");
+  }
+
   const guint size = g_list_length(l);
   char num[8];
+
   char *buffer = calloc(size, sizeof(num));
+  // allocation size here is guaranteed to be non-zero
+  // so returning NULL from calloc is a result of memory allocation failure
+  if(buffer == NULL)
+  {
+    dt_print(DT_DEBUG_ALWAYS,
+             "[control_jobs] failed to allocate memory in _get_image_list");
+    // allocation in strdup could also fail, although extremely unlikely,
+    // given the tiny request size :)
+    // but at least we tried to return as correctly as possible
+    return strdup("");
+  }
+
   gboolean first = TRUE;
 
   buffer[0] = '\0';
@@ -868,36 +1076,12 @@ static char *_get_image_list(GList *l)
 
 static void _set_remove_flag(char *imgs)
 {
-  sqlite3_stmt *stmt = NULL;
-  DT_DEBUG_SQLITE3_PREPARE_V2
-    (dt_database_get(darktable.db),
-     "UPDATE main.images SET flags = (flags|?1) WHERE id IN (?2)", -1, &stmt, NULL);
-  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, DT_IMAGE_REMOVE);
-  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, imgs, -1, SQLITE_STATIC);
-  sqlite3_step(stmt);
-  sqlite3_finalize(stmt);
+  dt_image_add_flags_in_list(imgs, DT_IMAGE_REMOVE);
 }
 
 static GList *_get_full_pathname(char *imgs)
 {
-  sqlite3_stmt *stmt = NULL;
-  GList *list = NULL;
-  // clang-format off
-  DT_DEBUG_SQLITE3_PREPARE_V2
-    (dt_database_get(darktable.db),
-     "SELECT DISTINCT folder || '" G_DIR_SEPARATOR_S "' || filename"
-     " FROM main.images i, main.film_rolls f "
-     "   ON i.film_id = f.id"
-     " WHERE i.id IN (?1)",
-     -1, &stmt, NULL);
-  // clang-format on
-  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, imgs, -1, SQLITE_STATIC);
-  while(sqlite3_step(stmt) == SQLITE_ROW)
-  {
-    list = g_list_prepend(list, g_strdup((const gchar *)sqlite3_column_text(stmt, 0)));
-  }
-  sqlite3_finalize(stmt);
-  return g_list_reverse(list);  // list was built in reverse order, so un-reverse it
+  return dt_image_get_full_paths_in_list(imgs);
 }
 
 static int32_t _count_images_using_overlay(dt_imgid_t imgid)
@@ -927,27 +1111,18 @@ static int32_t _control_remove_images_job_run(dt_job_t *job)
   const guint total = g_list_length(t);
   dt_control_job_set_progress_message(job, ngettext("removing %d image",
                                                     "removing %d images", total), total);
-  sqlite3_stmt *stmt = NULL;
-
   // check that we can safely remove the image
   gboolean remove_ok = TRUE;
-  DT_DEBUG_SQLITE3_PREPARE_V2
-    (dt_database_get(darktable.db),
-     "SELECT id FROM main.images WHERE id IN (?2) AND flags&?1=?1",
-     -1, &stmt, NULL);
-  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, DT_IMAGE_LOCAL_COPY);
-  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, imgs, -1, SQLITE_STATIC);
-
-  while(sqlite3_step(stmt) == SQLITE_ROW)
+  GList *local_copies = dt_image_get_with_flags_in_list(imgs, DT_IMAGE_LOCAL_COPY);
+  for(const GList *l = local_copies; l; l = g_list_next(l))
   {
-    const dt_imgid_t imgid = sqlite3_column_int(stmt, 0);
-    if(!dt_image_safe_remove(imgid))
+    if(!dt_image_safe_remove(GPOINTER_TO_INT(l->data)))
     {
       remove_ok = FALSE;
       break;
     }
   }
-  sqlite3_finalize(stmt);
+  g_list_free(local_copies);
   g_free(imgs);
 
   if(!remove_ok)
@@ -1119,7 +1294,7 @@ static gint _dt_delete_file_display_modal_dialog(const int send_to_trash,
 
   modal_dialog.dialog_result = GTK_RESPONSE_NONE;
 
-  dt_pthread_mutex_init(&modal_dialog.mutex, NULL);
+  dt_pthread_mutex_init(&modal_dialog.mutex);
   pthread_cond_init(&modal_dialog.cond, NULL);
 
   dt_pthread_mutex_lock(&modal_dialog.mutex);
@@ -1140,6 +1315,10 @@ static _dt_delete_status_t delete_file_from_disk
    _dt_delete_dialog_choice_t *delete_on_error)
 {
   _dt_delete_status_t delete_status = _DT_DELETE_STATUS_UNKNOWN;
+
+  // if the file does not exist on disk, it is already deleted
+  if(!g_file_test(filename, G_FILE_TEST_EXISTS))
+    return _DT_DELETE_STATUS_DELETED;
 
   GFile *gfile = g_file_new_for_path(filename);
   int send_to_trash = dt_conf_get_bool("send_to_trash");
@@ -1246,8 +1425,6 @@ static int32_t _control_delete_images_job_run(dt_job_t *job)
                                                     "deleting %d images", total)
                                          , total);
 
-  sqlite3_stmt *stmt;
-
   dt_collection_update(darktable.collection);
 
   // We need a list of files to regenerate .xmp files if there are duplicates
@@ -1255,15 +1432,6 @@ static int32_t _control_delete_images_job_run(dt_job_t *job)
 
   free(imgs);
 
-  DT_DEBUG_SQLITE3_PREPARE_V2
-    (dt_database_get(darktable.db),
-     "SELECT COUNT(*)"
-     " FROM main.images"
-     " WHERE filename IN (SELECT filename"
-     "                    FROM main.images"
-     "                    WHERE id = ?1)"
-     "       AND film_id IN (SELECT film_id FROM main.images WHERE id = ?1)",
-     -1, &stmt, NULL);
   double prev_time = 0;
   // loop through all images to delete
   while(t)
@@ -1286,13 +1454,7 @@ static int32_t _control_delete_images_job_run(dt_job_t *job)
     char filename[PATH_MAX] = { 0 };
     dt_image_full_path(imgid, filename, sizeof(filename), NULL);
 
-    int duplicates = 0;
-    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);
-    if(sqlite3_step(stmt) == SQLITE_ROW)
-      duplicates = sqlite3_column_int(stmt, 0);
-
-    sqlite3_reset(stmt);
-    sqlite3_clear_bindings(stmt);
+    const int duplicates = dt_image_count_same_file(imgid);
 
     // remove from disk:
     if(duplicates == 1)
@@ -1330,6 +1492,20 @@ static int32_t _control_delete_images_job_run(dt_job_t *job)
               break;
           }
           g_list_free_full(files, g_free);
+
+          // .dtdata sidecars are found on their own: with lazy sidecar
+          // writing an xmp may not exist yet while the .dtdata does
+          if(delete_status == _DT_DELETE_STATUS_DELETED)
+          {
+            GList *data = dt_dtdata_find_all(filename);
+            for(GList *l = data; l; l = g_list_next(l))
+            {
+              delete_status = delete_file_from_disk(l->data, &delete_on_error);
+              if(delete_status != _DT_DELETE_STATUS_DELETED)
+                break;
+            }
+            g_list_free_full(data, g_free);
+          }
         }
       }
       else
@@ -1344,6 +1520,8 @@ static int32_t _control_delete_images_job_run(dt_job_t *job)
       // just delete the xmp file of the duplicate selected.
 
       dt_image_path_append_version(imgid, filename, sizeof(filename));
+      char datafile[PATH_MAX] = { 0 };
+      dt_dtdata_path_for_image(filename, datafile, sizeof(datafile));
       g_strlcat(filename, ".xmp", sizeof(filename));
 
       // remove image from db first ...
@@ -1353,6 +1531,8 @@ static int32_t _control_delete_images_job_run(dt_job_t *job)
 
       // ... and delete afterwards because removing will re-write the XMP
       delete_status = delete_file_from_disk(filename, &delete_on_error);
+      if(delete_status == _DT_DELETE_STATUS_DELETED && g_file_test(datafile, G_FILE_TEST_EXISTS))
+        delete_status = delete_file_from_disk(datafile, &delete_on_error);
     }
 
 delete_next_file:
@@ -1362,8 +1542,6 @@ delete_next_file:
     if(delete_status == _DT_DELETE_STATUS_STOP_PROCESSING)
       break;
   }
-
-  sqlite3_finalize(stmt);
 
   while(list)
   {
@@ -1919,6 +2097,9 @@ static int32_t _control_export_job_run(dt_job_t *job)
   GList *t = params->index;
   double prev_time = 0;
 
+  // the peak set when the export was queued, not the setting's current value
+  dt_ioppr_set_thread_pq_peak_nits(settings->pq_peak_nits);
+
   while(t && !_job_cancelled(job))
   {
     const dt_imgid_t imgid = GPOINTER_TO_INT(t->data);
@@ -1971,6 +2152,7 @@ static int32_t _control_export_job_run(dt_job_t *job)
     fraction += 1.0 / total;
     _update_progress(job, fraction, &prev_time);
   }
+  dt_ioppr_set_thread_pq_peak_nits(0);
   g_list_free_full(metadata.list, g_free);
 
   if(mstorage->finalize_store) mstorage->finalize_store(mstorage, sdata);
@@ -2361,8 +2543,14 @@ static void _add_history_job_data(const char *title,
                                   dt_job_execute_callback execute,
                                   _images_job_data_t *images_job_data)
 {
+  // nothing below will take ownership of the data
   if(!images_job_data->imgs || !execute)
+  {
+    g_list_free(images_job_data->imgs);
+    g_list_free(images_job_data->styles);
+    g_free(images_job_data);
     return;
+  }
 
   GList *link = darktable.develop
     ? g_list_find(images_job_data->imgs,
@@ -2394,6 +2582,14 @@ static void _add_history_job_data(const char *title,
                                                           (gpointer)images_job_data,
                                                           PROGRESS_BLOCKING, FALSE));
   }
+  else
+  {
+    // nothing left for a job either. the strings behind styles belong to
+    // the job above, which shallow-copied them
+    g_list_free(images_job_data->imgs);
+    g_list_free(images_job_data->styles);
+    g_free(images_job_data);
+  }
 }
 
 void dt_control_paste_history(GList *imgs)
@@ -2404,7 +2600,7 @@ void dt_control_paste_history(GList *imgs)
     return;
   }
 
-  _images_job_data_t *images_job_data = g_malloc(sizeof(_images_job_data_t));
+  _images_job_data_t *images_job_data = g_try_malloc(sizeof(_images_job_data_t));
   if(images_job_data)
   {
     images_job_data->imgs = imgs;
@@ -2435,7 +2631,7 @@ void dt_control_paste_parts_history(GList *imgs)
   if(res == GTK_RESPONSE_OK
      || res == GTK_RESPONSE_APPLY)
   {
-    _images_job_data_t *images_job_data = g_malloc(sizeof(_images_job_data_t));
+    _images_job_data_t *images_job_data = g_try_malloc(sizeof(_images_job_data_t));
     if(images_job_data)
     {
       images_job_data->imgs = imgs;
@@ -2492,7 +2688,7 @@ void dt_control_apply_styles(GList *imgs, GList *styles, const gboolean duplicat
   }
   else
   {
-    _images_job_data_t *images_job_data = g_malloc(sizeof(_images_job_data_t));
+    _images_job_data_t *images_job_data = g_try_malloc(sizeof(_images_job_data_t));
     if(images_job_data)
     {
       const int mode = dt_conf_get_int("plugins/lighttable/style/applymode");
@@ -2556,6 +2752,7 @@ void dt_control_export(GList *imgid_list,
                        const dt_colorspaces_color_profile_type_t icc_type,
                        const gchar *icc_filename,
                        const dt_iop_color_intent_t icc_intent,
+                       const int pq_peak_nits,
                        const gchar *metadata_export)
 {
   dt_job_t *job = dt_control_job_create(&_control_export_job_run, "export");
@@ -2612,6 +2809,7 @@ void dt_control_export(GList *imgid_list,
   data->icc_type = icc_type;
   data->icc_filename = g_strdup(icc_filename);
   data->icc_intent = icc_intent;
+  data->pq_peak_nits = pq_peak_nits;
   data->metadata_export = g_strdup(metadata_export);
 
   dt_control_job_add_progress(job, _("export images"), TRUE);
@@ -3058,8 +3256,8 @@ static int32_t _control_import_job_run(dt_job_t *job)
     if(currtime - last_prog_update > PROGRESS_UPDATE_INTERVAL)
     {
       last_prog_update = currtime;
-      dt_control_job_set_progress_message(job, ngettext("importing %d/%d image",
-                                                        "importing %d/%d images", cntr), cntr, total);
+      dt_control_job_set_progress_message(job, _("importing image %d/%d"),
+                                               cntr, total);
       dt_control_job_set_progress(job, fraction);
       g_usleep(100);
     }
@@ -3067,6 +3265,7 @@ static int32_t _control_import_job_run(dt_job_t *job)
   g_free(prev_output);
 
   dt_control_log(ngettext("imported %d image", "imported %d images", cntr), cntr);
+  dt_set_darktable_tags();
   dt_control_queue_redraw_center();
   DT_CONTROL_SIGNAL_RAISE(DT_SIGNAL_TAG_CHANGED);
   DT_CONTROL_SIGNAL_RAISE(DT_SIGNAL_GEOTAG_CHANGED, imgs, 0);
@@ -3093,7 +3292,7 @@ static void *_control_import_alloc()
   dt_control_image_enumerator_t *params = _control_image_enumerator_alloc();
   if(!params) return NULL;
 
-  params->data = g_malloc0(sizeof(dt_control_import_t));
+  params->data = g_try_malloc0(sizeof(dt_control_import_t));
   if(!params->data)
   {
     _control_import_job_cleanup(params);

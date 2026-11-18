@@ -29,6 +29,7 @@
 #include "control/conf.h"
 #include "control/control.h"
 #include "develop/develop.h"
+#include "develop/frame.h"
 #include "dtgtk/thumbnail.h"
 #include "gui/accelerators.h"
 #include "gui/gtk.h"
@@ -44,11 +45,7 @@ typedef struct dt_lib_duplicate_t
   GtkWidget *duplicate_box;
   dt_imgid_t imgid;
 
-  uint8_t *buf;
-  float scale;
-  size_t buf_width;
-  size_t buf_height;
-  dt_dev_zoom_pos_t zoom_pos;
+  dt_frame_t *frame;
 
   dt_view_context_t view_ctx;
   int preview_id;
@@ -84,21 +81,19 @@ int position(const dt_lib_module_t *self)
 
 static void _lib_duplicate_init_callback(gpointer instance, dt_lib_module_t *self);
 
-static gboolean _lib_duplicate_caption_out_callback(GtkWidget *widget,
-                                                    GdkEvent *event,
-                                                    dt_lib_module_t *self)
+static void _lib_duplicate_caption_out_callback(GtkEventController *controller,
+                                                dt_lib_module_t *self)
 {
+  GtkWidget *widget = dt_gui_get_widget(controller);
   const dt_imgid_t imgid = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(widget),"imgid"));
 
   // we write the content of the textbox to the caption field
   dt_metadata_set(imgid, "Xmp.darktable.version_name",
                   gtk_entry_get_text(GTK_ENTRY(widget)), FALSE);
   dt_image_synch_xmp(imgid);
-
-  return FALSE;
 }
 
-// create a 'virgin' duplicate of imgid, without any development
+// create a 'virgin' duplicate of imgid, discarding the source history stack
 static void _lib_duplicate_original(const dt_imgid_t imgid)
 {
   const dt_imgid_t newid = dt_image_duplicate(imgid);
@@ -220,11 +215,8 @@ void view_leave(struct dt_lib_module_t *self,
 {
   // we leave the view. Let's destroy preview surf if any
   dt_lib_duplicate_t *d = self->data;
-  if(d->buf)
-  {
-    dt_free_align(d->buf);
-    d->buf = NULL;
-  }
+  dt_frame_unref(d->frame);
+  d->frame = NULL;
 }
 void gui_post_expose(dt_lib_module_t *self,
                      cairo_t *cri,
@@ -242,30 +234,19 @@ void gui_post_expose(dt_lib_module_t *self,
 
   if(!view_ok || d->preview_id != d->imgid)
   {
-    if(d->buf)
-      dt_free_align(d->buf);
+    dt_frame_unref(d->frame);
 
-    dt_dev_image(d->imgid,
-                 width,
-                 height,
-                 -1,
-                 &d->buf,
-                 &d->scale,
-                 &d->buf_width,
-                 &d->buf_height,
-                 d->zoom_pos,
-                 -1,
-                 NULL,
-                 DT_DEVICE_NONE,
-                 FALSE,
-                 FALSE);
+    dt_display_output_t output;
+    dt_colorspaces_get_display_output(DT_COLORSPACE_DISPLAY, &output);
+    d->frame = dt_dev_image(d->imgid, width, height, FALSE, -1, -1, NULL, DT_DEVICE_NONE,
+                            FALSE, &output);
 
     d->preview_id = d->imgid;
   }
 
-  if(d->buf)
+  if(d->frame)
     dt_view_paint_surface(cri, width, height, &darktable.develop->full, DT_WINDOW_MAIN,
-                          d->buf, d->scale, d->buf_width, d->buf_height, d->zoom_pos);
+                          d->frame);
 }
 
 static void _thumb_remove(gpointer user_data)
@@ -285,42 +266,29 @@ static void _lib_duplicate_init_callback(gpointer instance, dt_lib_module_t *sel
 
   d->imgid = NO_IMGID;
   // we drop the preview if any
-  if(d->buf)
-  {
-    dt_free_align(d->buf);
-    d->buf = NULL;
-  }
+  dt_frame_unref(d->frame);
+  d->frame = NULL;
   // we drop all the thumbs
   g_list_free_full(d->thumbs, _thumb_remove);
   d->thumbs = NULL;
   // and the other widgets too
   dt_gui_container_destroy_children(GTK_CONTAINER(d->duplicate_box));
   // retrieve all the versions of the image
-  sqlite3_stmt *stmt;
   dt_develop_t *dev = darktable.develop;
 
   int count = 0;
 
   // we get a summarize of all versions of the image
-  // clang-format off
-  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),
-                              "SELECT i.version, i.id, m.value"
-                              " FROM images AS i"
-                              " LEFT JOIN meta_data AS m ON m.id = i.id"
-                              " AND m.key = (SELECT key FROM data.meta_data WHERE tagname = 'Xmp.darktable.version_name')"
-                              " WHERE film_id = ?1 AND filename = ?2"
-                              " ORDER BY i.version",
-                              -1, &stmt, NULL);
-  // clang-format on
-  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, dev->image_storage.film_id);
-  DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, dev->image_storage.filename, -1, SQLITE_TRANSIENT);
+  GList *versions = dt_metadata_get_versions(dev->image_storage.film_id,
+                                             dev->image_storage.filename);
 
   GtkWidget *bt = NULL;
 
-  while(sqlite3_step(stmt) == SQLITE_ROW)
+  for(GList *iter = versions; iter; iter = iter->next)
   {
+    const dt_metadata_version_t *version = iter->data;
     GtkWidget *hb = gtk_grid_new();
-    const dt_imgid_t imgid = sqlite3_column_int(stmt, 1);
+    const dt_imgid_t imgid = version->imgid;
     dt_gui_add_class(hb, "dt_overlays_always");
     dt_thumbnail_t *thumb = dt_thumbnail_new(100,
                                              100,
@@ -343,57 +311,77 @@ static void _lib_duplicate_init_callback(gpointer instance, dt_lib_module_t *sel
     }
 
     gchar chl[256];
-    gchar *path = (gchar *)sqlite3_column_text(stmt, 2);
-    g_snprintf(chl, sizeof(chl), "%d", sqlite3_column_int(stmt, 0));
+    const gchar *path = version->name;
+    g_snprintf(chl, sizeof(chl), "%d", version->version);
 
     GtkWidget *tb = dt_ui_entry_new(0);
     if(path) gtk_entry_set_text(GTK_ENTRY(tb), path);
     gtk_widget_set_hexpand(tb, TRUE);
     g_object_set_data (G_OBJECT(tb), "imgid", GINT_TO_POINTER(imgid));
     gtk_widget_add_events(tb, GDK_FOCUS_CHANGE_MASK);
-    g_signal_connect(G_OBJECT(tb), "focus-out-event",
-                     G_CALLBACK(_lib_duplicate_caption_out_callback), self);
+    dt_gui_connect_focus(tb, NULL, _lib_duplicate_caption_out_callback, self);
     GtkWidget *lb = gtk_label_new(chl);
     gtk_widget_set_hexpand(lb, TRUE);
 
-    // duplicate this image with its history stack; only useful once the image
-    // has actually been developed - otherwise it is equivalent to "original"
-    const gboolean altered = dt_image_altered(imgid);
-    GtkWidget *bt_dup = dtgtk_button_new(dtgtk_cairo_paint_multiinstance, 0, NULL);
+    // duplicate this image with its history stack
+    GtkWidget *bt_dup = dtgtk_button_new_full(dtgtk_cairo_paint_multiinstance, 0, NULL,
+      &(dtgtk_button_config_t){
+        .tooltip = _("create a duplicate of this image with same history stack"),
+        .clicked_cb = G_CALLBACK(_lib_duplicate_duplicate_clicked_callback),
+        .clicked_data = self,
+      });
     dt_gui_add_class(bt_dup, "dt_duplicate_duplicate");
-    gtk_widget_set_tooltip_text(bt_dup,
-                                _("create a duplicate of this image with same history stack"));
     g_object_set_data(G_OBJECT(bt_dup), "imgid", GINT_TO_POINTER(imgid));
-    g_signal_connect(
-      G_OBJECT(bt_dup), "clicked", G_CALLBACK(_lib_duplicate_duplicate_clicked_callback), self);
 
-    // create a 'virgin' duplicate of this image, without any development
-    GtkWidget *bt_orig = dtgtk_button_new(dtgtk_cairo_paint_plus, 0, NULL);
+    // create a 'virgin' duplicate of this image, discarding the source history stack
+    GtkWidget *bt_orig = dtgtk_button_new_full(dtgtk_cairo_paint_plus, 0, NULL,
+      &(dtgtk_button_config_t){
+        .tooltip = _("create a 'virgin' duplicate, discarding the source history stack"),
+        .clicked_cb = G_CALLBACK(_lib_duplicate_original_clicked_callback),
+        .clicked_data = self,
+      });
     dt_gui_add_class(bt_orig, "dt_duplicate_original");
-    gtk_widget_set_tooltip_text(
-      bt_orig, _("create a 'virgin' duplicate of this image without any development"));
     g_object_set_data(G_OBJECT(bt_orig), "imgid", GINT_TO_POINTER(imgid));
-    g_signal_connect(
-      G_OBJECT(bt_orig), "clicked", G_CALLBACK(_lib_duplicate_original_clicked_callback), self);
 
-    bt = dtgtk_button_new(dtgtk_cairo_paint_remove, 0, NULL);
+    bt = dtgtk_button_new_full(dtgtk_cairo_paint_remove, 0, NULL,
+      &(dtgtk_button_config_t){
+        .tooltip = _("delete this duplicate"),
+        .clicked_cb = G_CALLBACK(_lib_duplicate_delete),
+        .clicked_data = self,
+      });
     dt_gui_add_class(bt, "dt_duplicate_delete");
-    gtk_widget_set_tooltip_text(bt, _("delete this duplicate"));
-    //    gtk_widget_set_halign(bt, GTK_ALIGN_END);
     g_object_set_data(G_OBJECT(bt), "imgid", GINT_TO_POINTER(imgid));
-    g_signal_connect(G_OBJECT(bt), "clicked", G_CALLBACK(_lib_duplicate_delete), self);
+
+    /* Keep the number and actions in a single top row.  The delete slot is
+     * retained when its button is unavailable, so the two active buttons do
+     * not move when switching between images with and without duplicates.
+     * See https://github.com/darktable-org/darktable/pull/21955 for the
+     * discussion of reserving this space to avoid sidebar width changes. */
+    GtkWidget *delete_slot = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    dt_gui_add_class(delete_slot, "dt_duplicate_delete_slot");
+    gtk_box_pack_start(GTK_BOX(delete_slot), bt, FALSE, FALSE, 0);
+
+    GtkWidget *buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    dt_gui_add_class(buttons, "dt_duplicate_actions");
+    gtk_box_pack_start(GTK_BOX(buttons), delete_slot, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(buttons), bt_dup, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(buttons), bt_orig, FALSE, FALSE, 0);
+
+    GtkWidget *top = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_box_pack_start(GTK_BOX(top), lb, TRUE, TRUE, 0);
+    gtk_box_pack_end(GTK_BOX(top), buttons, FALSE, FALSE, 0);
 
     gtk_grid_attach(GTK_GRID(hb), thumb->w_main, 0, 0, 1, 2);
-    gtk_grid_attach(GTK_GRID(hb), lb, 1, 0, 1, 1);
-    gtk_grid_attach(GTK_GRID(hb), bt_dup, 2, 0, 1, 1);
-    gtk_grid_attach(GTK_GRID(hb), bt_orig, 3, 0, 1, 1);
-    gtk_grid_attach(GTK_GRID(hb), bt, 4, 0, 1, 1);
+    gtk_grid_attach(GTK_GRID(hb), top, 1, 0, 4, 1);
     gtk_grid_attach(GTK_GRID(hb), tb, 1, 1, 4, 1);
 
     gtk_widget_show(hb);
+    gtk_widget_show(top);
+    gtk_widget_show(buttons);
+    gtk_widget_show(delete_slot);
     gtk_widget_show(lb);
     gtk_widget_show(tb);
-    gtk_widget_set_visible(bt_dup, altered);
+    gtk_widget_show(bt_dup);
     gtk_widget_show(bt_orig);
     gtk_widget_show(bt);
 
@@ -401,15 +389,17 @@ static void _lib_duplicate_init_callback(gpointer instance, dt_lib_module_t *sel
     d->thumbs = g_list_append(d->thumbs, thumb);
     count++;
   }
-  sqlite3_finalize (stmt);
+  g_list_free_full(versions, dt_metadata_version_free);
 
   gtk_widget_show(d->duplicate_box);
 
-  // we have a single image, do not allow it to be removed so hide last bt
-  if(count==1)
+  // We have a single image, so the delete action is not available.  Keep its
+  // slot allocated so adding/removing duplicate versions does not move the
+  // other actions in the row.
+  if(count == 1)
   {
     gtk_widget_set_sensitive(bt, FALSE);
-    gtk_widget_set_visible(bt, FALSE);
+    gtk_widget_hide(bt);
   }
 
   //unblock signals
@@ -451,7 +441,7 @@ void gui_init(dt_lib_module_t *self)
   dt_lib_duplicate_t *d = self->data = g_malloc0(sizeof(dt_lib_duplicate_t));
 
   d->imgid = NO_IMGID;
-  d->buf = NULL;
+  d->frame = NULL;
   d->view_ctx = 0;
 
   d->duplicate_box = dt_gui_vbox();

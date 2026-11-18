@@ -133,7 +133,7 @@ static int _circle_events_mouse_scrolled(dt_iop_module_t *module,
          MIN_CIRCLE_BORDER, max_mask_border);
 
       dt_conf_set_float(DT_MASKS_CONF(form->type, circle, border), masks_border);
-      dt_toast_log(_("feather size: %3.2f%%"), masks_border*100.0f);
+      dt_toast_log(_("fade-out border: %3.2f%%"), masks_border * 100.0f);
     }
     else if(dt_modifier_is(state, 0))
     {
@@ -161,7 +161,7 @@ static int _circle_events_mouse_scrolled(dt_iop_module_t *module,
     if(dt_modifier_is(state, GDK_CONTROL_MASK))
     {
       // we try to change the opacity
-      dt_masks_form_change_opacity(form, parentid, up ? 0.05f : -0.05f);
+      dt_masks_form_change_opacity(module, form, parentid, up ? 0.05f : -0.05f);
     }
     else
     {
@@ -177,7 +177,7 @@ static int _circle_events_mouse_scrolled(dt_iop_module_t *module,
         dt_dev_add_masks_history_item(darktable.develop, module, TRUE);
         dt_masks_gui_form_create(form, gui, index, module);
         dt_conf_set_float(DT_MASKS_CONF(form->type, circle, border), circle->border);
-        dt_toast_log(_("feather size: %3.2f%%"), circle->border*100.0f);
+        dt_toast_log(_("fade-out border: %3.2f%%"), circle->border * 100.0f);
       }
       else if(gui->edit_mode == DT_MASKS_EDIT_FULL)
       {
@@ -224,6 +224,13 @@ static int _circle_events_button_pressed(dt_iop_module_t *module,
 
     if(gui->edit_mode == DT_MASKS_EDIT_FULL)
     {
+      // gpt is only refreshed by a redraw (dt_masks_gui_form_create, from
+      // post_expose). If the shape or the view changed since, its corner is
+      // stale and the drag would jump the shape away, so it is refreshed
+      // here, for one shape only. gpt stays the same struct
+      dt_masks_gui_form_create(form, gui, index, module);
+      if(!gpt->points || gpt->points_count == 0) return 0;
+
       if(gui->source_selected)
       {
         // we start the form dragging
@@ -315,7 +322,6 @@ static int _circle_events_button_pressed(dt_iop_module_t *module,
       dt_masks_iop_update(crea_module);
     }
 
-    dt_dev_masks_selection_change(darktable.develop, crea_module, form->formid);
     gui->creation_module = NULL;
 
     // if we draw a clone circle, we start now the source dragging
@@ -395,9 +401,6 @@ static int _circle_events_button_released(dt_iop_module_t *module,
                                           dt_masks_form_gui_t *gui,
                                           const int index)
 {
-  float wd, ht, iwidth, iheight;
-  dt_masks_get_image_size(&wd, &ht, &iwidth, &iheight);
-
   if(which == GDK_BUTTON_SECONDARY
      && dt_is_valid_maskid(parentid)
      && gui->edit_mode == DT_MASKS_EDIT_FULL)
@@ -427,23 +430,14 @@ static int _circle_events_button_released(dt_iop_module_t *module,
     }
 
     // we remove the shape
-    dt_masks_form_remove(module, dt_masks_get_from_id(darktable.develop, parentid), form);
+    dt_masks_remove_shape(module, form, parentid);
     return 1;
   }
   if(gui->form_dragging)
   {
-    // we get the circle
-    dt_masks_point_circle_t *circle = form->points->data;
-
     // we end the form dragging
     gui->form_dragging = FALSE;
 
-    // we change the center value
-    float pts[2] = { pzx * wd + gui->dx, pzy * ht + gui->dy };
-    dt_masks_clamp_move_pts(pts, wd, ht);
-    dt_dev_distort_backtransform(darktable.develop, pts, 1);
-    circle->center[0] = pts[0] / iwidth;
-    circle->center[1] = pts[1] / iheight;
     dt_dev_add_masks_history_item(darktable.develop, module, TRUE);
 
     // we recreate the form points
@@ -462,22 +456,6 @@ static int _circle_events_button_released(dt_iop_module_t *module,
     // we end the form dragging
     gui->source_dragging = FALSE;
 
-    if(gui->scrollx != 0.0 || gui->scrolly != 0.0)
-    {
-      // if there's no dragging the source is calculated in
-      // _circle_events_button_pressed()
-    }
-    else
-    {
-      // we change the center value
-      float pts[2] = { pzx * wd + gui->dx, pzy * ht + gui->dy };
-      dt_masks_clamp_move_pts(pts, wd, ht);
-
-      dt_dev_distort_backtransform(darktable.develop, pts, 1);
-
-      form->source[0] = pts[0] / iwidth;
-      form->source[1] = pts[1] / iheight;
-    }
     dt_dev_add_masks_history_item(darktable.develop, module, TRUE);
 
     // we recreate the form points
@@ -1100,7 +1078,7 @@ static int _circle_get_mask(const dt_iop_module_t *const restrict module,
 
   const float pos_x = *posx;
   const float pos_y = *posy;
-  DT_OMP_FOR(if(h*w > 50000) num_threads(MIN(dt_get_num_threads(), (h*w)/20000)))
+  DT_OMP_FOR_CAP_THREADS(MIN(dt_get_num_threads(), (h*w)/20000), if(h*w > 50000))
   for(int i = 0; i < h; i++)
   {
     float *const restrict p = points + 2 * i * w;
@@ -1147,7 +1125,7 @@ static int _circle_get_mask(const dt_iop_module_t *const restrict module,
     * (circle->radius + circle->border) * mindim;
   const float border2 = total2 - radius2;
   const float *const points_y = points + 1;
-  DT_OMP_FOR(if(h*w > 50000) num_threads(MIN(dt_get_num_threads(), (h*w)/20000)))
+  DT_OMP_FOR_CAP_THREADS(MIN(dt_get_num_threads(), (h*w)/20000), if(h*w > 50000))
   for(int i = 0 ; i < h*w; i++)
   {
     // find the square of the distance from the center
@@ -1174,7 +1152,8 @@ static int _circle_get_mask_roi(const dt_iop_module_t *const restrict module,
                                 const dt_dev_pixelpipe_iop_t *const restrict piece,
                                 dt_masks_form_t *const form,
                                 const dt_iop_roi_t *const roi,
-                                float *const restrict buffer)
+                                float *const restrict buffer,
+                                dt_masks_extent_t *const extent)
 {
   double start1 = dt_get_debug_wtime();
   double start2 = start1;
@@ -1203,8 +1182,8 @@ static int _circle_get_mask_roi(const dt_iop_module_t *const restrict module,
   const int gw = (w + grid - 1) / grid + 1;  // grid dimension of total roi
   const int gh = (h + grid - 1) / grid + 1;  // grid dimension of total roi
 
-  // initialize output buffer with zero
-  memset(buffer, 0, sizeof(float) * w * h);
+  // initialize output buffer with zero, unless a group folds only what we draw
+  if(!extent) memset(buffer, 0, sizeof(float) * w * h);
 
   dt_print(DT_DEBUG_MASKS | DT_DEBUG_PERF,
            "[masks %s] circle init took %0.04f sec",
@@ -1301,7 +1280,10 @@ static int _circle_get_mask_roi(const dt_iop_module_t *const restrict module,
   // of bounding box is 2 or greater the shape lies inside of roi and
   // requires action
   if(bbw <= 1 || bbh <= 1)
+  {
+    if(extent) *extent = (dt_masks_extent_t){ 0, 0, 0, 0 };
     return 1;
+  }
 
   float *const restrict points = dt_alloc_align_float((size_t)bbw * bbh * 2);
   if(points == NULL) return 0;
@@ -1334,7 +1316,7 @@ static int _circle_get_mask_roi(const dt_iop_module_t *const restrict module,
 
   // we calculate the mask values at the transformed points;
   // for results: re-use the points array
-  DT_OMP_FOR(collapse(2) if(bbh*bbw > 50000) num_threads(MIN(dt_get_num_threads(), (h*w)/20000)))
+  DT_OMP_FOR_CAP_THREADS(MIN(dt_get_num_threads(), (h*w)/20000), collapse(2) if(bbh*bbw > 50000))
   for(int j = 0; j < bbh; j++)
     for(int i = 0; i < bbw; i++)
     {
@@ -1378,6 +1360,7 @@ static int _circle_get_mask_roi(const dt_iop_module_t *const restrict module,
   }
 
   dt_free_align(points);
+  if(extent) *extent = (dt_masks_extent_t){ bbxm * grid, bbym * grid, endx, endy };
 
   dt_print(DT_DEBUG_MASKS | DT_DEBUG_PERF,
            "[masks %s] circle fill took %0.04f sec",
@@ -1394,8 +1377,8 @@ static GSList *_circle_setup_mouse_actions(const struct dt_masks_form_t *const f
   GSList *lm = NULL;
   lm = dt_mouse_action_create_simple(lm, DT_MOUSE_ACTION_SCROLL,
                                      0, _("[CIRCLE] change size"));
-  lm = dt_mouse_action_create_simple(lm, DT_MOUSE_ACTION_SCROLL,
-                                     GDK_SHIFT_MASK, _("[CIRCLE] change feather size"));
+  lm = dt_mouse_action_create_simple(lm, DT_MOUSE_ACTION_SCROLL, GDK_SHIFT_MASK,
+                                     _("[CIRCLE] change fade-out border"));
   lm = dt_mouse_action_create_simple(lm, DT_MOUSE_ACTION_SCROLL,
                                      GDK_CONTROL_MASK, _("[CIRCLE] change opacity"));
   return lm;
@@ -1421,8 +1404,9 @@ static void _circle_set_hint_message(const dt_masks_form_gui_t *const gui,
 {
   // circle has same controls on creation and on edit
   g_snprintf(msgbuf, msgbuf_len,
-             _("<b>size</b>: scroll, <b>feather size</b>: shift+scroll\n"
-               "<b>opacity</b>: ctrl+scroll (%d%%)"), opacity);
+             _("<b>size</b>: scroll, <b>fade-out border</b>: shift+scroll\n"
+               "<b>opacity</b>: ctrl+scroll (%d%%)"),
+             opacity);
 }
 
 static void _circle_duplicate_points(dt_develop_t *dev,

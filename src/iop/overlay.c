@@ -20,8 +20,10 @@
 #include "common/interpolation.h"
 #include "common/math.h"
 #include "common/overlay.h"
+#include "common/utility.h"
 #include "control/control.h"
 #include "develop/develop.h"
+#include "develop/frame.h"
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
 #include "dtgtk/button.h"
@@ -33,7 +35,6 @@
 #include "gui/gtk.h"
 #include "iop/iop_api.h"
 
-#include <assert.h>
 #include <gtk/gtk.h>
 #include <inttypes.h>
 #include <stdlib.h>
@@ -215,9 +216,9 @@ static GList *_get_disabled_modules(const dt_iop_module_t *self,
        - crop and &ashift make sense
      colorout is *not* an exception: keeping it filtered out (as it always was)
      means the overlay is rendered in the pipe's scene-referred linear working
-     RGB. Combined with the want_float passthrough render in dt_dev_image(), the
-     overlay reaches process() as linear float instead of a posterized 8-bit
-     linear buffer, matching the host pipe at this module's position.
+     RGB. dt_dev_image() returns it as float, so the overlay reaches process()
+     as linear float instead of a posterized 8-bit linear buffer, matching the
+     host pipe at this module's position.
      The list order does not matter
   */
 
@@ -325,7 +326,7 @@ static void _setup_overlay(dt_iop_module_t *self,
     {
       const gchar *tooltip = g_strdup_printf
         (_("overlay image missing from database\n\n"
-           "'%s'" ), p->filename);
+           "'%s'" ), data->filename);
       gtk_widget_set_tooltip_text(GTK_WIDGET(g->area), tooltip);
     }
   }
@@ -335,20 +336,16 @@ static void _setup_overlay(dt_iop_module_t *self,
     if(g)
       gtk_widget_set_tooltip_text(GTK_WIDGET(g->area), "");
 
-    uint8_t *buf;
-    size_t bw;
-    size_t bh;
-
     GList *disabled_modules = _get_disabled_modules(self, imgid);
 
-    // HQ (legacy == FALSE): render scene-referred linear float (want_float):
-    // colorout is filtered out by _get_disabled_modules() while gamma stays the
-    // terminal module and passes the 4-channel float straight through (see
-    // gamma.c process()), so the overlay arrives in the working RGB space rather
-    // than as an 8-bit ARGB display backbuf.
-    // LEGACY (legacy == TRUE): render the 8-bit ARGB display backbuf (want_float
-    // FALSE), the original behaviour that the Cairo compositing path expects.
-    const gboolean want_float = !legacy;
+    // colorout is filtered out by _get_disabled_modules(), and the sink has
+    // no display encoding, so the overlay arrives in the pipe's working
+    // RGB: as float for HQ, packed for LEGACY into the 8-bit buffer the
+    // Cairo compositing path expects
+    const dt_display_output_t sink =
+      { .image = { .type = DT_COLORSPACE_NONE },
+        .device = { .type = DT_COLORSPACE_NONE },
+        .format = legacy ? DT_FRAME_RGB24 : DT_FRAME_FLOAT };
 
     // Render at the parent image's storage resolution. The result is
     // scale-stable and cached across host-pipe zoom changes; the float
@@ -360,26 +357,34 @@ static void _setup_overlay(dt_iop_module_t *self,
     const size_t width  = dev->image_storage.width;
     const size_t height = dev->image_storage.height;
 
-    dt_dev_image(imgid,
-                 width,
-                 height,
-                 -1,
-                 &buf,
-                 NULL,
-                 &bw,
-                 &bh,
-                 NULL,
-                 -1,
-                 disabled_modules,
-                 piece->pipe->devid,
-                 TRUE,
-                 want_float);
+    dt_frame_t *frame = dt_dev_image(imgid,
+                                     width,
+                                     height,
+                                     TRUE,
+                                     -1,
+                                     -1,
+                                     disabled_modules,
+                                     piece->pipe->devid,
+                                     TRUE,
+                                     &sink);
+
+    size_t bw = 0, bh = 0;
+    void *new_buf = NULL;
+    if(frame)
+    {
+      bw = dt_frame_geometry(frame)->width;
+      bh = dt_frame_geometry(frame)->height;
+      const size_t size = 4 * bw * bh * (legacy ? sizeof(uint8_t) : sizeof(float));
+      if((new_buf = dt_alloc_aligned(size)))
+        memcpy(new_buf, dt_frame_pixels(frame), size);
+      dt_frame_unref(frame);
+    }
 
     void *old_buf = *pbuf;
 
     *pwidth = bw;
     *pheight = bh;
-    *pbuf = buf;
+    *pbuf = new_buf;
     dt_free_align(old_buf);
   }
   else
@@ -832,7 +837,10 @@ static guint8 *_get_overlay_argb(dt_iop_module_t *self,
   const size_t bh = *pheight;
 
   // Wrap *pbuf directly — no memcpy of the (potentially large) buffer.
-  cairo_surface_t *surface_two = dt_view_create_surface(*pbuf, bw, bh);
+  cairo_surface_t *surface_two =
+    cairo_image_surface_create_for_data
+      (*pbuf, CAIRO_FORMAT_RGB24, bw, bh,
+       cairo_format_stride_for_width(CAIRO_FORMAT_RGB24, bw));
 
   if(cairo_surface_status(surface_two) != CAIRO_STATUS_SUCCESS)
   {
@@ -1099,8 +1107,7 @@ static gboolean _draw_thumb(GtkWidget *area,
     cairo_line_to(crf, width, 0.0);
     cairo_stroke(crf);
 
-    PangoFontDescription *desc =
-      pango_font_description_copy_static(darktable.bauhaus->pango_font_desc);
+    PangoFontDescription *desc = dt_gui_get_font();
     pango_font_description_set_weight(desc, PANGO_WEIGHT_BOLD);
     pango_font_description_set_absolute_size(desc, DT_PIXEL_APPLY_DPI(12) * PANGO_SCALE);
     PangoLayout *layout = pango_cairo_create_layout(crf);
@@ -1181,7 +1188,7 @@ int legacy_params(dt_iop_module_t *self,
     } dt_iop_overlay_params_v1_t;
 
     const dt_iop_overlay_params_v1_t *o = old_params;
-    dt_iop_overlay_params_t *n = malloc(sizeof(dt_iop_overlay_params_t));
+    dt_iop_overlay_params_t *n = calloc(1, sizeof(dt_iop_overlay_params_t));
 
     n->opacity = o->opacity;
     n->scale = o->scale;
@@ -1193,7 +1200,8 @@ int legacy_params(dt_iop_module_t *self,
     n->scale_img = o->scale_img;
     n->scale_svg = o->scale_svg;
     n->imgid = o->imgid;
-    g_strlcpy(n->filename, o->filename, sizeof(n->filename));
+    dt_strlcpy_fixed_to_fixed(n->filename, sizeof(n->filename),
+                              o->filename, sizeof(o->filename));
     n->compositing = DT_OVERLAY_COMPOSITE_LEGACY;
     n->dummy1 = 0;
     n->dummy2 = 0;
@@ -1225,7 +1233,9 @@ void commit_params(dt_iop_module_t *self,
   d->scale_svg  = p->scale_svg;
   d->imgid      = p->imgid;
   d->compositing = p->compositing;
-  g_strlcpy(d->filename, p->filename, sizeof(p->filename));
+  // stored params need not terminate the file name
+  dt_strlcpy_fixed_to_fixed(d->filename, sizeof(d->filename),
+                            p->filename, sizeof(p->filename));
 }
 
 void init_pipe(dt_iop_module_t *self,
@@ -1246,13 +1256,17 @@ void cleanup_pipe(dt_iop_module_t *self,
 void gui_update(dt_iop_module_t *self)
 {
   const dt_iop_overlay_gui_data_t *g = self->gui_data;
-  const dt_iop_overlay_params_t *p = self->params;
+  dt_iop_overlay_params_t *p = self->params;
+
+  // the GUI handlers read the stored file name as a C string
+  p->filename[sizeof(p->filename) - 1] = '\0';
 
   for(int i = 0; i < 9; i++)
   {
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->align[i]), FALSE);
   }
-  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->align[p->alignment]), TRUE);
+  if(p->alignment >= 0 && p->alignment < 9)
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->align[p->alignment]), TRUE);
 
   if(p->scale_base == DT_SCALE_MAINMENU_ADVANCED)
   {
@@ -1319,10 +1333,7 @@ void init_global(dt_iop_module_so_t *self)
 {
   dt_iop_overlay_global_data_t *gd = calloc(1, sizeof(dt_iop_overlay_global_data_t));
 
-  pthread_mutexattr_t recursive_locking;
-  pthread_mutexattr_init(&recursive_locking);
-  pthread_mutexattr_settype(&recursive_locking, PTHREAD_MUTEX_RECURSIVE);
-  dt_pthread_mutex_init(&gd->overlay_threadsafe, &recursive_locking);
+  dt_pthread_recursive_mutex_init(&gd->overlay_threadsafe);
 
 #ifdef HAVE_OPENCL
   const int program = 41; // overlay.cl

@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2011-2025 darktable developers.
+    Copyright (C) 2011-2026 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -34,9 +34,11 @@
 #include "imageio/imageio_common.h"
 #include "imageio/imageio_module.h"
 #include "imageio/storage/imageio_storage_api.h"
+
 #ifdef GDK_WINDOWING_QUARTZ
 #include "osx/osx.h"
 #endif
+
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -69,6 +71,16 @@ typedef struct pair_t
   char item[4096];
   int pos;
 } pair_t;
+
+static gchar *_escape_js_string(const gchar *value)
+{
+  gchar *c_escaped = g_strescape(value, NULL);
+  // Script elements are raw text to the HTML parser. Escape '<' so a filename
+  // containing "</script>" cannot terminate the surrounding script element.
+  gchar *escaped = dt_util_str_replace(c_escaped, "<", "\\x3c");
+  g_free(c_escaped);
+  return escaped;
+}
 
 
 const char *name(const struct dt_imageio_module_storage_t *self)
@@ -202,10 +214,13 @@ void gui_init(dt_imageio_module_storage_t *self)
       dt_conf_get_string_const("plugins/imageio/storage/gallery/file_directory")));
   dt_gtkentry_setup_variables_completion(d->entry);
 
-  GtkWidget *widget = dtgtk_button_new(dtgtk_cairo_paint_directory, CPF_NONE, NULL);
+  GtkWidget *widget = dtgtk_button_new_full(dtgtk_cairo_paint_directory, CPF_NONE, NULL,
+      &(dtgtk_button_config_t){
+        .tooltip = _("select directory"),
+        .clicked_cb = G_CALLBACK(button_clicked),
+        .clicked_data = self,
+      });
   gtk_widget_set_name(widget, "non-flat");
-  gtk_widget_set_tooltip_text(widget, _("select directory"));
-  g_signal_connect(G_OBJECT(widget), "clicked", G_CALLBACK(button_clicked), self);
 
   d->title_entry =
     GTK_ENTRY(dt_action_entry_new
@@ -280,7 +295,7 @@ int store(dt_imageio_module_storage_t *self,
   d->vp->imgid = imgid;
   d->vp->sequence = num;
 
-  gchar *result_tmp_dir = dt_variables_expand(d->vp, d->filename, TRUE);
+  gchar *result_tmp_dir = dt_variables_expand_path(d->vp, d->filename, TRUE);
   g_strlcpy(tmp_dir, result_tmp_dir, sizeof(tmp_dir));
   g_free(result_tmp_dir);
 
@@ -302,7 +317,7 @@ int store(dt_imageio_module_storage_t *self,
   g_strlcpy(d->filename, fixed_path, sizeof(d->filename));
   g_free(fixed_path);
 
-  gchar *result_filename = dt_variables_expand(d->vp, d->filename, TRUE);
+  gchar *result_filename = dt_variables_expand_path(d->vp, d->filename, TRUE);
   g_strlcpy(filename, result_filename, sizeof(filename));
   g_free(result_filename);
 
@@ -374,11 +389,12 @@ int store(dt_imageio_module_storage_t *self,
   sprintf(sc, "/img_%d.html", num);
   snprintf(relsubfilename, sizeof(relsubfilename), "img_%d.html", num);
 
-  // escape special character and especially " which is used in <img>
-  // and below in src and msrc
-
-  gchar *esc_relfilename = g_strescape(relfilename, NULL);
-  gchar *esc_relthumbfilename = g_strescape(relthumbfilename, NULL);
+  // Escape each value for the context in which it is embedded.
+  gchar *html_relthumbfilename = g_markup_escape_text(relthumbfilename, -1);
+  gchar *html_title = title ? g_markup_escape_text(title, -1) : NULL;
+  gchar *html_description = description ? g_markup_escape_text(description, -1) : NULL;
+  gchar *js_relfilename = _escape_js_string(relfilename);
+  gchar *js_relthumbfilename = _escape_js_string(relthumbfilename);
 
   snprintf(pair->line, sizeof(pair->line),
            "\n"
@@ -386,8 +402,13 @@ int store(dt_imageio_module_storage_t *self,
            "      <img src=\"%s\" alt=\"img%d\" class=\"img\" onclick=\"openSwipe(%d)\"/></div>\n"
            "      <h1>%s</h1>\n"
            "      %s</div>\n",
-           esc_relthumbfilename,
-           num, num-1, title ? title : "&nbsp;", description ? description : "&nbsp;");
+           html_relthumbfilename,
+           num, num-1, html_title ? html_title : "&nbsp;",
+           html_description ? html_description : "&nbsp;");
+
+  g_free(html_relthumbfilename);
+  g_free(html_title);
+  g_free(html_description);
 
   if(res_title)
     g_list_free_full(res_title, &g_free);
@@ -405,8 +426,8 @@ int store(dt_imageio_module_storage_t *self,
              "[imageio_storage_gallery] could not export to file: `%s'!", filename);
     dt_control_log(_("could not export to file `%s'!"), filename);
     free(pair);
-    g_free(esc_relfilename);
-    g_free(esc_relthumbfilename);
+    g_free(js_relfilename);
+    g_free(js_relthumbfilename);
     return 1;
   }
 
@@ -417,10 +438,10 @@ int store(dt_imageio_module_storage_t *self,
            "h: %d,\n"
            "msrc: \"%s\",\n"
            "},\n",
-           esc_relfilename, fdata->width, fdata->height, esc_relthumbfilename);
+           js_relfilename, fdata->width, fdata->height, js_relthumbfilename);
 
-  g_free(esc_relfilename);
-  g_free(esc_relthumbfilename);
+  g_free(js_relfilename);
+  g_free(js_relthumbfilename);
 
   pair->pos = num;
   d->l = g_list_insert_sorted(d->l, pair, (GCompareFunc)sort_pos);
@@ -452,7 +473,7 @@ int store(dt_imageio_module_storage_t *self,
   fdata->max_width = save_max_width;
   fdata->max_height = save_max_height;
 
-  dt_print(DT_DEBUG_ALWAYS, "[export_job] exported to `%s'", filename);
+  dt_print(DT_DEBUG_IMAGEIO, "[export_job] exported to `%s'", filename);
   dt_control_log(ngettext("%d/%d exported to `%s'", "%d/%d exported to `%s'", num),
                  num, total, filename);
   return 0;
@@ -497,10 +518,9 @@ void finalize_store(dt_imageio_module_storage_t *self, dt_imageio_module_data_t 
 
   sprintf(c, "/index.html");
 
-  const char *title = d->title;
-
   FILE *f = g_fopen(filename, "wb");
   if(!f) return;
+  gchar *html_title = g_markup_escape_text(d->title, -1);
   fprintf(f,
           "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Transitional//EN\" "
           "\"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd\">\n"
@@ -518,7 +538,8 @@ void finalize_store(dt_imageio_module_storage_t *self, dt_imageio_module_data_t 
           "  <body>\n"
           "    <div class=\"title\">%s</div>\n"
           "    <div class=\"page\">\n",
-          title, title);
+          html_title, html_title);
+  g_free(html_title);
 
   size_t count = 0;
   for(GList *tmp = d->l; tmp; tmp = g_list_next(tmp))

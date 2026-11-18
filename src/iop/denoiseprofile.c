@@ -324,8 +324,6 @@ int legacy_params_to11(dt_iop_module_t *self,
     gboolean use_new_vst;
   } dt_iop_denoiseprofile_params_v8_t;
 
-#if 0
-  // v9 & v10 never used as legacy, keep there for reference
 
   typedef struct dt_iop_denoiseprofile_params_v9_t
   {
@@ -377,8 +375,6 @@ int legacy_params_to11(dt_iop_module_t *self,
     dt_iop_denoiseprofile_wavelet_mode_t wavelet_color_mode; /* switch between RGB and Y0U0V0 modes.
                                                                 $DEFAULT: MODE_Y0U0V0 $DESCRIPTION: "color mode"*/
   } dt_iop_denoiseprofile_params_v10_t;
-
-#endif
 
   if((old_version == 1 || old_version == 2 || old_version == 3) && new_version == 4)
   {
@@ -577,7 +573,10 @@ int legacy_params_to11(dt_iop_module_t *self,
     }
     else
       memcpy(&v8, old_params, sizeof(v8)); // was v8 already
-    dt_iop_denoiseprofile_params_t *v9 = new_params;
+    // Must be the v9 layout, not the current one: v9's x[]/y[] have
+    // DT_DENOISE_PROFILE_NONE_V9 rows rather than DT_DENOISE_PROFILE_NONE, so
+    // writing through the current type would place y[] 56 bytes too far.
+    dt_iop_denoiseprofile_params_v9_t *v9 = new_params;
     v9->radius = v8.radius;
     v9->strength = v8.strength;
     v9->mode = v8.mode;
@@ -615,7 +614,7 @@ int legacy_params_to11(dt_iop_module_t *self,
   }
   else if(new_version == 10)
   {
-    dt_iop_denoiseprofile_params_t v9;
+    dt_iop_denoiseprofile_params_v9_t v9;
     if(old_version < 9)
     {
       // first update to v9
@@ -623,11 +622,13 @@ int legacy_params_to11(dt_iop_module_t *self,
     }
     else
       memcpy(&v9, old_params, sizeof(v9)); // was v9 already
-    dt_iop_denoiseprofile_params_t *v10 = new_params;
+    dt_iop_denoiseprofile_params_v10_t *v10 = new_params;
 
-    // start with a clean default
-    const dt_iop_denoiseprofile_params_t *const d = self->default_params;
-    *v10 = *d;
+    // Start with a clean default. default_params is the current (v12) layout,
+    // of which v10 is a prefix, so take only what this version has room for:
+    // new_params is a v11-sized allocation (see legacy_params below), and
+    // assigning a whole v12 through it would run off the end.
+    memcpy(v10, self->default_params, sizeof(*v10));
 
     v10->radius = v9.radius;
     v10->strength = v9.strength;
@@ -665,7 +666,9 @@ int legacy_params_to11(dt_iop_module_t *self,
   else if(new_version == 11)
   {
     // v11 and v10 are the same, just need to update strength when needed.
-    dt_iop_denoiseprofile_params_t *v11 = new_params;
+    // Deliberately the v10 type: the current struct is v12, four bytes longer
+    // (compensate_hilite_pres), and new_params is only v11-sized.
+    dt_iop_denoiseprofile_params_v10_t *v11 = new_params;
     if(old_version < 10)
     {
       if(legacy_params_to11(self, old_params, old_version, v11, 10)) return 1;
@@ -867,7 +870,7 @@ void tiling_callback(dt_iop_module_t *self,
     const int K_scattered = ceilf(d->scattering
                                   * (K * K * K + 7.0 * K * sqrt(K)) / 6.0) + K;
 
-    tiling->factor = 2.0f + 0.25f; // in + out + tmp
+    tiling->factor = 4.0f + 0.25f; // in + out + tmp + mirror-extended in and out
     // in + out + (2 + NUM_BUCKETS * 0.25) tmp:
     tiling->factor_cl = 4.0f + 0.25f * NUM_BUCKETS;
     tiling->maxbuf = 1.0f;
@@ -1943,10 +1946,15 @@ static void process_variance(dt_iop_module_t *self,
   {
     var[c] = out[c] / (npixels - 1);
   }
-  g->variance_R = var[0];
-  g->variance_G = var[1];
-  g->variance_B = var[2];
 
+  if(g && self->dev->gui_attached)
+  {
+    dt_iop_gui_enter_critical_section(self);
+    g->variance_R = var[0];
+    g->variance_G = var[1];
+    g->variance_B = var[2];
+    dt_iop_gui_leave_critical_section(self);
+  }
   dt_iop_image_copy_by_size(ovoid, ivoid, width, height, 4);
 }
 
@@ -2038,12 +2046,21 @@ static int process_nlmeans_cl(dt_iop_module_t *self,
 
 #else // old&current code
 
+  // the patch distances are computed over the image extended by mirroring, as on the CPU
+  const dt_nlmeans_param_t border_params = { .scattering = scattering,
+                                             .scale = scale,
+                                             .patch_radius = P,
+                                             .search_radius = K };
+  const int border = nlmeans_border(&border_params);
+  const int pwidth = width + 2 * border;
+  const int pheight = height + 2 * border;
+
   cl_mem buckets[NUM_BUCKETS] = { NULL };
 
   unsigned int state = 0;
   for(int k = 0; k < NUM_BUCKETS; k++)
   {
-    buckets[k] = dt_opencl_alloc_device_buffer(devid, sizeof(float) * width * height);
+    buckets[k] = dt_opencl_alloc_device_buffer(devid, sizeof(float) * pwidth * pheight);
     if(buckets[k] == NULL) goto error;
   }
 
@@ -2082,14 +2099,16 @@ static int process_nlmeans_cl(dt_iop_module_t *self,
   err = dt_opencl_fill_buffer(devid, dev_U2, (size_t)width * height, 4, 0.0f);
   if(err != CL_SUCCESS) goto error;
 
-  const size_t bwidth = ROUNDUP(width, hblocksize);
-  const size_t bheight = ROUNDUP(height, vblocksize);
+  const size_t bwidth = ROUNDUP(pwidth, hblocksize);
+  const size_t bheight = ROUNDUP(pheight, vblocksize);
   size_t sizesl[2];
   size_t local[2];
 
+  // each pass also adds the mirrored offset -q, so the row kj_index = 0
+  // stops at ki_index = 0: its right half is the mirror of its left half
   for(int kj_index = -K; kj_index <= 0; kj_index++)
   {
-    for(int ki_index = -K; ki_index <= K; ki_index++)
+    for(int ki_index = -K; ki_index <= (kj_index < 0 ? K : 0); ki_index++)
     {
       // This formula is made for:
       // - ensuring that j = kj_index and i = ki_index when d->scattering is 0
@@ -2107,29 +2126,29 @@ static int process_nlmeans_cl(dt_iop_module_t *self,
       int q[2] = { i, j };
 
       cl_mem dev_U4 = buckets[bucket_next(&state, NUM_BUCKETS)];
-      err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_denoiseprofile_dist, width, height,
-                CLARG(dev_tmp), CLARG(dev_U4), CLARG(width), CLARG(height), CLARG(q));
+      err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_denoiseprofile_dist, pwidth, pheight,
+                CLARG(dev_tmp), CLARG(dev_U4), CLARG(width), CLARG(height), CLARG(q), CLARG(border));
       if(err != CL_SUCCESS) goto error;
 
       sizesl[0] = bwidth;
-      sizesl[1] = ROUNDUPDHT(height, devid);
+      sizesl[1] = ROUNDUPDHT(pheight, devid);
       local[0] = hblocksize;
       local[1] = 1;
       cl_mem dev_U4_t = buckets[bucket_next(&state, NUM_BUCKETS)];
       err = dt_opencl_enqueue_kernel_2d_local_args(devid, gd->kernel_denoiseprofile_horiz, sizesl, local,
                 CLARG(dev_U4), CLARG(dev_U4_t),
-                CLARG(width), CLARG(height), CLARG(q), CLARG(P),
+                CLARG(pwidth), CLARG(pheight), CLARG(q), CLARG(P),
                 CLLOCAL(sizeof(float) * (hblocksize + 2 * P)));
       if(err != CL_SUCCESS) goto error;
 
-      sizesl[0] = ROUNDUPDWD(width, devid);
+      sizesl[0] = ROUNDUPDWD(pwidth, devid);
       sizesl[1] = bheight;
       local[0] = 1;
       local[1] = vblocksize;
       cl_mem dev_U4_tt = buckets[bucket_next(&state, NUM_BUCKETS)];
       err = dt_opencl_enqueue_kernel_2d_local_args(devid, gd->kernel_denoiseprofile_vert, sizesl, local,
               CLARG(dev_U4_t), CLARG(dev_U4_tt),
-              CLARG(width), CLARG(height),
+              CLARG(pwidth), CLARG(pheight),
               CLARG(q), CLARG(P), CLARG(norm),
               CLLOCAL(sizeof(float) * (vblocksize + 2 * P)),
               CLARG(central_pixel_weight), CLARG(dev_U4));
@@ -2137,7 +2156,7 @@ static int process_nlmeans_cl(dt_iop_module_t *self,
 
       err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_denoiseprofile_accu, width, height,
                           CLARG(dev_tmp), CLARG(dev_U2), CLARG(dev_U4_tt),
-                          CLARG(width), CLARG(height), CLARG(q));
+                          CLARG(width), CLARG(height), CLARG(q), CLARG(border));
       if(err != CL_SUCCESS) goto error;
       dt_opencl_finish_sync_pipe(devid, piece->pipe->type);
     }
@@ -2719,6 +2738,17 @@ void reload_defaults(dt_iop_module_t *self)
     // get matching profiles:
     if(g->profiles)
       g_list_free_full(g->profiles, dt_noiseprofile_free);
+
+    // the automatic entry may be the DNG profile; keep the generic one selectable
+    if(self->dev->image_storage.has_dng_noise_profile)
+    {
+      dt_noiseprofile_t *generic = malloc(sizeof(dt_noiseprofile_t));
+      *generic = dt_noiseprofile_generic;
+      generic->name = g_strdup(_(dt_noiseprofile_generic.name));
+      generic->maker = g_strdup(dt_noiseprofile_generic.maker);
+      generic->model = g_strdup(dt_noiseprofile_generic.model);
+      profiles = g_list_append(profiles, generic);
+    }
     g->profiles = profiles;
     g->interpolated = interpolated;
 
@@ -2736,6 +2766,8 @@ void reload_defaults(dt_iop_module_t *self)
 
     gui_update(self);
   }
+  else
+    g_list_free_full(profiles, dt_noiseprofile_free);
 }
 
 void init_global(dt_iop_module_so_t *self)
@@ -2832,12 +2864,14 @@ static dt_noiseprofile_t dt_iop_denoiseprofile_get_auto_profile(dt_iop_module_t 
     iso >>= shift;
   }
   dt_noiseprofile_t *last = NULL;
+  gboolean found = FALSE;
   for(GList *iter = profiles; iter; iter = g_list_next(iter))
   {
     dt_noiseprofile_t *current = iter->data;
     if(current->iso == iso)
     {
       interpolated = *current;
+      found = TRUE;
       if(autodetected != NULL)
       {
         *autodetected = TRUE;
@@ -2859,6 +2893,7 @@ static dt_noiseprofile_t dt_iop_denoiseprofile_get_auto_profile(dt_iop_module_t 
     {
       interpolated.iso = iso;
       dt_noiseprofile_interpolate(last, current, &interpolated);
+      found = TRUE;
       if(autodetected != NULL)
       {
         *autodetected = TRUE;
@@ -2878,6 +2913,23 @@ static dt_noiseprofile_t dt_iop_denoiseprofile_get_auto_profile(dt_iop_module_t 
     }
     last = current;
   }
+
+  // without a measured profile for this ISO use the one the DNG carries
+  const dt_image_t *img = &self->dev->image_storage;
+  if(!found && img->has_dng_noise_profile)
+  {
+    interpolated.iso = exif_iso;
+    for(int c = 0; c < 3; c++)
+    {
+      interpolated.a[c] = img->dng_noise_a[c];
+      interpolated.b[c] = img->dng_noise_b[c];
+    }
+    if(autodetected != NULL)
+      *autodetected = TRUE;
+    if(name != NULL)
+      g_strlcpy(name, _("DNG noise profile"), namelen);
+  }
+
   if(profiles_allocated)
   {
     g_list_free_full(profiles, dt_noiseprofile_free);
@@ -3182,25 +3234,32 @@ static gboolean denoiseprofile_draw_variance(GtkWidget *widget,
   DT_GUARD_GUI_UPDATE(FALSE);
   dt_iop_denoiseprofile_gui_data_t *g = self->gui_data;
 
-  if(!dt_isnan(g->variance_R))
+  dt_iop_gui_enter_critical_section(self);
+  const float variance_R = g->variance_R;
+  const float variance_B = g->variance_B;
+  const float variance_G = g->variance_G;
+  dt_iop_gui_leave_critical_section(self);
+
+
+  if(!dt_isnan(variance_R))
   {
-    gchar *str = g_strdup_printf("%.2f", g->variance_R);
+    gchar *str = g_strdup_printf("%.2f", variance_R);
     DT_ENTER_GUI_UPDATE();
     gtk_label_set_text(g->label_var_R, str);
     DT_LEAVE_GUI_UPDATE();
     g_free(str);
   }
-  if(!dt_isnan(g->variance_G))
+  if(!dt_isnan(variance_G))
   {
-    gchar *str = g_strdup_printf("%.2f", g->variance_G);
+    gchar *str = g_strdup_printf("%.2f", variance_G);
     DT_ENTER_GUI_UPDATE();
     gtk_label_set_text(g->label_var_G, str);
     DT_LEAVE_GUI_UPDATE();
     g_free(str);
   }
-  if(!dt_isnan(g->variance_B))
+  if(!dt_isnan(variance_B))
   {
-    gchar *str = g_strdup_printf("%.2f", g->variance_B);
+    gchar *str = g_strdup_printf("%.2f", variance_B);
     DT_ENTER_GUI_UPDATE();
     gtk_label_set_text(g->label_var_B, str);
     DT_LEAVE_GUI_UPDATE();
@@ -3398,8 +3457,7 @@ static gboolean denoiseprofile_draw(GtkWidget *widget,
   // draw labels:
   PangoLayout *layout;
   PangoRectangle ink;
-  PangoFontDescription *desc =
-    pango_font_description_copy_static(darktable.bauhaus->pango_font_desc);
+  PangoFontDescription *desc = dt_gui_get_font();
   pango_font_description_set_weight(desc, PANGO_WEIGHT_BOLD);
   pango_font_description_set_absolute_size(desc, (.08 * height) * PANGO_SCALE);
   layout = pango_cairo_create_layout(cr);
@@ -3544,6 +3602,16 @@ static void denoiseprofile_scrolled(GtkEventControllerScroll *controller,
 {
   dt_iop_denoiseprofile_gui_data_t *g = self->gui_data;
 
+  if(dt_modifier_eq(controller, GDK_MOD1_MASK))
+  {
+    // alt+scroll switches the channel tab (as before the controller conversion)
+    dt_gui_forward_scroll(controller,
+                          GTK_WIDGET(g->channel > DT_DENOISE_PROFILE_B
+                                     ? g->channel_tabs_Y0U0V0
+                                     : g->channel_tabs));
+    return;
+  }
+
   if(dy != 0.0)
   {
     g->mouse_radius = CLAMP(g->mouse_radius * (1.f - 0.1f * dy),
@@ -3604,8 +3672,8 @@ void gui_init(dt_iop_module_t *self)
                    G_CALLBACK(denoiseprofile_tab_switch), self);
 
   g->channel_tabs_Y0U0V0 = GTK_NOTEBOOK(gtk_notebook_new());
-  dt_ui_notebook_page(g->channel_tabs_Y0U0V0, N_("Y0"), NULL);
-  dt_ui_notebook_page(g->channel_tabs_Y0U0V0, N_("U0V0"), NULL);
+  dt_ui_notebook_page(g->channel_tabs_Y0U0V0, N_("luma"), N_("Y0"));
+  dt_ui_notebook_page(g->channel_tabs_Y0U0V0, N_("chroma"), N_("U0V0"));
   g_signal_connect(G_OBJECT(g->channel_tabs_Y0U0V0), "switch_page",
                    G_CALLBACK(denoiseprofile_tab_switch), self);
 

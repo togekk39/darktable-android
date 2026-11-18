@@ -406,6 +406,33 @@ int write_image(struct dt_imageio_module_data_t *data,
 
   dt_print(DT_DEBUG_IMAGEIO, "[avif colorprofile profile: %s]", dt_colorspaces_get_name(cp->type, filename));
 
+#if AVIF_VERSION >= 1000000
+  /*
+   * HDR10 content light level (clli) metadata.
+   *
+   * For PQ (SMPTE ST 2084) output the float samples are absolute-luminance
+   * encoded, so we can derive the real content light levels from the pixels:
+   *   - MaxCLL  = the brightest single sample (max RGB component) in nits,
+   *   - MaxFALL = the brightest picture's average light level; for a still this
+   *               is the mean over all samples of that per-sample peak.
+   * Players and HDR displays use these to tone-map appropriately. We only write
+   * them for PQ; HLG is relative and has no fixed nit scale.
+   */
+  if(have_nclx
+     && image->transferCharacteristics == AVIF_TRANSFER_CHARACTERISTICS_SMPTE2084)
+  {
+    float max_cll = 0.0f, max_fall = 0.0f;
+    dt_imageio_pq_light_level((const float *)in, (size_t)width * height, &max_cll, &max_fall);
+
+    image->clli.maxCLL  = (uint16_t)CLAMP(roundf(max_cll),  0.0f, 65535.0f);
+    image->clli.maxPALL = (uint16_t)CLAMP(roundf(max_fall), 0.0f, 65535.0f);
+
+    dt_print(DT_DEBUG_IMAGEIO, "[avif HDR10 clli: MaxCLL=%u nits, MaxFALL=%u nits]",
+             image->clli.maxCLL, image->clli.maxPALL);
+  }
+
+#endif
+
   if(!have_nclx)
   {
     /* If we didn't manage to write the color encoding natively we need to fallback to ICC */

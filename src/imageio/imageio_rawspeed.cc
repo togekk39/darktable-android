@@ -30,6 +30,7 @@
 #define TYPE_USHORT16 RawImageType::UINT16
 
 #include <memory>
+#include <mutex>
 
 #define __STDC_LIMIT_MACROS
 
@@ -55,27 +56,51 @@ int rawspeed_get_number_of_processor_cores()
 
 using namespace rawspeed;
 
+namespace
+{
+// rawspeed throws, and an unlock after the call is skipped when it does
+// common/exif.cc does the same for exiv2, with its Lock class
+class SCOPED_CAPABILITY _mutex_guard
+{
+public:
+  explicit _mutex_guard(dt_pthread_mutex_t *mutex) ACQUIRE(mutex)
+    : _mutex(mutex)
+  {
+    dt_pthread_mutex_lock(mutex);
+  }
+  ~_mutex_guard() RELEASE()
+  {
+    dt_pthread_mutex_unlock(_mutex);
+  }
+  _mutex_guard(const _mutex_guard &) = delete;
+  _mutex_guard &operator=(const _mutex_guard &) = delete;
+
+private:
+  dt_pthread_mutex_t *_mutex;
+};
+} // namespace
+
 static dt_imageio_retval_t dt_imageio_open_rawspeed_sraw (dt_image_t *img,
                                                           const RawImage r,
                                                           dt_mipmap_buffer_t *buf);
 static CameraMetaData *meta = NULL;
 
+static std::once_flag meta_once;
+
 static void dt_rawspeed_load_meta()
 {
   /* Load rawspeed cameras.xml meta file once */
-  if(meta == NULL)
+  // not under plugin_threadsafe: import gets here holding the image's cache
+  // write lock, and disk export takes image cache locks while holding
+  // plugin_threadsafe (storage/disk.c)
+  std::call_once(meta_once, []
   {
-    dt_pthread_mutex_lock(&darktable.plugin_threadsafe);
-    if(meta == NULL)
-    {
-      char datadir[PATH_MAX] = { 0 }, camfile[PATH_MAX] = { 0 };
-      dt_loc_get_datadir(datadir, sizeof(datadir));
-      snprintf(camfile, sizeof(camfile), "%s/rawspeed/cameras.xml", datadir);
-      // never cleaned up (only when dt closes)
-      meta = new CameraMetaData(camfile);
-    }
-    dt_pthread_mutex_unlock(&darktable.plugin_threadsafe);
-  }
+    char datadir[PATH_MAX] = { 0 }, camfile[PATH_MAX] = { 0 };
+    dt_loc_get_datadir(datadir, sizeof(datadir));
+    snprintf(camfile, sizeof(camfile), "%s/rawspeed/cameras.xml", datadir);
+    // never cleaned up (only when dt closes)
+    meta = new CameraMetaData(camfile);
+  });
 }
 
 gboolean dt_rawspeed_lookup_makermodel(const char *maker,
@@ -186,9 +211,13 @@ dt_imageio_retval_t dt_imageio_open_rawspeed(dt_image_t *img,
   {
     dt_rawspeed_load_meta();
 
-    dt_pthread_mutex_lock(&darktable.readFile_mutex);
-    auto [storage, storageBuf] = f.readFile();
-    dt_pthread_mutex_unlock(&darktable.readFile_mutex);
+    // scoped to the read alone: holding the guard for the whole try block
+    // would serialize decoding too
+    auto [storage, storageBuf] = [&f]()
+    {
+      const _mutex_guard lock(&darktable.readFile_mutex);
+      return f.readFile();
+    }();
 
     RawParser t(storageBuf);
     std::unique_ptr<RawDecoder> d = t.getDecoder(meta);
@@ -536,7 +565,7 @@ dt_imageio_retval_t dt_imageio_open_rawspeed_sraw(dt_image_t *img,
 
     if(r->getDataType() == TYPE_USHORT16)
     {
-      DT_OMP_PRAGMA(parallel for schedule(static) shared(r, img, buf) firstprivate(cpp))
+      DT_OMP_PRAGMA(parallel for num_threads(darktable.num_openmp_threads) schedule(static) shared(r, img, buf) firstprivate(cpp))
       for(int j = 0; j < img->height; j++)
       {
         const Array2DRef<uint16_t> in = r->getU16DataAsUncroppedArray2DRef();
@@ -551,7 +580,7 @@ dt_imageio_retval_t dt_imageio_open_rawspeed_sraw(dt_image_t *img,
     }
     else // r->getDataType() == TYPE_FLOAT32
     {
-      DT_OMP_PRAGMA(parallel for schedule(static) shared(r, img, buf) firstprivate(cpp))
+      DT_OMP_PRAGMA(parallel for num_threads(darktable.num_openmp_threads) schedule(static) shared(r, img, buf) firstprivate(cpp))
       for(int j = 0; j < img->height; j++)
       {
         const Array2DRef<float> in = r->getF32DataAsUncroppedArray2DRef();
@@ -574,7 +603,7 @@ dt_imageio_retval_t dt_imageio_open_rawspeed_sraw(dt_image_t *img,
 
     if(r->getDataType() == TYPE_USHORT16)
     {
-      DT_OMP_PRAGMA(parallel for schedule(static) shared(r, img, buf) firstprivate(cpp))
+      DT_OMP_PRAGMA(parallel for num_threads(darktable.num_openmp_threads) schedule(static) shared(r, img, buf) firstprivate(cpp))
       for(int j = 0; j < img->height; j++)
       {
         const Array2DRef<uint16_t> in = r->getU16DataAsUncroppedArray2DRef();
@@ -590,7 +619,7 @@ dt_imageio_retval_t dt_imageio_open_rawspeed_sraw(dt_image_t *img,
     }
     else // r->getDataType() == TYPE_FLOAT32
     {
-      DT_OMP_PRAGMA(parallel for schedule(static) shared(r, img, buf) firstprivate(cpp))
+      DT_OMP_PRAGMA(parallel for num_threads(darktable.num_openmp_threads) schedule(static) shared(r, img, buf) firstprivate(cpp))
       for(int j = 0; j < img->height; j++)
       {
         const Array2DRef<float> in = r->getF32DataAsUncroppedArray2DRef();

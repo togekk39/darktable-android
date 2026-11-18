@@ -15,6 +15,7 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
+
 #include "common/gdk_event_utils.h"
 
 #include "bauhaus/bauhaus.h"
@@ -27,6 +28,7 @@
 #include "dtgtk/drawingarea.h"
 #include "gui/accelerators.h"
 #include "gui/gtk.h"
+#include "develop/frame.h"
 #include "libs/lib.h"
 #include "libs/lib_api.h"
 
@@ -380,21 +382,18 @@ static gboolean _lib_navigation_draw_callback(GtkWidget *widget,
   gtk_render_background(context, cr, 0, 0, allocation.width, allocation.height);
 
   /* draw navigation image if available */
-  if(dev->preview_pipe->backbuf
-     && dev->image_storage.id == dev->preview_pipe->output_imgid)
+  dt_frame_t *frame = dev->image_storage.id == dev->preview_pipe->output_imgid
+    ? dt_dev_pixelpipe_frame(dev->preview_pipe)
+    : NULL;
+  // the colors GTK's surface shows
+  cairo_surface_t *surface = dt_frame_device_surface(frame, DT_COLORSPACE_DISPLAY);
+  if(surface)
   {
-    dt_pthread_mutex_t *mutex = &dev->preview_pipe->backbuf_mutex;
-    dt_pthread_mutex_lock(mutex);
-
     cairo_save(cr);
-    const int wd = dev->preview_pipe->backbuf_width;
-    const int ht = dev->preview_pipe->backbuf_height;
+    const int wd = dt_frame_geometry(frame)->width;
+    const int ht = dt_frame_geometry(frame)->height;
     const float scale = fminf(width / (float)wd, height / (float)ht);
 
-    const int stride = cairo_format_stride_for_width(CAIRO_FORMAT_RGB24, wd);
-    cairo_surface_t *surface =
-      cairo_image_surface_create_for_data(dev->preview_pipe->backbuf,
-                                          CAIRO_FORMAT_RGB24, wd, ht, stride);
     cairo_translate(cr, width / 2.0, height / 2.0f);
     cairo_scale(cr, scale, scale);
     cairo_translate(cr, -.5f * wd, -.5f * ht);
@@ -442,9 +441,8 @@ static gboolean _lib_navigation_draw_callback(GtkWidget *widget,
       _draw_offview_arrow(cr, wd, ht, zoom_x, zoom_y, scale);
     }
     cairo_restore(cr);
-
-    dt_pthread_mutex_unlock(mutex);
   }
+  dt_frame_unref(frame);
 
   /* blit memsurface into widget */
   cairo_destroy(cr);
@@ -455,11 +453,11 @@ static gboolean _lib_navigation_draw_callback(GtkWidget *widget,
   return FALSE;
 }
 
-void _lib_navigation_set_position(dt_lib_module_t *self,
-                                  const double x,
-                                  const double y,
-                                  const int wd,
-                                  const int ht)
+static void _lib_navigation_set_position(dt_lib_module_t *self,
+                                         const double x,
+                                         const double y,
+                                         const int wd,
+                                         const int ht)
 {
   dt_lib_navigation_t *d = self->data;
 
@@ -544,7 +542,7 @@ static gboolean _lib_navigation_widget_to_center(GtkEventController *controller,
                                                  gdouble *out_y)
 {
   dt_develop_t *dev = darktable.develop;
-  if(!dev->preview_pipe->backbuf
+  if(!dev->preview_pipe->frame
      || dev->image_storage.id != dev->preview_pipe->output_imgid)
     return FALSE;
   dt_dev_viewport_t *port = &dev->full;
@@ -591,10 +589,10 @@ static void _lib_navigation_scroll_callback(GtkEventControllerScroll *controller
                                             // FIXME: if unused don't pass
                                             dt_lib_module_t *self)
 {
-  GdkEvent *event = gtk_get_current_event();
+  GdkEvent *event = dt_gui_get_current_event(GTK_EVENT_CONTROLLER(controller));
   if(event)
   {
-    GdkDevice *device = gdk_event_get_source_device(event);
+    GdkDevice *device = dt_gdk_event_get_source_device(event);
     if(device
        && gdk_device_get_source(device) == GDK_SOURCE_TOUCHPAD
        && dt_gdk_event_get_scroll_direction(event) == GDK_SCROLL_SMOOTH)
@@ -610,14 +608,16 @@ static void _lib_navigation_scroll_callback(GtkEventControllerScroll *controller
                                           dt_gdk_event_get_x(event), dt_gdk_event_get_y(event),
                                           &x, &y))
       {
-        const double delta = fabs(dx) > fabs(dy) ? -dx : dy;
-        const int zoom_in = delta < 0.0 ? 1 : 0;
+        const gboolean zoom_in = dt_gui_scroll_zoom_delta(event,
+                                                          dx, dy) > 0.0f;
 
         dt_dev_zoom_move(&darktable.develop->full, DT_ZOOM_SCROLL,
-                         0.0f, zoom_in, x, y, constrain);
+                         0.0f, zoom_in ? 1 : 0, x, y, constrain);
       }
     }
+#if !GTK_CHECK_VERSION(4, 0, 0)
     gdk_event_free(event);
+#endif
   }
 }
 

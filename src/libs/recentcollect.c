@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2011-2024 darktable developers.
+    Copyright (C) 2011-2026 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -27,6 +27,7 @@
 #include "libs/collect.h"
 #include "libs/lib.h"
 #include "libs/lib_api.h"
+
 #include <gdk/gdkkeysyms.h>
 
 #ifdef GDK_WINDOWING_QUARTZ
@@ -141,9 +142,19 @@ static void pretty_print(const char *buf, char *out, size_t outsize)
   }
 }
 
-static void _button_pressed(GtkButton *button, dt_lib_module_t *self)
+static void _button_pressed(GtkGestureSingle *gesture,
+                            int n_press,
+                            double x,
+                            double y,
+                            dt_lib_module_t *self)
 {
   dt_lib_recentcollect_t *d = self->data;
+
+  const gboolean singleclick = dt_conf_get_bool("plugins/lighttable/collect/single-click");
+  if(!singleclick && n_press == 1)
+    return;
+
+  GtkWidget *button = dt_gui_get_widget(gesture);
 
   // deserialize this button's preset
   int linenumber = 0;
@@ -153,7 +164,7 @@ static void _button_pressed(GtkButton *button, dt_lib_module_t *self)
   {
     GList *next = k->next;
     dt_lib_recentcollect_item_t *current = k->data;
-    if(button == GTK_BUTTON(current->button))
+    if(button == current->button)
       found = TRUE;
     else
     {
@@ -223,8 +234,12 @@ static void _lib_recentcollection_updated(gpointer instance, dt_collection_chang
   }
 }
 
-void _menuitem_preferences(GtkMenuItem *menuitem, dt_lib_module_t *self)
+static void _menuitem_preferences(GSimpleAction *action,
+                                  GVariant *parameter,
+                                  gpointer user_data)
 {
+  dt_lib_module_t *self = (dt_lib_module_t *)user_data;
+
   char confname[200];
   GtkWidget *win = dt_ui_main_window(darktable.gui->ui);
   GtkWidget *dialog = gtk_dialog_new_with_buttons(_("recent collections settings"), GTK_WINDOW(win),
@@ -233,7 +248,7 @@ void _menuitem_preferences(GtkMenuItem *menuitem, dt_lib_module_t *self)
                                                   _("_save"), GTK_RESPONSE_ACCEPT, NULL);
   gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_ACCEPT);
   dt_prefs_init_dialog_recentcollect(dialog);
-  g_signal_connect(dialog, "key-press-event", G_CALLBACK(dt_handle_dialog_enter), NULL);
+  dt_gui_connect_key(dialog, dt_handle_dialog_enter, NULL);
 
 #ifdef GDK_WINDOWING_QUARTZ
   dt_osx_disallow_fullscreen(dialog);
@@ -278,7 +293,7 @@ void _menuitem_preferences(GtkMenuItem *menuitem, dt_lib_module_t *self)
           d->items = g_list_append(d->items, item);
           item->button = gtk_button_new();
           gtk_box_pack_start(GTK_BOX(box), item->button, FALSE, TRUE, 0);
-          g_signal_connect(G_OBJECT(item->button), "clicked", G_CALLBACK(_button_pressed), (gpointer)self);
+          dt_gui_connect_click(item->button, _button_pressed, NULL, (gpointer)self); 
           gtk_widget_set_no_show_all(item->button, TRUE);
           gtk_widget_set_name(GTK_WIDGET(item->button), "recent-collection-button");
           gtk_widget_set_visible(item->button, FALSE);
@@ -292,11 +307,12 @@ void _menuitem_preferences(GtkMenuItem *menuitem, dt_lib_module_t *self)
   gtk_widget_destroy(dialog);
 }
 
-void set_preferences(void *menu, dt_lib_module_t *self)
+void set_preferences(GMenu *menu, GActionGroup *action_group, dt_lib_module_t *self)
 {
-  GtkWidget *mi = gtk_menu_item_new_with_label(_("preferences..."));
-  g_signal_connect(G_OBJECT(mi), "activate", G_CALLBACK(_menuitem_preferences), self);
-  gtk_menu_shell_append(GTK_MENU_SHELL(menu), mi);
+  GSimpleAction *action = g_simple_action_new("preferences", NULL);
+  g_signal_connect(action, "activate", G_CALLBACK(_menuitem_preferences), self);
+  g_action_map_add_action(G_ACTION_MAP(action_group), G_ACTION(action));
+  g_menu_append(menu, _("preferences..."), "presets.preferences");
 }
 
 void gui_reset(dt_lib_module_t *self)
@@ -333,7 +349,7 @@ void gui_init(dt_lib_module_t *self)
     d->items = g_list_append(d->items, item);
     item->button = gtk_button_new();
     gtk_box_pack_start(GTK_BOX(box), item->button, FALSE, TRUE, 0);
-    g_signal_connect(G_OBJECT(item->button), "clicked", G_CALLBACK(_button_pressed), (gpointer)self);
+    dt_gui_connect_click(item->button, _button_pressed, NULL, (gpointer)self); 
     gtk_widget_set_no_show_all(item->button, TRUE);
     dt_gui_add_class(GTK_WIDGET(item->button), "dt_transparent_background");
     gtk_widget_set_name(GTK_WIDGET(item->button), "recent-collection-button");

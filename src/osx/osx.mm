@@ -80,6 +80,12 @@ static void dt_osx_disable_fullscreen(GtkWidget *widget)
       [native setCollectionBehavior: ([native collectionBehavior] & ~NSWindowCollectionBehaviorFullScreenPrimary)
                                      | NSWindowCollectionBehaviorFullScreenAuxiliary
                                      | NSWindowCollectionBehaviorFullScreenDisallowsTiling];
+      // recent macOS versions (observed on 27.0) draw the titlebar transparent
+      // by default, letting the window content show through; force an opaque
+      // titlebar so dialogs stay readable
+      [native setTitlebarAppearsTransparent: NO];
+      [native setOpaque: YES];
+      [native setBackgroundColor: [NSColor windowBackgroundColor]];
     }
   }
 #endif
@@ -92,6 +98,28 @@ void dt_osx_disallow_fullscreen(GtkWidget *widget)
     dt_osx_disable_fullscreen(widget);
   else
     g_signal_connect(G_OBJECT(widget), "realize", G_CALLBACK(dt_osx_disable_fullscreen), NULL);
+#endif
+}
+
+#ifdef GDK_WINDOWING_QUARTZ
+// every dialog, which per-window calls cannot reach; not the main window,
+// which must keep native fullscreen
+static void _window_map_callback(GtkWidget *widget)
+{
+  if(GTK_IS_DIALOG(widget))
+    dt_osx_disable_fullscreen(widget);
+  g_signal_chain_from_overridden_handler(widget);
+}
+#endif
+
+void dt_osx_setup_dialogs()
+{
+#ifdef GDK_WINDOWING_QUARTZ
+  static gboolean done = FALSE;
+  if(done) return;
+  done = TRUE;
+  g_signal_override_class_handler("map", gtk_window_get_type(),
+                                  G_CALLBACK(_window_map_callback));
 #endif
 }
 
@@ -297,6 +325,20 @@ void dt_osx_focus_window()
 gboolean dt_osx_open_url(const char *url)
 {
   return [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@(url)]];
+}
+
+gboolean dt_osx_clipboard_set_files(GList *files)
+{
+  @autoreleasepool
+  {
+    NSMutableArray<NSURL *> *urls = [NSMutableArray array];
+    for(GList *iter = files; iter; iter = g_list_next(iter))
+      [urls addObject:[NSURL fileURLWithPath:@((const char *)iter->data)]];
+
+    NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
+    [pasteboard clearContents];
+    return [pasteboard writeObjects:urls];
+  }
 }
 
 @interface AppDelegate : NSObject <NSApplicationDelegate>

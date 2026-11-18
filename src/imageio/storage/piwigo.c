@@ -35,6 +35,7 @@
 #include "imageio/imageio_common.h"
 #include "imageio/imageio_module.h"
 #include "imageio/storage/imageio_storage_api.h"
+
 #include <curl/curl.h>
 #include <json-glib/json-glib.h>
 #include <stdio.h>
@@ -1129,10 +1130,12 @@ void gui_init(dt_imageio_module_storage_t *self)
                    G_CALLBACK(_piwigo_album_changed), (gpointer)ui);
   gtk_widget_set_sensitive(ui->album_list, FALSE);
 
-  GtkWidget *refresh_button = dtgtk_button_new(dtgtk_cairo_paint_refresh, CPF_NONE, NULL);
-  gtk_widget_set_tooltip_text(refresh_button, _("refresh album list"));
-  g_signal_connect(G_OBJECT(refresh_button), "clicked",
-                   G_CALLBACK(_piwigo_refresh_clicked), (gpointer)ui);
+  GtkWidget *refresh_button = dtgtk_button_new_full(dtgtk_cairo_paint_refresh, CPF_NONE, NULL,
+      &(dtgtk_button_config_t){
+        .tooltip = _("refresh album list"),
+        .clicked_cb = G_CALLBACK(_piwigo_refresh_clicked),
+        .clicked_data = (gpointer)ui,
+      });
 
   // new album
   ui->new_album_entry = GTK_ENTRY(gtk_entry_new()); // Album title
@@ -1475,7 +1478,7 @@ void *get_params(dt_imageio_module_storage_t *self)
   if(!ui)
     return NULL; // gui not initialized, CLI mode
 
-  dt_storage_piwigo_params_t *p = g_malloc0(sizeof(dt_storage_piwigo_params_t));
+  dt_storage_piwigo_params_t *p = g_try_malloc0(sizeof(dt_storage_piwigo_params_t));
 
   if(!p)
     return NULL;
@@ -1510,7 +1513,7 @@ void *get_params(dt_imageio_module_storage_t *self)
   p->vp = NULL;
   dt_variables_params_init(&p->vp);
 
-  if(ui->api && ui->api->authenticated == TRUE)
+  if(ui->api && ui->api->authenticated)
   {
     // create a new context for the import. set username/password to
     // be able to connect.

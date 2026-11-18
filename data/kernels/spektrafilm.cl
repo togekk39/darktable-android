@@ -1,0 +1,1336 @@
+/*
+    This file is part of darktable,
+    Copyright (C) 2026 darktable developers.
+
+    darktable is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    darktable is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with darktable.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+/* spektrafilm.cl — OpenCL kernels for the native spektrafilm iop.
+ *
+ * Mirrors the CPU stage functions in spektra_sim.c (which are themselves a
+ * validated port of spektrafilm 0.3.x). Per-pixel colour science runs here;
+ * the Gaussian blurs (halation bounces, diffusion bank, DIR-coupler
+ * correction diffusion, grain clumps) are done host-side on the intermediate
+ * buffers by _sf_yvv_blur_cl() in spektrafilm.c, the device half of the same
+ * Young-van Vliet recursion the CPU path runs in sf_blur_plane3.
+ *
+ * Pipeline: expose (CAT16'd RGB -> xy -> tri2quad -> Mitchell-cubic 2D
+ * spectral LUT × brightness × 2^EV) -> [boost/diffusion/halation on linear]
+ * -> lograw -> develop_corr -> [host blur] -> develop -> [grain] ->
+ * print_expose (PCHIP 3D) -> print_develop -> scan (PCHIP 3D -> XYZ ->
+ * work RGB -> OkLCh compression).
+ *
+ * Conventions:
+ *   - working buffers are float4 (.w carries alpha where relevant);
+ *   - all tables come from sf_sim_gpu_export(): the 2D spectral LUT
+ *     (tc_n×tc_n×3), the density curves (256×3), and the 3D PCHIP tables
+ *     (steps³×3 values + per-axis slopes + per-cell bounds) as __global
+ *     float buffers (they exceed __constant limits at 33³+);
+ *   - small matrices are packed into one __constant float block, see the
+ *     SF_M_* offsets below;
+ *   - the CPU engine computes in double; these kernels are float, so expect
+ *     ~1e-3 vs the CPU path (validated with POCL against the sf_sim_* stage
+ *     functions).
+ */
+
+/* OpenCL C defaults FP_CONTRACT to ON, so the device compiler is free to fuse
+   every a*b+c in this file into a single-rounding mad/fma. The host side is
+   not fused the same way (and on some builds not at all), so each fused
+   expression lands a fraction of an ULP away from its CPU twin. That is
+   normally invisible, but grain_poisson()'s accept/reject loop compares prod
+   against limit, so a fraction of an ULP anywhere upstream of the grain
+   sampler occasionally moves a draw by a whole integer -- which is what the
+   remaining CPU/GPU pixel differences look like: isolated single pixels,
+   evenly scattered, uncorrelated with image structure.
+
+   NOTE: the matching host-side guarantee is NOT the "#pragma STDC
+   FP_CONTRACT OFF" in spektra_core.h. GCC does not implement that pragma
+   (it still emits vfmadd with it in force); only the -ffp-contract=off
+   command-line flag works, which is why the CMake change accompanying this
+   sets it on the spektra sources. Both halves are needed. */
+#pragma OPENCL FP_CONTRACT OFF
+
+
+#include "common.h"
+/* grain_clampf / grain_hash / grain_uniform / grain_normal / grain_pixel_seed / grain_exp2i /
+   grain_exp_neg / grain_exp2f / grain_log2f / grain_poisson / grain_layer_particle and
+   GRAIN_POISSON_EXACT_MAX: one copy, compiled here and on the host. The
+   #define selects the OpenCL dialect and is required -- the header refuses
+   to compile as OpenCL without it. */
+#define GRAIN_CL 1
+#include "grain.h"
+
+#define SF_NLE 256
+#define SF_LOG_EPS 1e-10f
+
+/* offsets (in floats) into the packed matrix/constant buffer */
+#define SF_M_IN 0        /* 9: work RGB -> XYZ(film ref), CAT16 included */
+#define SF_M_OUT 9       /* 9: XYZ(view) -> work RGB, CAT02 included */
+#define SF_M_COUPLERS 18 /* 9: DIR coupler matrix, amount-scaled */
+#define SF_M_RGB2XYZ 27  /* 9: output RGB -> D65 XYZ, for OkLab */
+#define SF_M_XYZ2RGB 36  /* 9 */
+#define SF_M_OK1 45      /* 9: OkLab M1 */
+#define SF_M_OK2 54      /* 9: OkLab M2 */
+#define SF_M_OK1I 63     /* 9: inv(M1) */
+#define SF_M_OK2I 72     /* 9: inv(M2) */
+#define SF_M_LM_DONOR 81 /* 6: langmuir donor K[3] + D_ref[3] (K=1e30 = linear) */
+#define SF_M_LM_RECV 87  /* 6: langmuir receiver Kr[3] + c_ref[3] */
+#define SF_M_TOTAL 93
+
+/* Explicit fma, same nesting as the host twins (mat3_mulv_f in spektra_sim.c,
+   expose_pixel_f's inline form). The device compiler ignores
+   #pragma OPENCL FP_CONTRACT OFF -- that is why pinning the YvV recursion
+   with fma() moved the needle where the pragma alone did not -- while the
+   host really does honour -ffp-contract=off. So a bare a*b + c*d + e*f is
+   fused on one side and not the other, and every matrix multiply in the
+   pipeline lands a fraction of an ULP away from its twin. */
+static inline float3 sf_mat3(__constant const float *m, float3 v)
+{
+  return (float3)(fma(m[0], v.x, fma(m[1], v.y, m[2] * v.z)),
+                  fma(m[3], v.x, fma(m[4], v.y, m[5] * v.z)),
+                  fma(m[6], v.x, fma(m[7], v.y, m[8] * v.z)));
+}
+
+/* ---- [su] Mitchell-Netravali cubic on the tc_n×tc_n×3 spectral LUT ------ */
+
+static float sf_mitchell(float t)
+{
+  const float B = 1.0f / 3.0f, C = 1.0f / 3.0f;
+  const float x = fabs(t);
+  /* fma-pinned, matching mitchell_weight_f() in spektra_sim.c term for term */
+  if(x < 1.0f)
+    return (1.0f / 6.0f)
+           * fma((12.0f - 9.0f * B - 6.0f * C) * x * x, x,
+                 fma((-18.0f + 12.0f * B + 6.0f * C) * x, x, (6.0f - 2.0f * B)));
+  else if(x < 2.0f)
+    return (1.0f / 6.0f)
+           * fma((-B - 6.0f * C) * x * x, x,
+                 fma((6.0f * B + 30.0f * C) * x, x,
+                     fma((-12.0f * B - 48.0f * C), x, (8.0f * B + 24.0f * C))));
+  return 0.0f;
+}
+
+static inline int sf_reflect(int idx, int L)
+{
+  if(idx < 0) return -idx;
+  if(idx >= L) return 2 * (L - 1) - idx;
+  return idx;
+}
+
+static inline void sf_base_frac(float coord, int L, int *base, float *frac)
+{
+  coord = grain_clampf(coord, 0.0f, (float)(L - 1));
+  if(coord >= (float)(L - 1))
+  {
+    *base = L - 2;
+    *frac = 1.0f;
+    return;
+  }
+  *base = (int)floor(coord);
+  *frac = coord - *base;
+}
+
+static float3 sf_cubic2d(__global const float *lut, int L, float x, float y)
+{
+  int xb, yb;
+  float xf, yf;
+  sf_base_frac(x, L, &xb, &xf);
+  sf_base_frac(y, L, &yb, &yf);
+  float wx[4], wy[4];
+  for(int i = 0; i < 4; i++)
+  {
+    wx[i] = sf_mitchell(xf + 1.0f - i);
+    wy[i] = sf_mitchell(yf + 1.0f - i);
+  }
+  float3 acc = (float3)(0.0f);
+  float wsum = 0.0f;
+  for(int i = 0; i < 4; i++)
+  {
+    const int xi = sf_reflect(xb - 1 + i, L);
+    for(int j = 0; j < 4; j++)
+    {
+      const int yj = sf_reflect(yb - 1 + j, L);
+      const float w = wx[i] * wy[j];
+      wsum += w;
+      const size_t o = ((size_t)xi * L + yj) * 3;
+      /* fma, matching cubic_interp_2d_f()'s acc[c] += w * px[c] under
+         -ffp-contract=off ... see sf_mat3 above */
+      acc = (float3)(fma(w, lut[o], acc.x), fma(w, lut[o + 1], acc.y),
+                     fma(w, lut[o + 2], acc.z));
+    }
+  }
+  return (wsum != 0.0f) ? acc / wsum : acc;
+}
+
+/* ---- [dc] density curve interpolation over the uniform le grid ---------- */
+/* x-axis = le/gamma  ->  index t = (x*gamma - le0)*inv_le_step, endpoint-clamped.
+
+   inv_le_step is the host's sim->inv_le_step (1/le_step, rounded once from a
+   double-precision reciprocal) -- NOT recomputed on-device, and not a divide.
+   The CPU twin (interp_curve_uniform_f in spektra_sim.c) multiplies by that
+   same stored reciprocal, and x/step vs x*(1/step) differ by up to an ULP,
+   which is enough to land t on the other side of an integer and pick the
+   neighbouring curve segment. Same reasoning as enl_inv_range/scan_inv_range
+   in spektrafilm_print_expose below. */
+static inline float sf_curve(__global const float *curves, float x,
+                             float le0, float inv_le_step, int c)
+{
+  const float t = (x - le0) * inv_le_step;
+  if(t <= 0.0f) return curves[c];
+  if(t >= (float)(SF_NLE - 1)) return curves[(SF_NLE - 1) * 3 + c];
+  const int i = (int)t;
+  const float f = t - i;
+  /* fma-pinned, matching interp_curve_uniform_f() in spektra_sim.c */
+  return fma(f, curves[(i + 1) * 3 + c] - curves[i * 3 + c], curves[i * 3 + c]);
+}
+
+/* ---- [fi] monotone-PCHIP 3D LUT (values + per-axis slopes + cell clamp) - */
+
+/* fma-pinned, matching hermite_value_f() / linear_mix_f() in spektra_sim.c */
+static inline float sf_hermite(float y0, float y1, float m0, float m1, float t)
+{
+  const float t2 = t * t, t3 = t2 * t;
+  const float h00 = fma(2.0f, t3, fma(-3.0f, t2, 1.0f));
+  const float h10 = fma(-2.0f, t2, t3) + t;
+  const float h01 = fma(-2.0f, t3, 3.0f * t2);
+  const float h11 = t3 - t2;
+  return fma(h00, y0, fma(h10, m0, fma(h01, y1, h11 * m1)));
+}
+
+static inline float sf_lerp(float v0, float v1, float t)
+{
+  return fma(t, v1 - v0, v0);
+}
+
+static float3 sf_pchip3d(__global const float *lut, __global const float *sx,
+                         __global const float *sy, __global const float *sz,
+                         __global const float *cmin, __global const float *cmax,
+                         const int n, float r, float g, float b)
+{
+  const int m = n - 1;
+  int i, j, k;
+  float tr, tg, tb;
+  sf_base_frac(r, n, &i, &tr);
+  sf_base_frac(g, n, &j, &tg);
+  sf_base_frac(b, n, &k, &tb);
+  float out[3];
+#define AT(arr, ii, jj, kk, c) arr[((((size_t)(ii)) * n + (jj)) * n + (kk)) * 3 + (c)]
+  for(int c = 0; c < 3; c++)
+  {
+    const float v000 = sf_hermite(AT(lut, i, j, k, c), AT(lut, i + 1, j, k, c),
+                                  AT(sx, i, j, k, c), AT(sx, i + 1, j, k, c), tr);
+    const float v010 = sf_hermite(AT(lut, i, j + 1, k, c), AT(lut, i + 1, j + 1, k, c),
+                                  AT(sx, i, j + 1, k, c), AT(sx, i + 1, j + 1, k, c), tr);
+    const float v001 = sf_hermite(AT(lut, i, j, k + 1, c), AT(lut, i + 1, j, k + 1, c),
+                                  AT(sx, i, j, k + 1, c), AT(sx, i + 1, j, k + 1, c), tr);
+    const float v011
+        = sf_hermite(AT(lut, i, j + 1, k + 1, c), AT(lut, i + 1, j + 1, k + 1, c),
+                     AT(sx, i, j + 1, k + 1, c), AT(sx, i + 1, j + 1, k + 1, c), tr);
+    const float sy00 = sf_lerp(AT(sy, i, j, k, c), AT(sy, i + 1, j, k, c), tr);
+    const float sy10 = sf_lerp(AT(sy, i, j + 1, k, c), AT(sy, i + 1, j + 1, k, c), tr);
+    const float sy01 = sf_lerp(AT(sy, i, j, k + 1, c), AT(sy, i + 1, j, k + 1, c), tr);
+    const float sy11 = sf_lerp(AT(sy, i, j + 1, k + 1, c), AT(sy, i + 1, j + 1, k + 1, c), tr);
+    const float vz0 = sf_hermite(v000, v010, sy00, sy10, tg);
+    const float vz1 = sf_hermite(v001, v011, sy01, sy11, tg);
+    const float sz0 = sf_lerp(sf_lerp(AT(sz, i, j, k, c), AT(sz, i + 1, j, k, c), tr),
+                          sf_lerp(AT(sz, i, j + 1, k, c), AT(sz, i + 1, j + 1, k, c), tr), tg);
+    const float sz1
+        = sf_lerp(sf_lerp(AT(sz, i, j, k + 1, c), AT(sz, i + 1, j, k + 1, c), tr),
+              sf_lerp(AT(sz, i, j + 1, k + 1, c), AT(sz, i + 1, j + 1, k + 1, c), tr), tg);
+    float v = sf_hermite(vz0, vz1, sz0, sz1, tb);
+    const size_t ci = ((((size_t)i) * m + j) * m + k) * 3 + c;
+    v = grain_clampf(v, cmin[ci], cmax[ci]);
+    out[c] = v;
+  }
+#undef AT
+  return (float3)(out[0], out[1], out[2]);
+}
+
+/* ---- base-10 <-> base-2, matching the host's SF_LOG10F/SF_POW10F -------- */
+/* spektra_sim.c does NOT call log10f()/exp10f(). It defines
+     SF_LOG10F(x) = grain_log2f(x) * 0.3010299956639812f
+     SF_POW10F(x) = grain_exp2f(x * 3.321928094887362f)
+   so calling log10()/exp10() here would not be a more-or-less accurate
+   version of the same computation, it would be a different one: the host's
+   scaling multiply carries its own rounding that exp10()/log10() never
+   perform.
+
+   log2()/exp2() are not usable either, for the reason that governs
+   grain_exp_neg: OpenCL specs both to <=3 ULP and most GPUs implement them in
+   hardware, while glibc rounds correctly. That gap lands in the film density
+   feeding grain_layer_particle, and grain_poisson's accept/reject loop turns it
+   into whole-integer grain draws on isolated pixels. The grain_exp2f/grain_log2f
+   these call come from grain.h, the single copy the host compiles
+   too, so both sides agree bit-for-bit by construction. */
+
+static inline float sf_log10f(float x)
+{
+  return grain_log2f(x) * 0.3010299956639812f;
+}
+
+static inline float sf_pow10f(float x)
+{
+  return grain_exp2f(x * 3.321928094887362f);
+}
+
+/* ---- [gc] Reinhard knee + OkLCh output gamut compression ---------------- */
+
+static inline float sf_knee(float d, float threshold, float limit, float power)
+{
+  if(d <= threshold) return d;
+  const float scale = limit - threshold;
+  const float x = (d - threshold) / scale;
+  const float y = x / pow(1.0f + pow(x, power), 1.0f / power);
+  return fma(scale, y, threshold); /* matching reinhard_knee_f() */
+}
+
+static inline float3 sf_xyz_to_oklab(__constant const float *mats, float3 xyz)
+{
+  float3 lms = sf_mat3(mats + SF_M_OK1, xyz);
+  lms = (float3)(cbrt(lms.x), cbrt(lms.y), cbrt(lms.z));
+  return sf_mat3(mats + SF_M_OK2, lms);
+}
+
+static inline float3 sf_oklab_to_xyz(__constant const float *mats, float3 lab)
+{
+  float3 lms = sf_mat3(mats + SF_M_OK2I, lab);
+  lms = lms * lms * lms;
+  return sf_mat3(mats + SF_M_OK1I, lms);
+}
+
+static float sf_cmax_lookup(__global const float *table, const int nl, const int nh,
+                            float L, float h)
+{
+  const float L_lo_v = 0.02f, L_hi_v = 1.0f;
+  L = grain_clampf(L, L_lo_v, L_hi_v);
+  const float h_step = 2.0f * M_PI_F / nh;
+  const float h_idx = (h + M_PI_F) / h_step;
+  const float h_floor = floor(h_idx);
+  int h_lo = ((int)h_floor) % nh;
+  if(h_lo < 0) h_lo += nh;
+  const int h_hi = (h_lo + 1) % nh;
+  const float h_frac = h_idx - h_floor;
+  const float L_idx = (L - L_lo_v) / (L_hi_v - L_lo_v) * (float)(nl - 1);
+  int L_lo = (int)floor(L_idx);
+  L_lo = clamp(L_lo, 0, nl - 2);
+  const float L_frac = L_idx - L_lo;
+  const float v00 = table[(size_t)L_lo * nh + h_lo];
+  const float v01 = table[(size_t)L_lo * nh + h_hi];
+  const float v10 = table[(size_t)(L_lo + 1) * nh + h_lo];
+  const float v11 = table[(size_t)(L_lo + 1) * nh + h_hi];
+  /* fma-pinned, matching cmax_lookup_f() */
+  const float l0 = 1.0f - L_frac, hh0 = 1.0f - h_frac;
+  return fma(v00 * l0, hh0, fma(v01 * l0, h_frac, fma(v10 * L_frac, hh0, (v11 * L_frac) * h_frac)));
+}
+
+
+/* ======================================================================== */
+/* per-pixel stage kernels                                                  */
+/* ======================================================================== */
+
+/* Highlight boost; the constants come from sf_boost_build_plan() on the host,
+   and the per-value expression matches sf_boost_highlights() term for term,
+   including the tangent continuation above xmax. */
+static inline float3 sf_boost(const float3 p, const float raw_x0, const float xmax,
+                              const float inv_max, const float a, const float a_log2e,
+                              const float scale, const float ext, const float slope)
+{
+  float v[3] = { p.x, p.y, p.z };
+  for(int c = 0; c < 3; c++)
+  {
+    const float xv = v[c];
+    if(xv <= raw_x0) continue;
+    if(xv <= xmax)
+    {
+      const float dx = (xv - raw_x0) * inv_max;
+      const float t = a * dx;
+      v[c] = fma(scale, (grain_exp2f(a_log2e * dx) - t) - 1.0f, xv);
+    }
+    else
+      v[c] = fma(slope, xv - xmax, xv + ext);
+  }
+  return (float3)(v[0], v[1], v[2]);
+}
+
+/* stage 1: input image -> linear film raw exposure (spektra_sim: sf_sim_expose) */
+__kernel void spektrafilm_expose(__read_only image2d_t in, __global float4 *plane,
+                                 const int w, const int h, __constant float *mats,
+                                 __global const float *tc_lut, const int tc_n,
+                                 const float ev_scale, const int boost_on,
+                                 const float raw_x0, const float xmax, const float inv_max,
+                                 const float a, const float a_log2e, const float scale_b,
+                                 const float ext, const float slope)
+{
+  const int x = get_global_id(0), y = get_global_id(1);
+  if(x >= w || y >= h) return;
+  float4 px = readpixel(in, x, y);
+  float3 xyz = sf_mat3(mats + SF_M_IN, (float3)(px.x, px.y, px.z));
+  const float b = xyz.x + xyz.y + xyz.z;
+  const float inv = 1.0f / fmax(b, 1e-10f);
+  const float xx = xyz.x * inv, yy = xyz.y * inv;
+  /* [su] tri2quad */
+  const float tcx = grain_clampf((1.0f - xx) * (1.0f - xx), 0.0f, 1.0f);
+  /* careful: tri2quad computes from CIE xy, matching spektra_sim tri2quad() */
+  const float tcy = grain_clampf(yy / fmax(1.0f - xx, 1e-10f), 0.0f, 1.0f);
+  const float scale = (float)(tc_n - 1);
+  float3 raw = sf_cubic2d(tc_lut, tc_n, tcx * scale, tcy * scale);
+  const float bb = isfinite(b) ? b : 0.0f;
+  /* (raw * b) * ev, the association sf_sim_expose() uses: expose_pixel_f
+     scales by b and the caller then by ev_scale */
+  raw = (raw * bb) * ev_scale;
+  /* no negative exposure into the pre-film blurs, see sf_sim_expose() */
+  raw = fmax(raw, 0.0f);
+  /* the highlight boost of the pre-film stage, on the stored exposure */
+  if(boost_on) raw = sf_boost(raw, raw_x0, xmax, inv_max, a, a_log2e, scale_b, ext, slope);
+  plane[(size_t)y * w + x] = (float4)(raw.x, raw.y, raw.z, px.w);
+}
+
+/* stage 3a: linear raw -> log exposure (in place), after the positive scan's
+   black/white exposure correction (sf_sim_lograw) */
+__kernel void spektrafilm_lograw(__global float4 *plane, const int w, const int h,
+                                 const float raw_scale)
+{
+  const int x = get_global_id(0), y = get_global_id(1);
+  if(x >= w || y >= h) return;
+  const size_t k = (size_t)y * w + x;
+  float4 p = plane[k];
+  p.x = sf_log10f(fmax(p.x * raw_scale, 0.0f) + SF_LOG_EPS);
+  p.y = sf_log10f(fmax(p.y * raw_scale, 0.0f) + SF_LOG_EPS);
+  p.z = sf_log10f(fmax(p.z * raw_scale, 0.0f) + SF_LOG_EPS);
+  plane[k] = p;
+}
+
+/* stage 3b: DIR coupler correction field (spektra_sim: sf_sim_develop_corr);
+   blurred host-side by _sf_yvv_blur_cl(), then consumed by _develop below */
+__kernel void spektrafilm_develop_corr(__global const float4 *lograw, __global float4 *corr,
+                                       const int w, const int h,
+                                       __global const float *curves_norm,
+                                       __constant float *mats, const float le0,
+                                       const float inv_le_step, const float dmax0,
+                                       const float dmax1, const float dmax2,
+                                       const int positive, const int donor_lm)
+{
+  const int x = get_global_id(0), y = get_global_id(1);
+  if(x >= w || y >= h) return;
+  const size_t k = (size_t)y * w + x;
+  const float4 lg = lograw[k];
+  const float dmx[3] = { dmax0, dmax1, dmax2 };
+  const float lgv[3] = { lg.x, lg.y, lg.z };
+  float silver[3];
+  for(int c = 0; c < 3; c++)
+  {
+    const float d = sf_curve(curves_norm, lgv[c], le0, inv_le_step, c);
+    silver[c] = positive ? dmx[c] - d : d;
+    /* Langmuir donor saturation (dev packs). Gated on donor_lm, exactly as
+       sf_sim_develop_corr() gates it on sim->couplers_donor_lm.
+
+       The gate is load-bearing: running this unconditionally and relying on a
+       sentinel K=1e30 to "degenerate to linear" does not work, because the
+       term then evaluates as (silver * 1e30f) / 1e30f, and x*y/y is not x in
+       float -- 13.6% of plausible silver values in [0,3] come back one ULP
+       off. That would put every pixel of the coupler correction slightly wrong
+       for any pack without a donor Langmuir term, which the grain sampler
+       downstream amplifies into whole-integer draw differences. */
+    if(donor_lm)
+    {
+      const float K = mats[SF_M_LM_DONOR + c], Dref = mats[SF_M_LM_DONOR + 3 + c];
+      silver[c] = silver[c] * (K + Dref) / (K + silver[c]);
+    }
+  }
+  __constant const float *M = mats + SF_M_COUPLERS; /* row donor -> col receiver */
+  float out[3];
+  /* fma-pinned, matching sf_sim_develop_corr() -- see sf_mat3 */
+  for(int m = 0; m < 3; m++)
+    out[m] = fma(silver[0], M[0 * 3 + m], fma(silver[1], M[1 * 3 + m], silver[2] * M[2 * 3 + m]));
+  corr[k] = (float4)(out[0], out[1], out[2], 0.0f);
+}
+
+/* stage 3c: develop to CMY film density (spektra_sim: sf_sim_develop).
+   `curves` is curves_before when couplers are on, curves_norm otherwise. */
+/* Writes the w x h window of the sw-wide source buffers that starts at
+   (sx, sy), packed, into `cmy`: the stages after development run on the
+   window, see _sf_work_window() on the host. */
+__kernel void spektrafilm_develop(__global const float4 *lograw, __global const float4 *corr,
+                                  const int use_corr, __global float4 *cmy, const int w,
+                                  const int h, const int sw, const int sx, const int sy,
+                                  __global const float *curves,
+                                  __constant float *mats, const float le0,
+                                  const float inv_le_step, const int recv_lm)
+{
+  const int x = get_global_id(0), y = get_global_id(1);
+  if(x >= w || y >= h) return;
+  const size_t k = (size_t)y * w + x;
+  const size_t ks = (size_t)(y + sy) * sw + (x + sx);
+  const float4 lg = lograw[ks];
+  float4 cr = use_corr ? corr[ks] : (float4)(0.0f);
+  /* receiver-side Langmuir on the ARRIVED (post-diffusion) inhibitor. Gated
+     on use_corr && recv_lm, matching sf_sim_develop()'s
+     `if(cr && sim->couplers_recv_lm)`. See the donor-side comment in
+     spektrafilm_develop_corr above for why the Kr=1e30 sentinel was not the
+     no-op it was assumed to be. */
+  float crv[3] = { cr.x, cr.y, cr.z };
+  if(use_corr && recv_lm)
+    for(int c = 0; c < 3; c++)
+    {
+      const float Kr = mats[SF_M_LM_RECV + c], cref = mats[SF_M_LM_RECV + 3 + c];
+      crv[c] = crv[c] * (Kr + cref) / (Kr + crv[c]);
+    }
+  const float lgv[3] = { lg.x - crv[0], lg.y - crv[1], lg.z - crv[2] };
+  float out[3];
+  for(int c = 0; c < 3; c++) out[c] = sf_curve(curves, lgv[c], le0, inv_le_step, c);
+  cmy[k] = (float4)(out[0], out[1], out[2], lg.w);
+}
+
+/* Inverse-lookup: given the already-computed NET total density `target` for
+ * one channel, find its fractional position on the [0, n) exposure-grid
+ * axis by searching `arr` (assumed monotonic -- guaranteed for a sum of
+ * same-signed CDF terms) via binary search plus linear interpolation. Walks
+ * a strided (non-contiguous) column of a [n][...] table without copying it
+ * out first -- the same "find where the total curve reads D" step
+ * spektrafilm's own interp_density_cmy_layers_channel performs. */
+static float sf_cl_grain_curve_inverse(__global const float *arr, int n, int stride, float target)
+{
+  const int increasing = arr[(n - 1) * stride] >= arr[0];
+  int lo = 0, hi = n - 1;
+  while(hi - lo > 1)
+  {
+    const int mid = (lo + hi) / 2;
+    const float v = arr[mid * stride];
+    if((increasing && v <= target) || (!increasing && v >= target)) lo = mid;
+    else hi = mid;
+  }
+  const float v0 = arr[lo * stride], v1 = arr[hi * stride];
+  const float denom = v1 - v0;
+  float frac = (fabs(denom) > 1e-9f) ? (target - v0) / denom : 0.0f;
+  frac = clamp(frac, 0.0f, 1.0f);
+  return (float)lo + frac;
+}
+
+/* Linearly interpolate a strided per-index array at the continuous index
+ * `pos` produced by sf_cl_grain_curve_inverse above. */
+static float sf_cl_grain_curve_sample(__global const float *arr, int n, int stride, float pos)
+{
+  int i0 = (int)pos;
+  if(i0 < 0) i0 = 0;
+  if(i0 > n - 2) i0 = (n - 2 < 0) ? 0 : n - 2;
+  const float frac = pos - (float)i0;
+  /* fma-pinned, matching _sf_grain_curve_sample() */
+  return fma(arr[(i0 + 1) * stride], frac, arr[i0 * stride] * (1.0f - frac));
+}
+
+/* stage 4: grain, in three kernels (raw sub-layer sample, accumulate,
+   finalize), so upstream's per-sub-layer dye-cloud blur
+   (layer_particle_model's blur_particle, grain.py) can run on each raw
+   sub-layer independently between sampling and combining -- see the matching
+   comment in process()'s CPU path for the full rationale. All three color
+   channels travel in one float4 buffer; the achromatic draw uses .x only.
+
+   The RAW (un-combined, pre-dmin-subtraction) sample of sub-layer sl_idx for
+   one channel's density at the image position (gx, gy). channel_idx is 1 for
+   mono (channel 1's curve/params stand for the achromatic draw) or 0/1/2 for
+   color; seed_ch is 0 for mono (so seeding stays sl*10, not 1+sl*10) or the
+   real channel index for color. layer_curve is [nle][max_sub][3] row-major,
+   layer_curve_total is [nle][3]; max_sub (SF_GRAIN_MAX_SUBLAYERS host-side)
+   is the table's fixed stride regardless of how many sub-layers n_sub
+   actually uses. */
+static inline float sf_cl_grain_sample(const float density, const int gx, const int gy,
+                                       const int channel_idx, const int seed_ch,
+                                       const int sl_idx, const int nle, const int max_sub,
+                                       const float unif_ch, const float npart_scale,
+                                       const uint salt,
+                                       __global const float *layer_dmax,
+                                       __global const float *layer_npart,
+                                       __global const float *layer_dmin,
+                                       __global const float *layer_curve_total,
+                                       __global const float *layer_curve)
+{
+  const int lstride = max_sub * 3;
+  const int idx = sl_idx * 3 + channel_idx;
+  const float pos = sf_cl_grain_curve_inverse(layer_curve_total + channel_idx, nle, 3, density);
+  const float raw = sf_cl_grain_curve_sample(layer_curve + idx, nle, lstride, pos);
+  const float d_abs = raw + layer_dmin[idx];
+  const uint seed = grain_pixel_seed((uint)gx, (uint)gy, (uint)(seed_ch + sl_idx * 10), salt);
+  return grain_layer_particle(d_abs, layer_dmax[idx], layer_npart[idx] * npart_scale, unif_ch,
+                              seed);
+}
+
+/* The raw samples of ONE sub-layer for all channels -- called once per
+   sub-layer. unif holds the uniformity of the three channels. */
+__kernel void spektrafilm_grain_gen_raw_sl(__global const float4 *dens, __global float4 *raw_out,
+                                           const int w, const int h,
+                                           const int roi_x, const int roi_y, const int mono,
+                                           const int sl_idx, const int nle, const int max_sub,
+                                           const float unif0, const float unif1,
+                                           const float unif2, const float npart_scale,
+                                           const uint salt,
+                                           __global const float *layer_dmax,
+                                           __global const float *layer_npart,
+                                           __global const float *layer_dmin,
+                                           __global const float *layer_curve_total,
+                                           __global const float *layer_curve)
+{
+  const int x = get_global_id(0), y = get_global_id(1);
+  if(x >= w || y >= h) return;
+  const size_t k = (size_t)y * w + x;
+  const float4 d4 = dens[k];
+  const int gx = x + roi_x, gy = y + roi_y;
+  float4 r = (float4)(0.f, 0.f, 0.f, 0.f);
+  if(mono)
+    r.x = sf_cl_grain_sample((d4.x + d4.y + d4.z) / 3.0f, gx, gy, 1, 0, sl_idx, nle, max_sub,
+                             unif1, npart_scale, salt, layer_dmax, layer_npart, layer_dmin,
+                             layer_curve_total, layer_curve);
+  else
+  {
+    r.x = sf_cl_grain_sample(d4.x, gx, gy, 0, 0, sl_idx, nle, max_sub, unif0, npart_scale, salt,
+                             layer_dmax, layer_npart, layer_dmin, layer_curve_total, layer_curve);
+    r.y = sf_cl_grain_sample(d4.y, gx, gy, 1, 1, sl_idx, nle, max_sub, unif1, npart_scale, salt,
+                             layer_dmax, layer_npart, layer_dmin, layer_curve_total, layer_curve);
+    r.z = sf_cl_grain_sample(d4.z, gx, gy, 2, 2, sl_idx, nle, max_sub, unif2, npart_scale, salt,
+                             layer_dmax, layer_npart, layer_dmin, layer_curve_total, layer_curve);
+  }
+  raw_out[k] = r;
+}
+
+/* Sums the sub-layers that have no dye-cloud blur into the accumulator, one
+   sub-layer at a time: reset=1 initializes the accumulator with the first
+   sub-layer instead of requiring a separate zero-fill dispatch, reset=0 adds
+   subsequent ones. A blurred sub-layer is summed by the last pass of its
+   blur, spektrafilm_gauss_col_4c_accum with unit weights. */
+__kernel void spektrafilm_grain_accumulate(__global float4 *acc, __global const float4 *src,
+                                           const int w, const int h, const int reset)
+{
+  const int x = get_global_id(0), y = get_global_id(1);
+  if(x >= w || y >= h) return;
+  const size_t k = (size_t)y * w + x;
+  if(reset) acc[k] = src[k];
+  else acc[k] += src[k];
+}
+
+/* Subtracts the density floor and the original clean density from the
+   summed (already dye-blurred) sub-layers in `grain`, scales by grain
+   strength, and leaves the delta there (mono broadcasts .x to all three).
+   dmin holds the floor per channel; mono uses channel 1's. */
+__kernel void spektrafilm_grain_finalize(__global float4 *grain,
+                                         __global const float4 *dens,
+                                         const int w, const int h, const int mono,
+                                         const float dmin0, const float dmin1,
+                                         const float dmin2, const float amount)
+{
+  const int x = get_global_id(0), y = get_global_id(1);
+  if(x >= w || y >= h) return;
+  const size_t k = (size_t)y * w + x;
+  const float4 d4 = dens[k];
+  const float4 a = grain[k];
+  if(mono)
+  {
+    const float density = (d4.x + d4.y + d4.z) / 3.0f;
+    const float g = a.x - dmin1;
+    const float delta = (g - density) * amount;
+    grain[k] = (float4)(delta, delta, delta, 0.f);
+  }
+  else
+  {
+    const float gx = a.x - dmin0, gy = a.y - dmin1, gz = a.z - dmin2;
+    grain[k] = (float4)((gx - d4.x) * amount, (gy - d4.y) * amount, (gz - d4.z) * amount, 0.f);
+  }
+}
+
+/* Add the raw, still-unblurred grain delta onto the CMY density. The clump
+   blur runs AFTER this, on the combined field, so it softens image detail and
+   grain alike -- that is what the reference blurs (_finalize_grain in grain.py
+   smooths the grained density itself, not an isolated grain layer), and it is
+   what the multiplicative unsharp mask further down is tuned to recover.
+   No centring pass: the Poisson sampler in grain_layer_particle is unbiased, so
+   the delta already has zero mean. No variance-restoration renorm either --
+   the reference's grain finalization has none; it just blurs and lets the
+   natural contrast reduction stand, matching real optical clumping. Restoring
+   full pre-blur variance made grain visibly higher-contrast, and therefore
+   visually coarser, than the reference at any matching sigma. */
+__kernel void spektrafilm_grain_add(__global float4 *dens_buf, __global const float4 *grain_buf,
+                                    const int w, const int h)
+{
+  const int x = get_global_id(0), y = get_global_id(1);
+  if(x >= w || y >= h) return;
+  const size_t k = (size_t)y * w + x;
+  const float4 d = dens_buf[k];
+  const float4 g = grain_buf[k];
+  dens_buf[k] = (float4)(d.x + g.x, d.y + g.y, d.z + g.z, d.w);
+}
+
+/* Multiplicative unsharp mask after grain blur (study b80), recovering the
+   acutance that blur removed from the combined image-plus-grain density.
+   cmy = orig * (orig / G_sigma(orig))^amount. `cmy` holds orig on entry and
+   `blur` its blurred copy.
+   Runs on the ABSOLUTE density: the grain floor (dmin, the sum of the
+   per-sublayer floors) is added back before the ratio and removed from the
+   result, matching the reference (_finalize_grain: blur -> USM ->
+   -= density_min). Without the floor the D/blur(D) ratio is
+   ill-conditioned in the deepest shadows and shadow noise gets amplified
+   the way the reference never does. The result is bounded below by -dmin,
+   not by 0, so grain below the floor is kept rather than rectified. */
+__kernel void spektrafilm_grain_usm(__global float4 *cmy, __global const float4 *blurred,
+                                     const int w, const int h, const float amount,
+                                     const float dmin0, const float dmin1, const float dmin2)
+{
+  const int x = get_global_id(0), y = get_global_id(1);
+  if(x >= w || y >= h) return;
+  const size_t k = (size_t)y * w + x;
+  const float4 dmin = (float4)(dmin0, dmin1, dmin2, 0.0f);
+  /* fmax(..., 0) on D, matching sf_multiplicative_unsharp_mask3 in
+     spektra_core.c: the CPU clamps the absolute density at zero before using
+     it both as the ratio numerator and as the outer multiplier. Without the
+     clamp a negative D flips the sign of the whole term here instead of
+     collapsing it -- a behavioural difference, not a rounding one. */
+  const float4 D = fmax(cmy[k] + dmin, 0.0f);
+  const float4 blur = blurred[k] + dmin;
+  const float eps = 1e-6f;
+  const float ratmax = 4.0f, ratmin = 1.0f / ratmax;
+  /* NOTE: pow() below is only spec'd to 16 ULP in OpenCL, against a host
+     powf() that is typically correctly rounded. That gap survives this
+     patch; if a residue remains and is localised to grained pixels, this is
+     the next candidate for a shared portable implementation (cf. grain_exp_neg
+     in spektra_core.h). */
+  float4 out;
+  out.x = fma(D.x, pow(fmax(fmin(D.x / fmax(blur.x, eps), ratmax), ratmin), amount),
+              -dmin.x);
+  out.y = fma(D.y, pow(fmax(fmin(D.y / fmax(blur.y, eps), ratmax), ratmin), amount),
+              -dmin.y);
+  out.z = fma(D.z, pow(fmax(fmin(D.z / fmax(blur.z, eps), ratmax), ratmin), amount),
+              -dmin.z);
+  out.w = 0.0f;
+  cmy[k] = out;
+}
+
+/* stage 5a: CMY film density -> print log exposure (sf_sim_print_expose) */
+static inline float3 sf_print_loge(const float4 in,
+                                   __global const float *lut, __global const float *sx,
+                                   __global const float *sy, __global const float *sz,
+                                   __global const float *cmn, __global const float *cmx,
+                                   const int steps, const float lo0, const float lo1,
+                                   const float lo2, const float inv0, const float inv1,
+                                   const float inv2, const float log10_print_exposure)
+{
+  const float scale = (float)(steps - 1);
+  /* inv0/inv1/inv2 are the host's sim->enl_inv_range[c] (1/(hi-lo), rounded
+     once from a double-precision subtraction) -- NOT computed here as
+     1/(hi-lo) in float32. hi and lo individually survive an extra float32
+     rounding each versus the host's double copies, and re-subtracting them
+     on-device is a catastrophic-cancellation hazard whenever a channel's
+     density range is narrow: the relative error in that difference blows
+     up right where the CPU fast path (sf_sim_print_expose/sf_sim_scan,
+     spektra_sim.c) stays exact, shifting r/g/b enough to flip floor() to
+     the neighbouring LUT cell for pixels near a cell boundary. Using the
+     same precomputed reciprocal as the CPU path makes this identical to
+     it by construction instead of hoping two different roundings agree. */
+  const float r = (in.x - lo0) * inv0 * scale;
+  const float g = (in.y - lo1) * inv1 * scale;
+  const float b = (in.z - lo2) * inv2 * scale;
+  float3 l1 = sf_pchip3d(lut, sx, sy, sz, cmn, cmx, steps, r, g, b);
+  /* [st] raw = 10^l1 * print_exposure, back to log10 -- but done as the exact
+     identity log10(10^l1 * pe) == l1 + log10(pe), which is what
+     sf_sim_print_expose does on the CPU. A round trip through
+     exp10()/log10() is not the same computation: OpenCL only specs those to
+     3 ULP each, and a + SF_LOG_EPS would floor the result at
+     log10(1e-10) == -10 while the CPU floors at -30, so the two paths would
+     give visibly different values for any pixel dark enough to reach the
+     floor. One add, no library calls, no epsilon, and the same -30 guard the
+     CPU uses against -inf from degenerate inputs. */
+  float3 out;
+  out.x = fmax(l1.x + log10_print_exposure, -30.0f);
+  out.y = fmax(l1.y + log10_print_exposure, -30.0f);
+  out.z = fmax(l1.z + log10_print_exposure, -30.0f);
+  return out;
+}
+
+/* stage 5b: print log exposure -> print CMY density (sf_sim_print_develop) */
+static inline float3 sf_print_density(const float3 loge, __global const float *print_curves,
+                                      const float le0, const float inv_le_step)
+{
+  return (float3)(sf_curve(print_curves, loge.x, le0, inv_le_step, 0),
+                  sf_curve(print_curves, loge.y, le0, inv_le_step, 1),
+                  sf_curve(print_curves, loge.z, le0, inv_le_step, 2));
+}
+
+/* The two print kernels run only around the print diffusion filter, which
+   works on linear print exposure, as the reference's printing.expose does:
+   with `linear`, spektrafilm_print_expose writes 10^loge for it, and
+   spektrafilm_diffusion_mix takes the filtered plane back to log10. Without
+   the filter, spektrafilm_scan runs both print stages itself. */
+__kernel void spektrafilm_print_expose(__global const float4 *cmy, __global float4 *loge,
+                                       const int w, const int h,
+                                       __global const float *lut, __global const float *sx,
+                                       __global const float *sy, __global const float *sz,
+                                       __global const float *cmn, __global const float *cmx,
+                                       const int steps, const float lo0, const float lo1,
+                                       const float lo2, const float inv0, const float inv1,
+                                       const float inv2, const float log10_print_exposure,
+                                       const int linear)
+{
+  const int x = get_global_id(0), y = get_global_id(1);
+  if(x >= w || y >= h) return;
+  const size_t k = (size_t)y * w + x;
+  const float4 in = cmy[k];
+  float3 out = sf_print_loge(in, lut, sx, sy, sz, cmn, cmx, steps, lo0, lo1, lo2, inv0, inv1,
+                             inv2, log10_print_exposure);
+  if(linear) out = (float3)(sf_pow10f(out.x), sf_pow10f(out.y), sf_pow10f(out.z));
+  loge[k] = (float4)(out.x, out.y, out.z, in.w);
+}
+
+/* Source window as for spektrafilm_develop. */
+__kernel void spektrafilm_print_develop(__global const float4 *loge, __global float4 *cmy,
+                                        const int w, const int h, const int sw, const int sx,
+                                        const int sy,
+                                        __global const float *print_curves, const float le0,
+                                        const float inv_le_step)
+{
+  const int x = get_global_id(0), y = get_global_id(1);
+  if(x >= w || y >= h) return;
+  const size_t k = (size_t)y * w + x;
+  const float4 in = loge[(size_t)(y + sy) * sw + (x + sx)];
+  const float3 out = sf_print_density((float3)(in.x, in.y, in.z), print_curves, le0,
+                                      inv_le_step);
+  cmy[k] = (float4)(out.x, out.y, out.z, in.w);
+}
+
+/* stage 6: scan — CMY density -> log XYZ (PCHIP) -> XYZ -> work RGB with
+   OkLCh (mode 1) / ACES RGC (mode 2) gamut compression. Runs on the OUTPUT
+   grid, cropping (ox, oy) from the full-ROI plane and taking alpha from the
+   input image (spektra_sim: sf_sim_scan). */
+/* Scans the work window into a buffer: the scanner optics run after this
+   on the scanned RGB, and they need its margin. spektrafilm_crop_out does the
+   crop. `glare` holds the viewing-glare field in .x when glare_on. With
+   print_on, `cmy` holds the film density and the two print stages run first,
+   on the tables and constants spektrafilm_print_expose and
+   spektrafilm_print_develop take. */
+__kernel void spektrafilm_scan(__global const float4 *cmy, __global float4 *rgb_out,
+                               const int w, const int h,
+                               const int print_on,
+                               __global const float *plut, __global const float *psx,
+                               __global const float *psy, __global const float *psz,
+                               __global const float *pcmn, __global const float *pcmx,
+                               const float plo0, const float plo1, const float plo2,
+                               const float pinv0, const float pinv1, const float pinv2,
+                               const float log10_print_exposure,
+                               __global const float *print_curves, const float le0,
+                               const float inv_le_step,
+                               __global const float *lut, __global const float *sx,
+                               __global const float *sy, __global const float *sz,
+                               __global const float *cmn, __global const float *cmx,
+                               const int steps, const float lo0, const float lo1,
+                               const float lo2, const float inv0, const float inv1,
+                               const float inv2, __constant float *mats,
+                               __global const float *cmax_table, const int cmax_nl,
+                               const int cmax_nh, const int compress_mode,
+                               const float out_luminance_boost,
+                               const float out_scale,
+                               const int bw_on, const float bw_m, const float bw_q,
+                               __global const float4 *glare, const int glare_on,
+                               const float glare_x, const float glare_y, const float glare_z)
+{
+  const int x = get_global_id(0), y = get_global_id(1);
+  if(x >= w || y >= h) return;
+  const size_t k = (size_t)y * w + x;
+  float4 c4 = cmy[k];
+  if(print_on)
+  {
+    const float3 loge = sf_print_loge(c4, plut, psx, psy, psz, pcmn, pcmx, steps, plo0, plo1,
+                                      plo2, pinv0, pinv1, pinv2, log10_print_exposure);
+    const float3 pd = sf_print_density(loge, print_curves, le0, inv_le_step);
+    c4 = (float4)(pd.x, pd.y, pd.z, c4.w);
+  }
+  const float scale = (float)(steps - 1);
+  /* inv0/inv1/inv2 = host's sim->scan_inv_range[c]; see sf_print_loge
+     above for why this must not be recomputed as 1/(hi-lo) on-device. */
+  const float r = (c4.x - lo0) * inv0 * scale;
+  const float g = (c4.y - lo1) * inv1 * scale;
+  const float b = (c4.z - lo2) * inv2 * scale;
+  float3 lx = sf_pchip3d(lut, sx, sy, sz, cmn, cmx, steps, r, g, b);
+  float3 xyz = (float3)(sf_pow10f(lx.x), sf_pow10f(lx.y), sf_pow10f(lx.z));
+  if(out_luminance_boost != 1.0f) xyz *= out_luminance_boost;
+  if(bw_on) /* scanner black/white point (positive film scans) */
+  {
+    const float yc = grain_clampf(fma(bw_m, xyz.y, bw_q), 0.0f, 1.0f);
+    xyz *= yc / (xyz.y + 1e-10f);
+  }
+  if(glare_on) /* viewing glare veil in XYZ, mirroring sf_sim_scan() */
+  {
+    const float gv = glare[k].x;
+    xyz = (float3)(fma(gv, glare_x, xyz.x), fma(gv, glare_y, xyz.y), fma(gv, glare_z, xyz.z));
+  }
+  float3 rgb = sf_mat3(mats + SF_M_OUT, xyz);
+
+  if(compress_mode == 1) /* OkLCh chroma + lightness compression */
+  {
+    float3 lab = sf_xyz_to_oklab(mats, sf_mat3(mats + SF_M_RGB2XYZ, rgb));
+    float L = sf_knee(lab.x, 0.7f, 1.0f, 2.2f); /* lightness first */
+    const float C = hypot(lab.y, lab.z);
+    const float hh = atan2(lab.z, lab.y);
+    const float C_max = fmax(sf_cmax_lookup(cmax_table, cmax_nl, cmax_nh, L, hh), 1e-9f);
+    const float d = sf_knee(C / C_max, 0.0f, 1.0f, 6.0f);
+    const float C_new = d * C_max;
+    float3 lab_new = (float3)(L, C_new * cos(hh), C_new * sin(hh));
+    rgb = sf_mat3(mats + SF_M_XYZ2RGB, sf_oklab_to_xyz(mats, lab_new));
+  }
+  else if(compress_mode == 2) /* ACES reference gamut compression style */
+  {
+    const float ach = fmax(rgb.x, fmax(rgb.y, rgb.z));
+    if(ach > 1e-12f)
+    {
+      float v[3] = { rgb.x, rgb.y, rgb.z };
+      for(int c = 0; c < 3; c++)
+      {
+        const float d = (ach - v[c]) / ach;
+        const float dc = sf_knee(d, 0.0f, 1.0f, 6.0f);
+        v[c] = ach * (1.0f - dc);
+      }
+      rgb = (float3)(v[0], v[1], v[2]);
+    }
+  }
+
+  /* after the compressor, mirroring sf_sim_scan() */
+  if(out_scale != 1.0f) rgb *= out_scale;
+
+  rgb_out[k] = (float4)(rgb.x, rgb.y, rgb.z, 0.0f);
+}
+
+/* Crop the work window down to roi_out and carry the input alpha through.
+   (ox, oy) is roi_out's offset in the w-wide work window, (ix, iy) its offset
+   in the input image. */
+__kernel void spektrafilm_crop_out(__global const float4 *rgb, __read_only image2d_t in,
+                                   __write_only image2d_t out, const int w, const int ow,
+                                   const int oh, const int ox, const int oy, const int ix,
+                                   const int iy)
+{
+  const int x = get_global_id(0), y = get_global_id(1);
+  if(x >= ow || y >= oh) return;
+  const float4 v = rgb[(size_t)(y + oy) * w + (x + ox)];
+  const float4 px = readpixel(in, x + ix, y + iy);
+  write_ipixel(out, (int2)(x, y), (float4)(v.x, v.y, v.z, px.w));
+}
+
+/* Additive unsharp mask on the scanned RGB (sf_unsharp_mask3): `rgb` holds the
+   image on entry, `blurred` its blurred copy. */
+__kernel void spektrafilm_scan_usm(__global float4 *rgb, __global const float4 *blurred,
+                                   const int w, const int h, const float amount)
+{
+  const int x = get_global_id(0), y = get_global_id(1);
+  if(x >= w || y >= h) return;
+  const size_t k = (size_t)y * w + x;
+  const float4 D = rgb[k], blur = blurred[k];
+  /* fma-pinned, matching sf_unsharp_mask3() */
+  rgb[k] = (float4)(fma(amount, D.x - blur.x, D.x), fma(amount, D.y - blur.y, D.y),
+                    fma(amount, D.z - blur.z, D.z), D.w);
+}
+
+/* Viewing-glare field: lognormal of linear-space mean `mean` and shape (s, bias)
+   precomputed host-side, keyed on absolute image coordinates and the per-image
+   salt so the veil is stable under pan and zoom (sf_glare_field). Blurred by
+   the caller, then added in spektrafilm_scan. */
+__kernel void spektrafilm_glare_gen(__global float4 *field, const int w, const int h,
+                                    const int roi_x, const int roi_y, const float mean,
+                                    const float s, const float bias, const uint salt)
+{
+  const int x = get_global_id(0), y = get_global_id(1);
+  if(x >= w || y >= h) return;
+  const uint seed = grain_pixel_seed((uint)(x + roi_x), (uint)(y + roi_y), 0x5eedu, salt);
+  const float g = mean * exp(fma(s, grain_normal(seed), bias));
+  field[(size_t)y * w + x] = (float4)(g, g, g, 0.0f);
+}
+
+/* passthrough crop when no sim is available */
+__kernel void spektrafilm_passthrough(__read_only image2d_t in, __write_only image2d_t out,
+                                      const int ow, const int oh, const int ox, const int oy)
+{
+  const int x = get_global_id(0), y = get_global_id(1);
+  if(x >= ow || y >= oh) return;
+  write_ipixel(out, (int2)(x, y), readpixel(in, x + ox, y + oy));
+}
+
+/* ======================================================================== */
+/* spatial-effect kernels (identical to the LUT module's; blurs host-side)  */
+/* ======================================================================== */
+
+/* Direct (exact) separable Gaussian convolution, one pass along rows or
+ * columns. `weights` holds 2*radius+1 normalized taps built host-side by
+ * dt_gaussian_kernel_1d(), the same kernel the CPU path
+ * convolves with, so GPU and CPU renders match. Clamp-to-edge boundary.
+  * Separate _row/_col entry points keep the
+ * inner loop's memory access pattern explicit at the call site. The _4c
+ * variants take one tap per channel, so the scatter stage can blur each
+ * color channel with its own sigma in a single pass; a channel with a
+ * narrower kernel has zero taps at both ends. */
+/* Young-van Vliet order-3 recursive Gaussian, one work-item per line. Same
+   coefficients and same edge-replicated seeding as sf_gauss_yvv_coeffs /
+   _sf_gauss_iir_step on the CPU, so both paths deliver the identical blur above
+   SF_GAUSS_EXACT_MAX_SIGMA. Columns launch with global size (w, 1); rows are
+   tiled, see spektrafilm_yvv_row_4c. */
+/* Incremental form and explicit fma(), in the same nesting as
+   _sf_gauss_iir_step() in spektra_core.c -- see the comment there:
+   v = w1 + (B*(x - w1) + B2*(w2 - w1) + B3*(w3 - w1)), which uses
+   B1 = 1 - B - B2 - B3 and so takes no B1. It has unit DC gain whatever the
+   coefficients round to, and no cancelling large terms. The recursion feeds
+   the result back in, so one differing rounding between host and device
+   becomes a different filter rather than a one-ulp difference; FP_CONTRACT
+   pragmas do not settle this on either side, an explicit fma does.
+   B, B2 and B3 hold one coefficient per channel, as the scatter stage has
+   one sigma per color channel. */
+/* Rows: one work-group of tw x th items (its local size) covers th rows. The
+   rows are walked in chunks of YVV_CHUNK columns; each chunk is loaded and
+   stored by the whole group in contiguous segments through `tile`, local
+   memory of th * YVV_TILE_PITCH elements, and item 0 of each row runs the
+   serial recursion over the chunk in local memory. Launch with global size
+   (tw, h rounded up to th). */
+#define YVV_CHUNK 64
+#define YVV_TILE_PITCH (YVV_CHUNK + 1)
+
+__kernel void spektrafilm_yvv_row_4c(__global const float4 *src, __global float4 *dst,
+                                     const int w, const int h, const float4 B, const float4 B2,
+                                     const float4 B3, __local float4 *tile)
+{
+  const int tw = get_local_size(0);
+  const int lx = get_local_id(0);
+  const int ly = get_local_id(1);
+  const int row = get_global_id(1);
+  const int valid = row < h;
+  __global const float4 *s = src + (size_t)min(row, h - 1) * w;
+  __global float4 *d = dst + (size_t)min(row, h - 1) * w;
+  __local float4 *t = tile + ly * YVV_TILE_PITCH;
+  const int last = ((w - 1) / YVV_CHUNK) * YVV_CHUNK;
+
+  float4 w1 = s[0], w2 = w1, w3 = w1;
+  for(int c0 = 0; c0 < w; c0 += YVV_CHUNK)
+  {
+    const int n = min(YVV_CHUNK, w - c0);
+    for(int j = lx; valid && j < n; j += tw) t[j] = s[c0 + j];
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if(valid && lx == 0)
+    {
+      for(int j = 0; j < n; j++)
+      {
+        const float4 v = w1 + fma(B, t[j] - w1, fma(B2, w2 - w1, B3 * (w3 - w1)));
+        t[j] = v; w3 = w2; w2 = w1; w1 = v;
+      }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for(int j = lx; valid && j < n; j += tw) d[c0 + j] = t[j];
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+
+  /* w1 holds d[w - 1] */
+  float4 v1 = w1, v2 = v1, v3 = v1;
+  for(int c0 = last; c0 >= 0; c0 -= YVV_CHUNK)
+  {
+    const int n = min(YVV_CHUNK, w - c0);
+    for(int j = lx; valid && j < n; j += tw) t[j] = d[c0 + j];
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if(valid && lx == 0)
+    {
+      for(int j = n - 1; j >= 0; j--)
+      {
+        const float4 v = v1 + fma(B, t[j] - v1, fma(B2, v2 - v1, B3 * (v3 - v1)));
+        t[j] = v; v3 = v2; v2 = v1; v1 = v;
+      }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for(int j = lx; valid && j < n; j += tw) d[c0 + j] = t[j];
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+}
+
+__kernel void spektrafilm_yvv_col_4c(__global const float4 *src, __global float4 *dst,
+                                     const int w, const int h, const float4 B, const float4 B2,
+                                     const float4 B3)
+{
+  /* One work-item per line. The launch asks for a second global dimension of
+     1, but dt_opencl_enqueue_kernel_2d_args rounds every dimension up to the
+     device's preferred multiple, so this is entered by a whole row of items
+     per line -- all of which would otherwise run the same serial recursion
+     over the same addresses and race. Only item 0 may proceed. */
+  const int col = get_global_id(0);
+  if(col >= w || get_global_id(1) != 0) return;
+  float4 w1 = src[col], w2 = w1, w3 = w1;
+  for(int i = 0; i < h; i++)
+  {
+    const size_t k = (size_t)i * w + col;
+    const float4 v = w1 + fma(B, src[k] - w1, fma(B2, w2 - w1, B3 * (w3 - w1)));
+    dst[k] = v; w3 = w2; w2 = w1; w1 = v;
+  }
+  float4 v1 = dst[(size_t)(h - 1) * w + col], v2 = v1, v3 = v1;
+  for(int i = h - 1; i >= 0; i--)
+  {
+    const size_t k = (size_t)i * w + col;
+    const float4 v = v1 + fma(B, dst[k] - v1, fma(B2, v2 - v1, B3 * (v3 - v1)));
+    dst[k] = v; v3 = v2; v2 = v1; v1 = v;
+  }
+}
+
+/* spektrafilm_yvv_col_4c with spektrafilm_diffusion_accum folded into its
+   backward sweep: the blurred value goes into `acc` with the weights
+   (wr, wg, wb) and is not stored. `dst` is scratch for the forward sweep. */
+__kernel void spektrafilm_yvv_col_4c_accum(__global float4 *buf,
+                                           __global float4 *acc, const int w, const int h,
+                                           const float4 B, const float4 B2, const float4 B3,
+                                           const float wr, const float wg, const float wb,
+                                           const int reset)
+{
+  const int col = get_global_id(0);
+  if(col >= w || get_global_id(1) != 0) return;
+  float4 w1 = buf[col], w2 = w1, w3 = w1;
+  for(int i = 0; i < h; i++)
+  {
+    const size_t k = (size_t)i * w + col;
+    const float4 v = w1 + fma(B, buf[k] - w1, fma(B2, w2 - w1, B3 * (w3 - w1)));
+    buf[k] = v; w3 = w2; w2 = w1; w1 = v;
+  }
+  float4 v1 = buf[(size_t)(h - 1) * w + col], v2 = v1, v3 = v1;
+  for(int i = h - 1; i >= 0; i--)
+  {
+    const size_t k = (size_t)i * w + col;
+    const float4 v = v1 + fma(B, buf[k] - v1, fma(B2, v2 - v1, B3 * (v3 - v1)));
+    const float4 a = reset ? (float4)(0.f, 0.f, 0.f, 0.f) : acc[k];
+    acc[k] = (float4)(fma(wr, v.x, a.x), fma(wg, v.y, a.y), fma(wb, v.z, a.z), v.w);
+    v3 = v2; v2 = v1; v1 = v;
+  }
+}
+
+/* Decimated wide blur, the device half of sf_blur_plane3_wide() in
+   spektra_core.c; the two must agree operation for operation. Block averages
+   over a k x k grid anchored at absolute multiples of k (ox, oy are the
+   buffer's offset into its first block), clipped at the buffer edge. Each
+   block row is summed left to right, its mean folded in with fma in
+   top-to-bottom order, and the result scaled by inv[rows]. inv[i] = 1/i is
+   built on the host so the device does not divide.
+
+   Two kernels, so no work-item loops over a whole block: k reaches 100 and
+   more for the diffusion bank, and one item per block would leave a few
+   thousand items each reading k^2 pixels. spektrafilm_wide_rows sums each
+   block row, one item per (block column, image row); spektrafilm_wide_down
+   folds those sums, one item per block.
+
+   At a small k it is the other way round: a block is a handful of pixels and
+   the row sums are a buffer of 1/k of the frame. spektrafilm_wide_block does
+   both steps there, one item per block, with the same sums in the same
+   order. */
+__kernel void spektrafilm_wide_rows(__global const float4 *in, __global float4 *rows,
+                                    const int w, const int h, const int k,
+                                    const int lw, const int ox)
+{
+  const int X = get_global_id(0), y = get_global_id(1);
+  if(X >= lw || y >= h) return;
+  const int x0 = max(X * k - ox, 0), x1 = min((X + 1) * k - ox, w);
+  float4 rs = (float4)(0.0f);
+  for(int x = x0; x < x1; x++) rs += in[(size_t)y * w + x];
+  rows[(size_t)y * lw + X] = rs;
+}
+
+__kernel void spektrafilm_wide_down(__global const float4 *rows, __global float4 *low,
+                                    const int w, const int h, const int k,
+                                    const int lw, const int lh, const int ox, const int oy,
+                                    __global const float *inv)
+{
+  const int X = get_global_id(0), Y = get_global_id(1);
+  if(X >= lw || Y >= lh) return;
+  const int x0 = max(X * k - ox, 0), x1 = min((X + 1) * k - ox, w);
+  const int y0 = max(Y * k - oy, 0), y1 = min((Y + 1) * k - oy, h);
+  const float ix = inv[x1 - x0];
+  float4 lo = (float4)(0.0f);
+  for(int y = y0; y < y1; y++) lo = fma(rows[(size_t)y * lw + X], (float4)(ix), lo);
+  low[(size_t)Y * lw + X] = lo * inv[y1 - y0];
+}
+__kernel void spektrafilm_wide_block(__global const float4 *in, __global float4 *low,
+                                     const int w, const int h, const int k,
+                                     const int lw, const int lh, const int ox, const int oy,
+                                     __global const float *inv)
+{
+  const int X = get_global_id(0), Y = get_global_id(1);
+  if(X >= lw || Y >= lh) return;
+  const int x0 = max(X * k - ox, 0), x1 = min((X + 1) * k - ox, w);
+  const int y0 = max(Y * k - oy, 0), y1 = min((Y + 1) * k - oy, h);
+  const float ix = inv[x1 - x0];
+  float4 lo = (float4)(0.0f);
+  for(int y = y0; y < y1; y++)
+  {
+    float4 rs = (float4)(0.0f);
+    for(int x = x0; x < x1; x++) rs += in[(size_t)y * w + x];
+    lo = fma(rs, (float4)(ix), lo);
+  }
+  low[(size_t)Y * lw + X] = lo * inv[y1 - y0];
+}
+
+/* Bilinear interpolation of the low-resolution field back to w x h at block
+   centres: u = (2 * (x + ox) + 1 - k) / (2k), with 1/(2k) passed in from the
+   host. Clamped to the outermost block centres. */
+static inline float4 sf_wide_up(__global const float4 *low, const int x, const int y,
+                                const int k, const int lw, const int lh, const int ox,
+                                const int oy, const float inv2k)
+{
+  const float v = (float)(2 * (y + oy) + 1 - k) * inv2k;
+  int j0 = (int)floor(v), j1;
+  float fy;
+  if(j0 < 0) { j0 = j1 = 0; fy = 0.0f; }
+  else if(j0 >= lh - 1) { j0 = j1 = lh - 1; fy = 0.0f; }
+  else { j1 = j0 + 1; fy = v - (float)j0; }
+  const float u = (float)(2 * (x + ox) + 1 - k) * inv2k;
+  int i0 = (int)floor(u), i1;
+  float fx;
+  if(i0 < 0) { i0 = i1 = 0; fx = 0.0f; }
+  else if(i0 >= lw - 1) { i0 = i1 = lw - 1; fx = 0.0f; }
+  else { i1 = i0 + 1; fx = u - (float)i0; }
+  const float4 p00 = low[(size_t)j0 * lw + i0], p01 = low[(size_t)j0 * lw + i1];
+  const float4 p10 = low[(size_t)j1 * lw + i0], p11 = low[(size_t)j1 * lw + i1];
+  const float4 top = fma((float4)(fx), p01 - p00, p00);
+  const float4 bot = fma((float4)(fx), p11 - p10, p10);
+  return fma((float4)(fy), bot - top, top);
+}
+
+__kernel void spektrafilm_wide_up(__global const float4 *low, __global float4 *out,
+                                  const int w, const int h, const int k,
+                                  const int lw, const int lh, const int ox, const int oy,
+                                  const float inv2k)
+{
+  const int x = get_global_id(0), y = get_global_id(1);
+  if(x >= w || y >= h) return;
+  out[(size_t)y * w + x] = sf_wide_up(low, x, y, k, lw, lh, ox, oy, inv2k);
+}
+
+/* spektrafilm_wide_up followed by spektrafilm_diffusion_accum, without
+   storing the interpolated value in between */
+__kernel void spektrafilm_wide_up_accum(__global const float4 *low, __global float4 *acc,
+                                        const int w, const int h, const int k,
+                                        const int lw, const int lh, const int ox, const int oy,
+                                        const float inv2k, const float wr, const float wg,
+                                        const float wb, const int reset)
+{
+  const int x = get_global_id(0), y = get_global_id(1);
+  if(x >= w || y >= h) return;
+  const float4 b = sf_wide_up(low, x, y, k, lw, lh, ox, oy, inv2k);
+  const size_t i = (size_t)y * w + x;
+  const float4 a = reset ? (float4)(0.f, 0.f, 0.f, 0.f) : acc[i];
+  acc[i] = (float4)(fma(wr, b.x, a.x), fma(wg, b.y, a.y), fma(wb, b.z, a.z), b.w);
+}
+
+__kernel void spektrafilm_gauss_row_4c(__global const float4 *src, __global float4 *dst,
+                                       const int w, const int h,
+                                       __global const float4 *weights, const int radius)
+{
+  const int x = get_global_id(0), y = get_global_id(1);
+  if(x >= w || y >= h) return;
+  float4 acc = (float4)(0.0f);
+  for(int k = -radius; k <= radius; k++)
+  {
+    int xx = x + k;
+    xx = xx < 0 ? 0 : (xx >= w ? w - 1 : xx);
+    acc = fma(weights[k + radius], src[(size_t)y * w + xx], acc);
+  }
+  dst[(size_t)y * w + x] = acc;
+}
+
+__kernel void spektrafilm_gauss_col_4c(__global const float4 *src, __global float4 *dst,
+                                       const int w, const int h,
+                                       __global const float4 *weights, const int radius)
+{
+  const int x = get_global_id(0), y = get_global_id(1);
+  if(x >= w || y >= h) return;
+  float4 acc = (float4)(0.0f);
+  for(int k = -radius; k <= radius; k++)
+  {
+    int yy = y + k;
+    yy = yy < 0 ? 0 : (yy >= h ? h - 1 : yy);
+    acc = fma(weights[k + radius], src[(size_t)yy * w + x], acc);
+  }
+  dst[(size_t)y * w + x] = acc;
+}
+
+/* spektrafilm_gauss_col_4c followed by spektrafilm_diffusion_accum, without
+   storing the blurred value in between */
+__kernel void spektrafilm_gauss_col_4c_accum(__global const float4 *src, __global float4 *acc,
+                                             const int w, const int h,
+                                             __global const float4 *weights, const int radius,
+                                             const float wr, const float wg, const float wb,
+                                             const int reset)
+{
+  const int x = get_global_id(0), y = get_global_id(1);
+  if(x >= w || y >= h) return;
+  float4 b = (float4)(0.0f);
+  for(int k = -radius; k <= radius; k++)
+  {
+    int yy = y + k;
+    yy = yy < 0 ? 0 : (yy >= h ? h - 1 : yy);
+    b = fma(weights[k + radius], src[(size_t)yy * w + x], b);
+  }
+  const size_t i = (size_t)y * w + x;
+  const float4 a = reset ? (float4)(0.f, 0.f, 0.f, 0.f) : acc[i];
+  acc[i] = (float4)(fma(wr, b.x, a.x), fma(wg, b.y, a.y), fma(wb, b.z, a.z), b.w);
+}
+
+__kernel void spektrafilm_scatter_combine(__global const float4 *raw, __global const float4 *core,
+                                          __global const float4 *tail, __global float4 *out,
+                                          const int w, const int h, const float s_amount,
+                                          const float ws_r, const float ws_g, const float ws_b)
+{
+  const int x = get_global_id(0), y = get_global_id(1);
+  if(x >= w || y >= h) return;
+  size_t k = (size_t)y * w + x;
+  float4 r = raw[k], c = core[k], t = tail[k], o;
+  /* fma-pinned, matching sf_halation()'s stage 1 blend */
+  o.x = fma(s_amount, fma(ws_r, t.x, (1.f - ws_r) * c.x) - r.x, r.x);
+  o.y = fma(s_amount, fma(ws_g, t.y, (1.f - ws_g) * c.y) - r.y, r.y);
+  o.z = fma(s_amount, fma(ws_b, t.z, (1.f - ws_b) * c.z) - r.z, r.z);
+  o.w = r.w;
+  out[k] = o;
+}
+
+__kernel void spektrafilm_halation_apply(__global float4 *raw, __global const float4 *blur,
+                                         const int w, const int h, const float a_r, const float a_g,
+                                         const float a_b)
+{
+  const int x = get_global_id(0), y = get_global_id(1);
+  if(x >= w || y >= h) return;
+  size_t k = (size_t)y * w + x;
+  float4 r = raw[k], b = blur[k];
+  r.x = fma(a_r, b.x, r.x) / (1.f + a_r);
+  r.y = fma(a_g, b.y, r.y) / (1.f + a_g);
+  r.z = fma(a_b, b.z, r.z) / (1.f + a_b);
+  raw[k] = r;
+}
+
+__kernel void spektrafilm_diffusion_accum(__global const float4 *blurred, __global float4 *acc,
+                                          const int w, const int h, const float wr, const float wg,
+                                          const float wb, const int reset)
+{
+  const int x = get_global_id(0), y = get_global_id(1);
+  if(x >= w || y >= h) return;
+  const int k = y * w + x;
+  float4 b = blurred[k];
+  float4 a = reset ? (float4)(0.f, 0.f, 0.f, 0.f) : acc[k];
+  acc[k] = (float4)(fma(wr, b.x, a.x), fma(wg, b.y, a.y), fma(wb, b.z, a.z), b.w);
+}
+
+/* With to_log, the mixed plane is linear print exposure and goes back to
+   log10, with the 1e-10 floor the reference applies on the way back. */
+__kernel void spektrafilm_diffusion_mix(__global float4 *plane, __global const float4 *acc,
+                                        const int w, const int h, const float p_s,
+                                        const int to_log)
+{
+  const int x = get_global_id(0), y = get_global_id(1);
+  if(x >= w || y >= h) return;
+  const int k = y * w + x;
+  float4 e = plane[k], s = acc[k];
+  float4 m = (float4)(fma(p_s, s.x, (1.f - p_s) * e.x), fma(p_s, s.y, (1.f - p_s) * e.y),
+                      fma(p_s, s.z, (1.f - p_s) * e.z), e.w);
+  if(to_log)
+    m = (float4)(sf_log10f(fmax(m.x, 0.0f) + SF_LOG_EPS), sf_log10f(fmax(m.y, 0.0f) + SF_LOG_EPS),
+                 sf_log10f(fmax(m.z, 0.0f) + SF_LOG_EPS), m.w);
+  plane[k] = m;
+}

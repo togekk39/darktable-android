@@ -88,31 +88,31 @@ static const int dt_mipmap_cache_exif_data_adobergb_length
 // are defined at the time of use.
 #define DEAD_IMAGE \
   { __,__,__,__,__,__,__,__,__,__,__,__,__,__,__,__,__,__,__,__, \
-    __,__,__,__,__,__,__,XX,XX,XX,XX,XX,XX,__,__,__,__,__,__,__, \
-    __,__,__,__,__,__,XX,XX,XX,XX,XX,XX,XX,XX,__,__,__,__,__,__, \
-    __,__,__,__,__,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,__,__,__,__,__, \
-    __,__,__,__,__,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,__,__,__,__,__, \
-    __,__,__,__,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,__,__,__,__, \
-    __,__,__,__,XX,XX,XX,__,XX,XX,XX,XX,__,XX,XX,XX,__,__,__,__, \
-    __,__,__,XX,XX,XX,__,__,__,XX,XX,__,__,__,XX,XX,XX,__,__,__, \
-    __,__,__,XX,XX,XX,__,__,__,XX,XX,__,__,__,XX,XX,XX,__,__,__, \
-    __,__,XX,XX,XX,__,__,__,__,XX,XX,__,__,__,__,XX,XX,XX,__,__, \
-    __,__,XX,XX,XX,__,__,__,__,XX,XX,__,__,__,__,XX,XX,XX,__,__, \
-    __,XX,XX,XX,XX,XX,__,__,__,XX,XX,__,__,__,XX,XX,XX,XX,XX,__, \
-    __,XX,XX,XX,XX,XX,__,__,XX,XX,XX,XX,__,__,XX,XX,XX,XX,XX,__, \
-    __,XX,XX,XX,XX,XX,XX,__,XX,XX,XX,XX,__,XX,XX,XX,XX,XX,XX,__, \
+    __,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,__,__,__,__,__, \
+    __,XX,__,__,__,__,__,__,__,__,__,__,__,XX,__,XX,__,__,__,__, \
+    __,XX,__,__,__,__,__,__,__,__,__,__,__,XX,__,__,XX,__,__,__, \
+    __,XX,__,__,__,__,__,__,__,__,__,__,__,XX,__,__,__,XX,__,__, \
+    __,XX,__,__,__,__,__,__,__,__,__,__,__,XX,__,__,__,__,XX,__, \
+    __,XX,__,__,__,__,__,__,__,__,__,__,__,XX,XX,XX,XX,XX,XX,__, \
+    __,XX,__,__,__,__,__,__,__,__,__,__,__,__,__,__,__,__,XX,__, \
+    __,XX,__,__,__,__,__,__,__,__,__,__,__,__,__,__,__,__,XX,__, \
+    __,XX,__,__,__,__,__,__,__,__,__,__,__,__,__,__,__,__,XX,__, \
+    __,XX,__,__,XX,__,__,__,__,__,__,__,__,__,__,XX,__,__,XX,__, \
+    __,XX,__,__,__,XX,__,__,__,__,__,__,__,__,XX,__,__,__,XX,__, \
+    __,XX,__,__,__,__,XX,__,__,__,__,__,__,XX,__,__,__,__,XX,__, \
+    __,XX,__,__,__,__,__,XX,__,__,__,__,XX,__,__,__,__,__,XX,__, \
+    __,XX,__,__,__,__,__,__,XX,__,__,XX,__,__,__,__,__,__,XX,__, \
+    __,XX,__,__,__,__,__,__,__,XX,XX,__,__,__,__,__,__,__,XX,__, \
+    __,XX,__,__,__,__,__,__,__,XX,XX,__,__,__,__,__,__,__,XX,__, \
+    __,XX,__,__,__,__,__,__,XX,__,__,XX,__,__,__,__,__,__,XX,__, \
+    __,XX,__,__,__,__,__,XX,__,__,__,__,XX,__,__,__,__,__,XX,__, \
+    __,XX,__,__,__,__,XX,__,__,__,__,__,__,XX,__,__,__,__,XX,__, \
+    __,XX,__,__,__,XX,__,__,__,__,__,__,__,__,XX,__,__,__,XX,__, \
+    __,XX,__,__,XX,__,__,__,__,__,__,__,__,__,__,XX,__,__,XX,__, \
+    __,XX,__,__,__,__,__,__,__,__,__,__,__,__,__,__,__,__,XX,__, \
+    __,XX,__,__,__,__,__,__,__,__,__,__,__,__,__,__,__,__,XX,__, \
+    __,XX,__,__,__,__,__,__,__,__,__,__,__,__,__,__,__,__,XX,__, \
     __,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,__, \
-    __,__,XX,XX,XX,XX,XX,XX,XX,__,__,XX,XX,XX,XX,XX,XX,XX,__,__, \
-    __,__,XX,XX,XX,XX,XX,XX,XX,__,__,XX,XX,XX,XX,XX,XX,XX,__,__, \
-    __,__,__,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,__,__,__, \
-    __,__,__,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,__,__,__, \
-    __,__,__,XX,XX,__,XX,__,XX,__,XX,__,XX,__,XX,XX,__,__,__,__, \
-    __,__,__,XX,XX,__,__,__,__,__,__,__,__,__,XX,XX,__,__,__,__, \
-    __,__,__,__,__,__,__,__,__,__,__,__,__,__,__,__,__,__,__,__, \
-    __,__,__,__,XX,__,__,XX,__,XX,__,XX,__,__,XX,__,__,__,__,__, \
-    __,__,__,__,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,XX,__,__,__,__,__, \
-    __,__,__,__,__,XX,XX,XX,XX,XX,XX,XX,XX,XX,__,__,__,__,__,__, \
-    __,__,__,__,__,__,XX,XX,XX,XX,XX,XX,XX,__,__,__,__,__,__,__, \
     __,__,__,__,__,__,__,__,__,__,__,__,__,__,__,__,__,__,__,__ }
 
 #define UNSUPPORTED_IMAGE \
@@ -496,8 +496,9 @@ static void _mipmap_cache_allocate_dynamic(void *data,
     // dt_print(DT_DEBUG_ALWAYS, "[mipmap cache] alloc dynamic for key %u %p", key, *buf);
     if(!(entry->data))
     {
+      entry->data = (void *)_mipmap_cache_static_dead_image;
       dt_print(DT_DEBUG_ALWAYS, "[mipmap_cache] memory allocation failed!");
-      exit(1);
+      return;
     }
 
     dsc = entry->data;
@@ -699,13 +700,6 @@ write_error:
   dt_free_align(entry->data);
 }
 
-static uint32_t _nearest_power_of_two(const uint32_t value)
-{
-  uint32_t rc = 1;
-  while(rc < value) rc <<= 1;
-  return rc;
-}
-
 void dt_mipmap_cache_init()
 {
   dt_mipmap_cache_t *cache = calloc(1, sizeof(dt_mipmap_cache_t));
@@ -776,10 +770,9 @@ void dt_mipmap_cache_init()
   dt_cache_set_cleanup_callback(&cache->mip_thumbs.cache,
                                 _mipmap_cache_deallocate_dynamic, cache);
 
-  // even with one thread you want two buffers. one for dr one for thumbs.
-  // Also have the nr of cache entries larger than worker threads
-  const int full_entries = 2 * dt_worker_threads();
-  const int32_t max_mem_bufs = _nearest_power_of_two(full_entries);
+  // one entry per worker thread plus one for the darkroom pipe. Each
+  // entry holds a whole decoded raw, so the count sets the memory use
+  const int32_t max_mem_bufs = dt_worker_threads() + 1;
 
   // for this buffer, because it can be very busy during import
   dt_cache_init(&cache->mip_full.cache, 0, max_mem_bufs);
@@ -961,6 +954,8 @@ void dt_mipmap_cache_get_with_caller(dt_mipmap_buffer_t *buf,
     // simple case: blocking get
     dt_cache_entry_t *entry =
       dt_cache_get_with_caller(&_get_cache(cache, mip)->cache, key, mode, file, line);
+    if(!entry)
+      return;
 
     ASAN_UNPOISON_MEMORY_REGION(entry->data, dt_mipmap_buffer_dsc_size);
 
@@ -983,6 +978,8 @@ void dt_mipmap_cache_get_with_caller(dt_mipmap_buffer_t *buf,
         dt_image_t DT_ALIGNED_ARRAY buffered_image;
         const dt_image_t *cimg = dt_image_cache_get(imgid, 'r');
         buffered_image = *cimg;
+        buffered_image.profile_hsm_data = NULL;
+        buffered_image.profile_hsm_data_size = buffered_image.profile_hsm_hue_div = buffered_image.profile_hsm_sat_div = buffered_image.profile_hsm_val_div = buffered_image.profile_hsm_encoding = 0;
         // dt_image_t *img = dt_image_cache_write_get(cimg);
         // dt_image_cache_write_release(img, DT_IMAGE_CACHE_RELAXED);
         dt_image_cache_read_release(cimg);
@@ -1007,6 +1004,18 @@ void dt_mipmap_cache_get_with_caller(dt_mipmap_buffer_t *buf,
         {
           // swap back new image data:
           dt_image_t *img = dt_image_cache_get(imgid, 'w');
+          if(buffered_image.profile_hsm_data)
+            g_free(img->profile_hsm_data);
+          else
+          {
+            // loaders that skip EXIF checks must not discard the cached table
+            buffered_image.profile_hsm_data = img->profile_hsm_data;
+            buffered_image.profile_hsm_data_size = img->profile_hsm_data_size;
+            buffered_image.profile_hsm_hue_div = img->profile_hsm_hue_div;
+            buffered_image.profile_hsm_sat_div = img->profile_hsm_sat_div;
+            buffered_image.profile_hsm_val_div = img->profile_hsm_val_div;
+            buffered_image.profile_hsm_encoding = img->profile_hsm_encoding;
+          }
           *img = buffered_image;
           img->load_status = DT_IMAGEIO_OK;
           // dt_print(DT_DEBUG_ALWAYS, "[mipmap read get] initializing full buffer img %u with %u %u -> %d %d (%p)",
@@ -1016,6 +1025,7 @@ void dt_mipmap_cache_get_with_caller(dt_mipmap_buffer_t *buf,
         }
         else
         {
+          g_free(buffered_image.profile_hsm_data);
           dt_print(DT_DEBUG_PIPE, "[mipmap read get] error loading ID=%d", imgid);
           //
           // we can only return a zero dimension buffer if the buffer
@@ -1069,6 +1079,9 @@ void dt_mipmap_cache_get_with_caller(dt_mipmap_buffer_t *buf,
       dt_cache_release(&_get_cache(cache, mip)->cache, entry);
       // get a read lock
       buf->cache_entry = entry = dt_cache_get(&_get_cache(cache, mip)->cache, key, mode);
+      if(!entry)
+        return;
+
       ASAN_UNPOISON_MEMORY_REGION(entry->data, dt_mipmap_buffer_dsc_size);
       entry->_lock_demoting = FALSE;
       dsc = (dt_mipmap_buffer_dsc_t *)buf->cache_entry->data;

@@ -15,10 +15,12 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
+
 #include "common/gdk_event_utils.h"
 
 #include "common/collection.h"
 #include "common/darktable.h"
+#include "common/file_location.h"
 #include "control/conf.h"
 #include "control/control.h"
 #include "dtgtk/button.h"
@@ -27,8 +29,10 @@
 #include "dtgtk/togglebutton.h"
 #include "gui/accelerators.h"
 #include "gui/preferences.h"
+#include "gui/workspace.h"
 #include "libs/lib.h"
 #include "libs/lib_api.h"
+
 #ifdef GDK_WINDOWING_QUARTZ
 #include "osx/osx.h"
 #endif
@@ -37,7 +41,7 @@ DT_MODULE(1)
 
 typedef struct dt_lib_tool_preferences_t
 {
-  GtkWidget *preferences_button, *grouping_button, *overlays_button, *help_button, *keymap_button;
+  GtkWidget *preferences_button, *grouping_button, *overlays_button, *help_button, *keymap_button, *workspace_button;
   GtkWidget *over_popup, *thumbnails_box, *culling_box;
   GtkWidget *over_label, *over_r0, *over_r1, *over_r2, *over_r3, *over_r4, *over_r5, *over_r6, *over_timeout,
       *over_tt;
@@ -381,6 +385,231 @@ static void _main_icons_register_size(GtkWidget *widget, GdkRectangle *allocatio
   darktable.gui->icon_size = width;
 }
 
+static gboolean _workspace_restart_idle(gpointer data)
+{
+  (void)data;
+  dt_control_restart();
+  return G_SOURCE_REMOVE;
+}
+
+static void _workspace_switch(const char *key)
+{
+  const char *label = (!key || !strcmp(key, "default")) ? "" : key;
+
+  const char *current = dt_conf_get_string_const("workspace/label");
+  if(!current) current = "";
+  if(!strcmp(label, current)) return;
+
+  dt_workspace_apply(label);
+  char datadir[PATH_MAX] = { 0 };
+  dt_loc_get_user_config_dir(datadir, sizeof(datadir));
+  dt_workspace_request_relaunch_skip_picker(datadir);
+  g_idle_add(_workspace_restart_idle, NULL);
+}
+
+static void _workspace_copy_toggled(GtkToggleButton *check, GtkWidget *combo)
+{
+  gtk_widget_set_sensitive(combo, gtk_toggle_button_get_active(check));
+}
+
+static void _workspace_create_activated(void)
+{
+  GtkWidget *win = dt_ui_main_window(darktable.gui->ui);
+  GtkWidget *dialog =
+    gtk_dialog_new_with_buttons(_("create new workspace"), GTK_WINDOW(win),
+                                GTK_DIALOG_DESTROY_WITH_PARENT,
+                                _("_cancel"), GTK_RESPONSE_CANCEL,
+                                _("_create"), GTK_RESPONSE_ACCEPT,
+                                NULL);
+  gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_ACCEPT);
+  gtk_window_set_default_size(GTK_WINDOW(dialog),
+                              DT_PIXEL_APPLY_DPI(400), -1);
+#ifdef GDK_WINDOWING_QUARTZ
+  dt_osx_disallow_fullscreen(dialog);
+#endif
+
+  GtkWidget *entry = gtk_entry_new();
+  gtk_entry_set_activates_default(GTK_ENTRY(entry), TRUE);
+  gtk_entry_set_placeholder_text(GTK_ENTRY(entry), _("workspace name"));
+
+  GtkWidget *copy_check =
+    gtk_check_button_new_with_label(_("copy settings from existing workspace"));
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(copy_check), FALSE);
+
+  GtkWidget *combo = gtk_combo_box_text_new();
+  char datadir[PATH_MAX] = { 0 };
+  dt_loc_get_user_config_dir(datadir, sizeof(datadir));
+  GList *labels = dt_workspace_list(datadir);
+  const char *current = dt_conf_get_string_const("workspace/label");
+  if(!current) current = "";
+  int active = 0;
+  int idx = 0;
+  for(GList *l = labels; l; l = g_list_next(l))
+  {
+    const char *canon = (const char *)l->data;
+    if(!g_strcmp0(canon, "memory")) continue;
+    const char *name = !*canon ? _("default") : canon;
+    const char *id = !*canon ? "default" : canon;
+    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(combo), id, name);
+    if((!*canon && !*current) || !g_strcmp0(canon, current))
+      active = idx;
+    idx++;
+  }
+  g_list_free_full(labels, g_free);
+  if(idx) gtk_combo_box_set_active(GTK_COMBO_BOX(combo), active);
+  gtk_widget_set_sensitive(combo, FALSE);
+  g_signal_connect(copy_check, "toggled",
+                   G_CALLBACK(_workspace_copy_toggled), combo);
+  dt_gui_dialog_add(GTK_DIALOG(dialog),
+                    dt_gui_hbox(gtk_label_new(_("name:")),
+                                dt_gui_expand(entry)));
+  dt_gui_dialog_add(GTK_DIALOG(dialog), copy_check);
+  dt_gui_dialog_add(GTK_DIALOG(dialog), combo);
+  gtk_widget_show_all(dialog);
+
+  if(gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT)
+  {
+    const char *text = gtk_entry_get_text(GTK_ENTRY(entry));
+    gchar *label = g_strdup(text ? text : "");
+    g_strstrip(label);
+
+    const char *copy_from = NULL;
+    if(gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(copy_check)))
+    {
+      copy_from = gtk_combo_box_get_active_id(GTK_COMBO_BOX(combo));
+      if(copy_from && !strcmp(copy_from, "default")) copy_from = "";
+    }
+
+    if(!*label)
+      dt_control_log(_("enter a workspace name"));
+    else if(g_ascii_strcasecmp(label, "default") == 0
+            || g_ascii_strcasecmp(label, "memory") == 0
+            || strcmp(label, _("default")) == 0
+            || strcmp(label, _("memory")) == 0)
+      dt_control_log(_("the names \"default\" and \"memory\" are reserved"));
+    else if(!dt_workspace_label_is_safe(label))
+      /* same message as in workspace.c (_workspace_new_db); "%s" so <> is markup-safe */
+      dt_control_log("%s",
+                     _("WARNING\n\nthe characters / \\ < > : \" | * ? [ ] are not allowed,"
+                       " nor are the names \".\" and \"..\".\n\n"
+                       "choose a different name."));
+    else if(!dt_workspace_new(datadir, label, copy_from))
+      dt_control_log(_("could not create workspace \"%s\""), label);
+    else
+    {
+      dt_workspace_request_relaunch_skip_picker(datadir);
+      g_idle_add(_workspace_restart_idle, NULL);
+    }
+    g_free(label);
+  }
+
+  gtk_widget_destroy(dialog);
+}
+
+static void _workspace_row_clicked(GtkWidget *button, gpointer user_data)
+{
+  if(!gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(button)))
+    return;
+
+  char *key = g_strdup(user_data);
+  GtkWidget *pop = gtk_widget_get_ancestor(button, GTK_TYPE_POPOVER);
+  if(pop) gtk_widget_hide(pop);
+  _workspace_switch(key);
+  g_free(key);
+}
+
+static void _workspace_create_clicked(GtkWidget *widget, gpointer user_data)
+{
+  (void)user_data;
+  GtkWidget *pop = gtk_widget_get_ancestor(widget, GTK_TYPE_POPOVER);
+  if(pop) gtk_widget_hide(pop);
+  _workspace_create_activated();
+}
+
+static void _workspace_menu_show(GtkWidget *anchor)
+{
+  char datadir[PATH_MAX] = { 0 };
+  dt_loc_get_user_config_dir(datadir, sizeof(datadir));
+  GList *labels = dt_workspace_list(datadir);
+
+  const char *current = dt_conf_get_string_const("workspace/label");
+  if(!current) current = "";
+  const char *current_key = !*current ? "default" : current;
+
+  GtkWidget *pop = gtk_popover_new(anchor);
+  g_signal_connect(pop, "closed", G_CALLBACK(gtk_widget_destroy), NULL);
+  g_object_set(G_OBJECT(pop), "transitions-enabled", FALSE, NULL);
+
+  GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+
+  GtkWidget *title = gtk_label_new(_("workspaces"));
+  dt_gui_add_class(title, "dt_section_label");
+  gtk_box_pack_start(GTK_BOX(vbox), title, TRUE, TRUE, 0);
+
+  GtkWidget *group = NULL;
+  GSList *rows = NULL;
+  for(GList *l = labels; l; l = g_list_next(l))
+  {
+    const char *canon = (const char *)l->data;
+    const char *name = !*canon ? _("default")
+                       : !g_strcmp0(canon, "memory") ? _("memory")
+                       : canon;
+    const char *key = !*canon ? "default" : canon;
+
+    GtkWidget *row = group
+      ? gtk_radio_button_new_with_label_from_widget(GTK_RADIO_BUTTON(group), name)
+      : gtk_radio_button_new_with_label(NULL, name);
+    if(!group) group = row;
+
+    if(!strcmp(key, current_key))
+      gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(row), TRUE);
+
+    g_object_set_data_full(G_OBJECT(row), "key", g_strdup(key), g_free);
+    rows = g_slist_prepend(rows, row);
+    gtk_box_pack_start(GTK_BOX(vbox), row, TRUE, TRUE, 0);
+  }
+  g_list_free_full(labels, g_free);
+
+  for(GSList *r = rows; r; r = g_slist_next(r))
+    g_signal_connect(r->data, "clicked", G_CALLBACK(_workspace_row_clicked),
+                     g_object_get_data(G_OBJECT(r->data), "key"));
+  g_slist_free(rows);
+
+  GtkWidget *actions = gtk_label_new(_("actions"));
+  dt_gui_add_class(actions, "dt_section_label");
+  gtk_box_pack_start(GTK_BOX(vbox), actions, TRUE, TRUE, 0);
+
+  GtkWidget *create = gtk_button_new_with_label(_("create new workspace"));
+  gtk_widget_set_name(create, "dt-workspace-create");
+  gtk_widget_set_halign(gtk_bin_get_child(GTK_BIN(create)), GTK_ALIGN_START);
+  g_signal_connect(create, "clicked", G_CALLBACK(_workspace_create_clicked), NULL);
+  gtk_box_pack_start(GTK_BOX(vbox), create, TRUE, TRUE, 0);
+
+  gtk_container_add(GTK_CONTAINER(pop), vbox);
+  gtk_widget_show_all(vbox);
+  gtk_popover_popup(GTK_POPOVER(pop));
+}
+
+static void _workspace_button_update_visibility(dt_lib_module_t *self)
+{
+  dt_lib_tool_preferences_t *d = self->data;
+  gtk_widget_set_visible(d->workspace_button,
+                         dt_conf_get_bool("database/multiple_workspace"));
+}
+
+static void _workspace_preference_changed(gpointer instance, dt_lib_module_t *self)
+{
+  (void)instance;
+  _workspace_button_update_visibility(self);
+}
+
+static void _lib_workspace_button_clicked(GtkWidget *widget, gpointer user_data)
+{
+  (void)user_data;
+  if(!dt_conf_get_bool("database/multiple_workspace")) return;
+  _workspace_menu_show(widget);
+}
+
 void gui_init(dt_lib_module_t *self)
 {
   /* initialize ui widgets */
@@ -399,13 +628,18 @@ void gui_init(dt_lib_module_t *self)
                    NULL);
 
   /* create the "show/hide overlays" button */
-  d->overlays_button = dtgtk_button_new(dtgtk_cairo_paint_overlays, 0, NULL);
-  dt_action_define(&darktable.control->actions_global, NULL, N_("thumbnail overlays options"), d->overlays_button, &dt_action_def_button);
-  gtk_widget_set_tooltip_text(d->overlays_button, _("click to change the type of overlays shown on thumbnails"));
+  d->overlays_button = dtgtk_button_new_full(dtgtk_cairo_paint_overlays, 0, NULL,
+      &(dtgtk_button_config_t){
+        .tooltip = _("click to change the type of overlays shown on thumbnails"),
+        .action = &darktable.control->actions_global,
+        .action_label = N_("thumbnail overlays options"),
+        .action_def = &dt_action_def_button,
+        .clicked_cb = G_CALLBACK(_overlays_show_popup),
+        .clicked_data = self,
+      });
   d->over_popup = gtk_popover_new(d->overlays_button);
   gtk_widget_set_size_request(d->over_popup, 350, -1);
   g_object_set(G_OBJECT(d->over_popup), "transitions-enabled", FALSE, NULL);
-  g_signal_connect(G_OBJECT(d->overlays_button), "clicked", G_CALLBACK(_overlays_show_popup), self);
   // we register size of overlay icon to keep in sync thumbtable overlays
   g_signal_connect(G_OBJECT(d->overlays_button), "size-allocate", G_CALLBACK(_main_icons_register_size), NULL);
 
@@ -479,47 +713,75 @@ void gui_init(dt_lib_module_t *self)
   gtk_widget_show_all(vbox);
 
   /* create the widget help button */
-  d->help_button = dtgtk_togglebutton_new(dtgtk_cairo_paint_help, 0, NULL);
-  dt_action_define(&darktable.control->actions_global, NULL, N_("help"), d->help_button, &dt_action_def_toggle);
-  gtk_widget_set_tooltip_text(d->help_button, _("enable this, then click on a control element to see its online help"));
-  g_signal_connect(G_OBJECT(d->help_button), "clicked", G_CALLBACK(_lib_help_button_clicked), d);
+  d->help_button = dtgtk_togglebutton_new_full(dtgtk_cairo_paint_help, 0, NULL,
+      &(dtgtk_button_config_t){
+        .tooltip = _("enable this, then click on a control element to see its online help"),
+        .action = &darktable.control->actions_global,
+        .action_label = N_("help"),
+        .action_def = &dt_action_def_toggle,
+        .clicked_cb = G_CALLBACK(_lib_help_button_clicked),
+        .clicked_data = d,
+      });
 
   /* create the shortcuts button */
-  d->keymap_button = dtgtk_togglebutton_new(dtgtk_cairo_paint_shortcut, 0, NULL);
-  dt_action_define(&darktable.control->actions_global, NULL, N_("shortcuts"), d->keymap_button, &dt_action_def_toggle);
-  gtk_widget_set_tooltip_text(d->keymap_button, _("define keyboard shortcuts for on-screen controls\n"
-                                                  "ctrl+click to switch off overwrite confirmations\n"
-                                                  "\n"
-                                                  "after activating:\n"
-                                                  "\n"
-                                                  "- hover over a control (button, slider, etc.) and press\n"
-                                                  "  a keystroke combination (optionally with mouse click,\n"
-                                                  "  move, or scroll while holding down the keys) to\n"
-                                                  "  define a shortcut for the control,\n"
-                                                  "- type an existing combination to delete that mapping\n"
-                                                  "\n"
-                                                  "click on a control, module or screen area to open the\n"
-                                                  "dialog for more detailed configuration\n"
-                                                  "\n"
-                                                  "right-click to exit mapping mode"));
-  g_signal_connect(G_OBJECT(d->keymap_button), "clicked", G_CALLBACK(_lib_keymap_button_clicked), d);
+  d->keymap_button = dtgtk_togglebutton_new_full(dtgtk_cairo_paint_shortcut, 0, NULL,
+      &(dtgtk_button_config_t){
+        .tooltip = _("define keyboard shortcuts for on-screen controls\n"
+          "ctrl+click to switch off overwrite confirmations\n"
+          "\n"
+          "after activating:\n"
+          "\n"
+          "- hover over a control (button, slider, etc.) and press\n"
+          "  a keystroke combination (optionally with mouse click,\n"
+          "  move, or scroll while holding down the keys) to\n"
+          "  define a shortcut for the control,\n"
+          "- type an existing combination to delete that mapping\n"
+          "\n"
+          "click on a control, module or screen area to open the\n"
+          "dialog for more detailed configuration\n"
+          "\n"
+          "right-click to exit mapping mode"),
+        .action = &darktable.control->actions_global,
+        .action_label = N_("shortcuts"),
+        .action_def = &dt_action_def_toggle,
+        .clicked_cb = G_CALLBACK(_lib_keymap_button_clicked),
+        .clicked_data = d,
+      });
   dt_gui_connect_click_all(d->keymap_button, _lib_keymap_button_pressed, _lib_keymap_button_released, (gpointer)(d));
 
   // the rest of these is added in reverse order as they are always put at the end of the container.
   // that's done so that buttons added via Lua will come first.
 
+  /* create the workspace button */
+  d->workspace_button = dtgtk_button_new_full(dtgtk_cairo_paint_workspace, 0, NULL,
+      &(dtgtk_button_config_t){
+        .tooltip = _("select a workspace"),
+        .action = &darktable.control->actions_global,
+        .action_label = N_("workspace"),
+        .action_def = &dt_action_def_button,
+        .clicked_cb = G_CALLBACK(_lib_workspace_button_clicked),
+      });
+  gtk_widget_set_no_show_all(d->workspace_button, TRUE);
+  _workspace_button_update_visibility(self);
+
   /* create the preference button */
-  d->preferences_button = dtgtk_button_new(dtgtk_cairo_paint_preferences, 0, NULL);
-  ac = dt_action_define(&darktable.control->actions_global, NULL, N_("preferences"), d->preferences_button, &dt_action_def_button);
-  gtk_widget_set_tooltip_text(d->preferences_button, _("show global preferences"));
-  g_signal_connect(G_OBJECT(d->preferences_button), "clicked", G_CALLBACK(_lib_preferences_button_clicked),
-                   NULL);
+  d->preferences_button = dtgtk_button_new_full(dtgtk_cairo_paint_preferences, 0, NULL,
+      &(dtgtk_button_config_t){
+        .tooltip = _("show global preferences"),
+        .action = &darktable.control->actions_global,
+        .action_label = N_("preferences"),
+        .action_def = &dt_action_def_button,
+        .clicked_cb = G_CALLBACK(_lib_preferences_button_clicked),
+      });
+  ac = dt_action_widget(d->preferences_button);
 
   // Register CMD+, for preferences (this is standard on macOS)
   dt_shortcut_register(ac, 0, DT_ACTION_EFFECT_ACTIVATE, GDK_KEY_comma, GDK_CONTROL_MASK);
 
   self->widget = dt_gui_hbox(d->grouping_button, d->overlays_button,
-                             d->help_button, d->keymap_button, d->preferences_button);
+                             d->help_button, d->keymap_button, d->workspace_button, d->preferences_button);
+
+  DT_CONTROL_SIGNAL_HANDLE(DT_SIGNAL_PREFERENCES_CHANGE, _workspace_preference_changed);
 }
 
 void gui_cleanup(dt_lib_module_t *self)
@@ -528,7 +790,7 @@ void gui_cleanup(dt_lib_module_t *self)
   self->data = NULL;
 }
 
-void _lib_preferences_button_clicked(GtkWidget *widget, gpointer user_data)
+static void _lib_preferences_button_clicked(GtkWidget *widget, gpointer user_data)
 {
   dt_gui_preferences_show();
 }
@@ -629,14 +891,15 @@ static gboolean _resize_shortcuts_dialog(GtkWidget *widget, GdkEvent *event, gpo
 
 static void _set_mapping_mode_cursor(GtkWidget *widget)
 {
-  GdkDisplay *display = gdk_display_get_default();
-  GdkWindow *window = gtk_widget_get_window(dt_ui_main_window(darktable.gui->ui));
+  GtkWidget *main_window = dt_ui_main_window(darktable.gui->ui);
+  if(!main_window) return;
+  GdkDisplay *display = gtk_widget_get_display(main_window);
   GdkCursor *cursor = NULL;
 
   if(GTK_IS_EVENT_BOX(widget)) widget = gtk_bin_get_child(GTK_BIN(widget));
 
   if(widget && !strcmp(gtk_widget_get_name(widget), "module-header"))
-    cursor = gdk_cursor_new_from_name(display, "context-menu");
+    cursor = dt_gui_cursor_new_for_name(display, "context-menu");
   else if(dt_action_widget(darktable.control->mapping_widget)
           && darktable.develop)
   {
@@ -646,16 +909,21 @@ static void _set_mapping_mode_cursor(GtkWidget *widget)
 
     dtgtk_cairo_paint_flags_t flags = dt_dev_modulegroups_basics_module_toggle(darktable.develop, widget, FALSE);
     dtgtk_cairo_paint_shortcut(cr, 0, 0, size, size, flags, GINT_TO_POINTER(TRUE));
+    // GTK4 migration: replace this GTK3 cairo-surface cursor with a
+    // GdkTexture-backed cursor; application remains in dt_gui_cursor_apply().
     cursor = gdk_cursor_new_from_surface(display, surface, size/2, size/2);
     cairo_surface_destroy(surface);
 
-    gdk_window_set_cursor(window, NULL); // work around bug where gtk seems to buffer surface cursors
+    dt_control_cursor_debug("shortcut-mapping", "clear-before-custom", main_window, NULL);
+    dt_gui_cursor_apply(main_window, NULL); // work around bug where gtk seems to buffer surface cursors
   }
   else
-    cursor = gdk_cursor_new_from_name(display, "not-allowed");
+    cursor = dt_gui_cursor_new_for_name(display, "not-allowed");
 
-  gdk_window_set_cursor(window, cursor);
-  g_object_unref(cursor);
+  dt_control_cursor_debug("shortcut-mapping", "set", main_window,
+                          cursor ? "custom-or-not-allowed" : NULL);
+  dt_gui_cursor_apply(main_window, cursor);
+  if(cursor) g_object_unref(cursor);
 }
 
 static gboolean _shortcuts_dialog_open = FALSE;
@@ -697,6 +965,9 @@ static void _main_do_event_keymap(GdkEvent *event, gpointer data)
   dt_lib_tool_preferences_t *d = data;
   GtkWidget *event_widget = gtk_get_event_widget(event);
   static guint click_time = 0;
+  // a right-click made while a key is held is part of a shortcut being
+  // defined: its press goes to the shortcut dispatcher, so its release must too
+  static gboolean key_click = FALSE;
 
   switch(dt_gdk_event_get_type(event))
   {
@@ -712,7 +983,11 @@ static void _main_do_event_keymap(GdkEvent *event, gpointer data)
     break;
   case GDK_BUTTON_PRESS:
     if(gdk_display_device_is_grabbed(gdk_window_get_display(dt_gdk_event_get_window(event)), dt_gdk_event_get_device(event)))
+    {
+      if(dt_gdk_event_get_button(event) == GDK_BUTTON_SECONDARY)
+        key_click = TRUE;
       break;
+    }
 
     GtkWidget *main_window = dt_ui_main_window(darktable.gui->ui);
     if(gtk_widget_get_toplevel(event_widget) != main_window)
@@ -728,7 +1003,11 @@ static void _main_do_event_keymap(GdkEvent *event, gpointer data)
       break;
 
     if(dt_gdk_event_get_button(event) == GDK_BUTTON_SECONDARY)
+    {
       click_time = dt_gdk_event_get_time(event);
+      // drop a key click whose release went to another client
+      key_click = FALSE;
+    }
     else if(dt_gdk_event_get_button(event) == GDK_BUTTON_MIDDLE)
       dt_shortcut_dispatcher(event_widget, event, data);
     else if(dt_gdk_event_get_button(event) > 7)
@@ -756,6 +1035,13 @@ static void _main_do_event_keymap(GdkEvent *event, gpointer data)
   case GDK_BUTTON_RELEASE:
     if(dt_gdk_event_get_button(event) != GDK_BUTTON_SECONDARY)
       break;
+
+    // the dispatcher gets it even if the key was let go first and the grab is over
+    if(key_click)
+    {
+      key_click = FALSE;
+      break;
+    }
 
     if(dt_gui_long_click(dt_gdk_event_get_time(event), click_time))
       dt_shortcut_copy_lua(NULL, NULL);
@@ -809,7 +1095,7 @@ static void _lib_keymap_button_pressed(GtkGestureSingle *gesture, gint n_press, 
 {
   darktable.control->confirm_mapping = !(dt_key_modifier_state() & GDK_CONTROL_MASK);
 
-  _keymap_button_start_time = gtk_get_current_event_time();
+  _keymap_button_start_time = dt_gui_get_current_event_time(GTK_EVENT_CONTROLLER(gesture));
 
   if(gtk_gesture_single_get_current_button(gesture) == GDK_BUTTON_SECONDARY)
   {
@@ -822,7 +1108,7 @@ static void _lib_keymap_button_released(GtkGestureSingle *gesture, gint n_press,
   int delay = 0;
   g_object_get(gtk_settings_get_default(), "gtk-long-press-time", &delay, NULL);
 
-  if(gtk_get_current_event_time() - _keymap_button_start_time > (guint)delay)
+  if(dt_gui_get_current_event_time(GTK_EVENT_CONTROLLER(gesture)) - _keymap_button_start_time > (guint)delay)
   {
     _show_shortcuts_prefs(NULL);
   }

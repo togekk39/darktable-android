@@ -147,6 +147,9 @@ OPTIONAL(void, gui_post_expose, struct dt_iop_module_t *self,
                                 float pointerx,
                                 float pointery,
                                 float zoom_scale);
+/** optional: TRUE while the module draws an interactive overlay on the center
+ *  view (handles, a chart, a frame) that must not be covered by other canvas UI */
+OPTIONAL(gboolean, canvas_overlay_active, struct dt_iop_module_t *self);
 /** optional callback to be notified if the module acquires gui focus/loses it. */
 OPTIONAL(void, gui_focus, struct dt_iop_module_t *self, gboolean in);
 
@@ -320,7 +323,7 @@ DEFAULT(void *, get_p, const void *param, const char *name);
 DEFAULT(dt_introspection_field_t *, get_f, const char *name);
 
 // optional preference entry to add at the bottom of the preset menu
-OPTIONAL(void, set_preferences, void *menu, struct dt_iop_module_t *self);
+OPTIONAL(void, set_preferences, GMenu *menu, GActionGroup *action_group, struct dt_iop_module_t *self);
 
 #ifdef FULL_API_H
 

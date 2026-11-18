@@ -16,9 +16,10 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <assert.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
+#include <gtk/gtk.h>
 
 #include "bauhaus/bauhaus.h"
 #include "common/math.h"
@@ -34,8 +35,6 @@
 #include "gui/gtk.h"
 #include "gui/presets.h"
 #include "iop/iop_api.h"
-#include <gtk/gtk.h>
-#include <inttypes.h>
 
 DT_MODULE_INTROSPECTION(4, dt_iop_vignette_params_t)
 
@@ -378,6 +377,11 @@ static void draw_overlay(cairo_t *cr,
 
 // FIXME: For portrait images the overlay is a bit off. The
 // coordinates in mouse_moved seem to be ok though.
+gboolean canvas_overlay_active(dt_iop_module_t *self)
+{
+  return TRUE;
+}
+
 void gui_post_expose(dt_iop_module_t *self,
                      cairo_t *cr,
                      const float wd,
@@ -800,12 +804,15 @@ void process(dt_iop_module_t *self,
           weight = 1.0f;
         else if(weight <= 0.0f)
           weight = 0.0f;
-        else if(dither != 0.0f)
+        else
         {
-          // only bother computing the random number if dithering is enabled
           weight = 0.5f - cosf(M_PI_F * weight) / 2.0f;
-          encrypt_tea(tea_state);
-          dith = dither * tpdf(tea_state[0]);
+          // only bother computing the random number if dithering is enabled
+          if(dither != 0.0f)
+          {
+            encrypt_tea(tea_state);
+            dith = dither * tpdf(tea_state[0]);
+          }
         }
       }
 

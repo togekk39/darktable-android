@@ -250,21 +250,8 @@ void gui_update(dt_lib_module_t *self)
       dt_image_cache_read_release(img);
       gtk_widget_set_sensitive(GTK_WIDGET(d->set_monochrome_button), !is_bw);
       gtk_widget_set_sensitive(GTK_WIDGET(d->set_color_button), is_bw);
-      sqlite3_stmt *stmt;
-      DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),
-                                  "SELECT COUNT(id)"
-                                  " FROM main.images"
-                                  " WHERE group_id = ?1 AND id != ?2", -1, &stmt, NULL);
-      DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, img_group_id);
-      DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, imgid);
-      if(stmt != NULL && sqlite3_step(stmt) == SQLITE_ROW)
-      {
-        const int images_in_grp = sqlite3_column_int(stmt, 0);
-        gtk_widget_set_sensitive(GTK_WIDGET(d->ungroup_button), images_in_grp > 0);
-      }
-      else
-        gtk_widget_set_sensitive(GTK_WIDGET(d->ungroup_button), FALSE);
-      if(stmt) sqlite3_finalize(stmt);
+      const int images_in_grp = dt_grouping_count_others(img_group_id, imgid);
+      gtk_widget_set_sensitive(GTK_WIDGET(d->ungroup_button), images_in_grp > 0);
     }
     else
     {
@@ -545,27 +532,29 @@ void gui_init(dt_lib_module_t *self)
      GDK_KEY_d, GDK_CONTROL_MASK);
   gtk_grid_attach(grid, d->duplicate_button, 2, line++, 2, 1);
 
-  d->rotate_ccw_button = dtgtk_button_new(dtgtk_cairo_paint_refresh, CPF_NONE, NULL);;
+  d->rotate_ccw_button = dtgtk_button_new_full(dtgtk_cairo_paint_refresh, CPF_NONE, NULL,
+      &(dtgtk_button_config_t){
+        .tooltip = _("rotate selected images 90 degrees CCW"),
+        .action = DT_ACTION(self),
+        .action_label = N_("rotate selected images 90 degrees CCW"),
+        .action_def = &dt_action_def_button,
+        .clicked_cb = G_CALLBACK(button_clicked),
+        .clicked_data = GINT_TO_POINTER(4),
+      });
   gtk_widget_set_name(d->rotate_ccw_button, "non-flat");
-  gtk_widget_set_tooltip_text(d->rotate_ccw_button,
-                              _("rotate selected images 90 degrees CCW"));
   gtk_grid_attach(grid, d->rotate_ccw_button, 0, line, 1, 1);
-  g_signal_connect(G_OBJECT(d->rotate_ccw_button), "clicked",
-                   G_CALLBACK(button_clicked), GINT_TO_POINTER(4));
-  dt_action_define(DT_ACTION(self), NULL,
-                   N_("rotate selected images 90 degrees CCW"),
-                   d->rotate_ccw_button, &dt_action_def_button);
 
-  d->rotate_cw_button = dtgtk_button_new(dtgtk_cairo_paint_refresh, 1 | CPF_NONE, NULL);
+  d->rotate_cw_button = dtgtk_button_new_full(dtgtk_cairo_paint_refresh, 1 | CPF_NONE, NULL,
+      &(dtgtk_button_config_t){
+        .tooltip = _("rotate selected images 90 degrees CW"),
+        .action = DT_ACTION(self),
+        .action_label = N_("rotate selected images 90 degrees CW"),
+        .action_def = &dt_action_def_button,
+        .clicked_cb = G_CALLBACK(button_clicked),
+        .clicked_data = GINT_TO_POINTER(5),
+      });
   gtk_widget_set_name(d->rotate_cw_button, "non-flat");
-  gtk_widget_set_tooltip_text(d->rotate_cw_button,
-                              _("rotate selected images 90 degrees CW"));
   gtk_grid_attach(grid, d->rotate_cw_button, 1, line, 1, 1);
-  g_signal_connect(G_OBJECT(d->rotate_cw_button), "clicked",
-                   G_CALLBACK(button_clicked), GINT_TO_POINTER(5));
-  dt_action_define(DT_ACTION(self), NULL,
-                   N_("rotate selected images 90 degrees CW"),
-                   d->rotate_cw_button, &dt_action_def_button);
 
   d->reset_button = dt_action_button_new(self, N_("reset rotation"),
                                          button_clicked, GINT_TO_POINTER(6),

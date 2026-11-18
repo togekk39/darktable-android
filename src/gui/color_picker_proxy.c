@@ -22,6 +22,7 @@
 #include "libs/lib.h"
 #include "control/control.h"
 #include "gui/gtk.h"
+#include "gui/accelerators.h"
 #include "develop/blend.h"
 
 /*
@@ -103,6 +104,34 @@ static gboolean _record_point_area(dt_iop_color_picker_t *self)
   return changed;
 }
 
+// forget this picker's box and point, so that its next arm starts blank (the
+// `!self->initialized` branches of _color_picker_callback_button_press). A
+// deferred picker then waits for a new selection, as after resetting the
+// value it feeds (_param_row_slider_reset_callback in blend_gui.c)
+void dt_iop_color_picker_forget(GtkWidget *picker_widget)
+{
+  dt_iop_color_picker_t *picker =
+    picker_widget ? g_object_get_data(G_OBJECT(picker_widget), DT_COLOR_PICKER_INSTANCE_KEY) : NULL;
+  if(!picker) return;
+  picker->initialized = FALSE;
+  memset(picker->pick_box, 0, sizeof(picker->pick_box));
+  memset(picker->pick_pos, 0, sizeof(picker->pick_pos));
+}
+
+// start this picker's next arm from `box` and sample it at once: a deferred
+// picker otherwise waits for a drag on canvas even with a box to resume from.
+// The flexi mask panel uses it to carry one area across a module's parametric
+// elements
+void dt_iop_color_picker_reuse_area(GtkWidget *picker_widget, const dt_pickerbox_t box)
+{
+  dt_iop_color_picker_t *picker =
+    picker_widget ? g_object_get_data(G_OBJECT(picker_widget), DT_COLOR_PICKER_INSTANCE_KEY) : NULL;
+  if(!picker) return;
+  memcpy(picker->pick_box, box, sizeof(picker->pick_box));
+  picker->initialized = TRUE;
+  picker->sample_on_arm = TRUE;
+}
+
 static void _color_picker_reset(dt_iop_color_picker_t *picker)
 {
   if(picker)
@@ -150,12 +179,14 @@ static void _init_picker(dt_iop_color_picker_t *picker,
   picker->changed     = FALSE;
   picker->fixed_cst   = FALSE;
   picker->initialized = FALSE;
+  picker->sample_on_arm = FALSE;
 
   _color_picker_reset(picker);
 }
 
 static gboolean _color_picker_callback_button_press(GtkWidget *button,
-                                                    GdkEventButton *e,
+                                                    const gboolean ctrl,
+                                                    const gboolean right,
                                                     dt_iop_color_picker_t *self)
 {
   // module is NULL if primary colorpicker
@@ -174,9 +205,7 @@ static gboolean _color_picker_callback_button_press(GtkWidget *button,
   if(module && module->off)
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(module->off), TRUE);
 
-  const GdkModifierType state = e != NULL ? e->state : dt_key_modifier_state();
-  const gboolean to_area_mode =
-    dt_modifier_is(state, GDK_CONTROL_MASK) || (e != NULL && e->button == GDK_BUTTON_SECONDARY);
+  const gboolean to_area_mode = ctrl || right;
   dt_iop_color_picker_flags_t flags = self->flags;
 
   // setup if a new picker or switching between point/area mode
@@ -191,11 +220,26 @@ static gboolean _color_picker_callback_button_press(GtkWidget *button,
     dt_iop_color_picker_flags_t kind = self->flags & DT_COLOR_PICKER_POINT_AREA;
     if(kind == DT_COLOR_PICKER_POINT_AREA)
       kind = to_area_mode ? DT_COLOR_PICKER_AREA : DT_COLOR_PICKER_POINT;
+    // DT_COLOR_PICKER_DEFERRED_AREA: skip resetting to the usual large
+    // (~96%-of-frame) default box and skip the immediate sample below --
+    // wait for the user's own drag on canvas to define a box instead. Point
+    // mode has no default-box/immediate-sample to defer, so it is unaffected.
+    const gboolean deferred_area =
+      (kind & DT_COLOR_PICKER_AREA) && (flags & DT_COLOR_PICKER_DEFERRED_AREA)
+      && !self->sample_on_arm;
+    self->sample_on_arm = FALSE;
     // pull picker's last recorded positions
     if(kind & DT_COLOR_PICKER_AREA)
     {
-      if(!self->initialized)
+      // never armed, or forgotten (dt_iop_color_picker_forget): start blank.
+      // A picker with a remembered box resumes from it
+      if(!self->initialized && deferred_area)
+        memset(self->pick_box, 0, sizeof(self->pick_box));
+      else if(!self->initialized)
         dt_lib_colorpicker_reset_box_area(self->pick_box);
+      // a box sample all the same, so that darkroom.c's button_pressed lets
+      // the user drag one: the zeroed pick_box is replaced by the first
+      // click on the canvas
       dt_lib_colorpicker_set_box_area(darktable.lib, self->pick_box);
     }
     else if(kind & DT_COLOR_PICKER_POINT)
@@ -222,17 +266,26 @@ static gboolean _color_picker_callback_button_press(GtkWidget *button,
       dt_bauhaus_widget_set_quad_active(self->colorpick, TRUE);
     DT_LEAVE_GUI_UPDATE();
 
-    if(module)
+    if(deferred_area)
+    {
+      // focus the module without sampling the box there is: a deferred
+      // picker samples when a drag on the canvas defines its box
+      // (darkroom.c's button_pressed)
+      if(module) dt_iop_request_focus(module);
+    }
+    else if(module)
     {
       module->dev->preview_pipe->status = DT_DEV_PIXELPIPE_DIRTY;
       dt_iop_request_focus(module);
+      // force applying the next incoming sample
+      self->changed = TRUE;
     }
     else
     {
       dt_dev_invalidate_all(darktable.develop);
+      // force applying the next incoming sample
+      self->changed = TRUE;
     }
-    // force applying the next incoming sample
-    self->changed = TRUE;
   }
   else
   {
@@ -259,7 +312,10 @@ static gboolean _color_picker_callback_button_press(GtkWidget *button,
 static void _color_picker_callback(GtkWidget *button,
                                    dt_iop_color_picker_t *self)
 {
-  _color_picker_callback_button_press(button, NULL, self);
+  _color_picker_callback_button_press(button,
+                                      dt_modifier_is(dt_key_modifier_state(), GDK_CONTROL_MASK),
+                                      FALSE,
+                                      self);
 }
 
 static void _color_picker_clicked(GtkGestureSingle *gesture,
@@ -269,8 +325,98 @@ static void _color_picker_clicked(GtkGestureSingle *gesture,
                                    dt_iop_color_picker_t *self)
 {
   GtkWidget *button = dt_gui_get_widget(gesture);
-  _color_picker_callback_button_press(button, NULL, self);
+  // pass the clicked button through to the callback: a secondary click
+  // switches the picker to area mode (as before the gtk4-prep migration)
+  _color_picker_callback_button_press(button,
+                                      dt_modifier_is(dt_key_modifier_state(), GDK_CONTROL_MASK),
+                                      gtk_gesture_single_get_current_button(gesture)
+                                        == GDK_BUTTON_SECONDARY,
+                                      self);
 }
+
+/*
+ * Claim the event sequence in CAPTURE phase so the toggle button's own
+ * internal GtkGestureMultiPress (GTK_PHASE_BUBBLE, which emits "clicked"
+ * and toggles the button on release) never processes the event; the
+ * picker callback fully controls the button state instead.  Same pattern
+ * as dt_iop_togglebutton_new.
+ *
+ * GTK4 migration: the pattern is the same, just rename
+ * GtkGestureMultiPress to GtkGestureClick. */
+
+/*
+ * Shared activation entry for standalone picker toggle buttons (created
+ * with a NULL container, e.g. AgX "auto tune levels").  Real clicks go
+ * through the CAPTURE-phase gesture above, shortcuts through the action
+ * definition below (dt_action_def_color_picker), and programmatic
+ * activation (temperature.c "spot" preset, colorpicker lib sample copy)
+ * through the public wrapper; all end up here, mirroring how bauhaus
+ * pickers route clicks and shortcuts through dt_bauhaus_widget_press_quad().
+ */
+float dt_iop_color_picker_toggle(GtkWidget *target,
+                                 const dt_action_effect_t effect,
+                                 const float move_size)
+{
+  if(!DT_PERFORM_ACTION(move_size) || !target)
+    return gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(target));
+
+  dt_iop_color_picker_t *self = g_object_get_data(G_OBJECT(target), DT_COLOR_PICKER_INSTANCE_KEY);
+  if(!self) return 0.f;
+
+  if(!DT_ACTION_TOGGLE_NEEDED(effect, move_size, gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(target))))
+    return gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(target));
+
+  _color_picker_callback_button_press(target,
+                                      effect == DT_ACTION_EFFECT_TOGGLE_CTRL
+                                        || effect == DT_ACTION_EFFECT_ON_CTRL,
+                                      effect == DT_ACTION_EFFECT_TOGGLE_RIGHT
+                                        || effect == DT_ACTION_EFFECT_ON_RIGHT,
+                                      self);
+
+  const gboolean active = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(target));
+  if(!gtk_widget_is_visible(target)
+     && !g_object_get_data(G_OBJECT(target), "param-row-formid"))
+    dt_action_widget_toast(NULL, target, active ? _("on") : _("off"));
+
+  return active;
+}
+
+/*
+ * Action definition for standalone picker toggle buttons.
+ *
+ * The generic toggle definition (dt_action_def_toggle in accelerators.c)
+ * activates widgets by synthesizing GObject "button-press-event" signals.
+ * Those only reach the widget class handler (which dispatches
+ * BUBBLE-phase controllers) and carry no device, so they can never
+ * trigger the CAPTURE-phase gesture that picker buttons need in order to
+ * suppress the button's own internal gesture -- which is why picker
+ * shortcuts stopped working after the gtk4-prep migration.  Like bauhaus
+ * widgets, picker buttons therefore use their own definition whose
+ * process calls the shared entry dt_iop_color_picker_toggle(), the same
+ * one real clicks and programmatic activation go through.
+ */
+static const dt_action_element_def_t _color_picker_elements[]
+  = { { NULL, dt_action_effect_toggle } };
+
+static const dt_shortcut_fallback_t _color_picker_fallbacks[]
+  = { { .mods = GDK_CONTROL_MASK    , .effect = DT_ACTION_EFFECT_TOGGLE_CTRL  },
+      { .button = DT_SHORTCUT_RIGHT , .effect = DT_ACTION_EFFECT_TOGGLE_RIGHT },
+      { .press = DT_SHORTCUT_LONG   , .effect = DT_ACTION_EFFECT_TOGGLE_RIGHT },
+      { } };
+
+static float _color_picker_process(gpointer target,
+                                   const dt_action_element_t element,
+                                   const dt_action_effect_t effect,
+                                   const float move_size)
+{
+  return dt_iop_color_picker_toggle(target, effect, move_size);
+}
+
+const dt_action_def_t dt_action_def_color_picker
+  = { N_("toggle"),
+      _color_picker_process,
+      _color_picker_elements,
+      _color_picker_fallbacks };
 
 void dt_iop_color_picker_set_cst(dt_iop_module_t *module,
                                  const dt_iop_colorspace_type_t picker_cst)
@@ -390,6 +536,10 @@ static void _color_picker_destroy(dt_iop_color_picker_t *picker)
   // before freeing the struct to prevent use-after-free in dt_iop_color_picker_reset.
   if(darktable.lib && darktable.lib->proxy.colorpicker.picker_proxy == picker)
     darktable.lib->proxy.colorpicker.picker_proxy = NULL;
+  if(picker->colorpick)
+  {
+    g_object_set_data(G_OBJECT(picker->colorpick), DT_COLOR_PICKER_INSTANCE_KEY, NULL);
+  }
   g_free(picker);
 }
 
@@ -411,7 +561,30 @@ static GtkWidget *_color_picker_new(dt_iop_module_t *module,
       color_picker->picker_cst = cst;
       color_picker->fixed_cst = TRUE;
     }
-    dt_gui_connect_click(button, _color_picker_clicked, NULL, color_picker);
+    // The button is a GtkToggleButton, which owns its own
+    // GtkGestureMultiPress (bubble phase) that emits "clicked" and toggles
+    // the button on release.  Use a CAPTURE-phase gesture that claims the
+    // event sequence (same pattern as dt_iop_togglebutton_new) so that
+    // internal gesture never runs and the picker callback fully controls
+    // the button state on real clicks.
+    //
+    // Shortcuts (dt_action_def_color_picker, see above) and programmatic
+    // activation (dt_iop_color_picker_toggle, e.g. temperature.c "spot"
+    // preset, colorpicker lib sample copy) call the shared entry directly
+    // instead of synthesizing GObject "button-press-event" signals, which
+    // cannot reach this CAPTURE-phase gesture (the widget class handler only
+    // dispatches BUBBLE-phase controllers and synthetic events carry no
+    // device).
+    GtkGesture *gesture = gtk_gesture_multi_press_new(button);
+    gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(gesture),
+                                               GTK_PHASE_CAPTURE);
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(gesture), 0);
+    dt_gui_add_controller(button, gesture);
+    g_signal_connect_data(gesture, "pressed",
+                          G_CALLBACK(_color_picker_clicked),
+                          color_picker, (GClosureNotify)_color_picker_destroy, 0);
+    g_signal_connect(gesture, "begin", G_CALLBACK(dt_gui_gesture_claim), NULL);
+    g_object_set_data(G_OBJECT(button), DT_COLOR_PICKER_INSTANCE_KEY, color_picker);
     if(w) gtk_box_pack_start(GTK_BOX(w), button, FALSE, FALSE, 0);
 
     return button;
@@ -448,6 +621,27 @@ GtkWidget *dt_color_picker_new_with_cst(dt_iop_module_t *module,
                                         const dt_iop_colorspace_type_t cst)
 {
   return _color_picker_new(module, flags, w, TRUE, cst);
+}
+
+gboolean dt_iop_color_picker_is_active(GtkWidget *w)
+{
+  const dt_iop_color_picker_t *p = darktable.lib->proxy.colorpicker.picker_proxy;
+  return p && p->colorpick == w;
+}
+
+void dt_color_picker_toggle(GtkWidget *target)
+{
+  dt_color_picker_click(target, FALSE);
+}
+
+void dt_color_picker_click(GtkWidget *target, const gboolean right)
+{
+  /* same shared entry as real clicks and shortcuts; right activates the
+   * picker in area mode, left in point mode */
+  dt_iop_color_picker_toggle(target,
+                              right ? DT_ACTION_EFFECT_TOGGLE_RIGHT
+                                    : DT_ACTION_EFFECT_TOGGLE,
+                              1.0f);
 }
 
 // clang-format off

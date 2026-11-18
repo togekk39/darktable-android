@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2014-2025 darktable developers.
+    Copyright (C) 2014-2026 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -27,7 +27,6 @@
     TODO: How to pass initialized data such as dt_camera_t ?
 
 */
-
 
 #include "common/camera_control.h"
 #include "common/collection.h"
@@ -243,7 +242,7 @@ static void _expose_tethered_mode(dt_view_t *self,
 
   lib->image_over = lib->image_id;
 
-  if(cam->is_live_viewing == TRUE) // display the preview
+  if(cam->is_live_viewing) // display the preview
   {
     dt_pthread_mutex_lock(&cam->live_view_buffer_mutex);
     if(cam->live_view_buffer)
@@ -259,9 +258,9 @@ static void _expose_tethered_mode(dt_view_t *self,
         const int stride = cairo_format_stride_for_width(CAIRO_FORMAT_RGB24, pw);
         pthread_rwlock_rdlock(&darktable.color_profiles->xprofile_lock);
         // FIXME: if liveview image is tagged and we can read its colorspace, use that
-        cmsDoTransformLineStride(darktable.color_profiles->transform_srgb_to_display,
-                                 p_buf, tmp_i, pw, ph, pw * 4,
-                                 stride, 0, 0);
+        dt_colorspaces_transform_to_display(darktable.color_profiles->transform_srgb_to_display,
+                                            p_buf, tmp_i, pw, ph, (size_t)pw * 4,
+                                            stride);
         pthread_rwlock_unlock(&darktable.color_profiles->xprofile_lock);
 
         cairo_surface_t *source
@@ -282,7 +281,7 @@ static void _expose_tethered_mode(dt_view_t *self,
 
           // FIXME: use cairo_pattern_set_filter()?
           cairo_translate(cr, width * 0.5, (height + BAR_HEIGHT) * 0.5); // origin to middle of canvas
-          if(cam->live_view_flip == TRUE)
+          if(cam->live_view_flip)
             cairo_scale(cr, -1.0, 1.0);    // mirror image
           if(cam->live_view_rotation)
             cairo_rotate(cr, -M_PI_2 * cam->live_view_rotation); // rotate around middle
@@ -301,6 +300,8 @@ static void _expose_tethered_mode(dt_view_t *self,
       float *const tmp_f = dt_alloc_align_float((size_t)4 * pw * ph);
       if(tmp_f)
       {
+        const uint32_t splitmix32_1337 = splitmix32(1337);
+        const uint32_t splitmix32_666 = splitmix32(666);
         dt_develop_t *dev = darktable.develop;
         // FIXME: add OpenMP
         for(size_t p = 0; p < (size_t)4 * pw * ph; p += 4)
@@ -308,8 +309,8 @@ static void _expose_tethered_mode(dt_view_t *self,
           uint32_t DT_ALIGNED_ARRAY state[4]
               = { splitmix32(p + 1),
                   splitmix32((p + 1) * (p + 3)),
-                  splitmix32(1337),
-                  splitmix32(666) };
+                  splitmix32_1337,
+                  splitmix32_666 };
 
           xoshiro128plus(state);
           xoshiro128plus(state);
@@ -490,11 +491,12 @@ void expose(dt_view_t *self,
 
 gboolean try_enter(dt_view_t *self)
 {
-  /* verify that camera supports tethering and is available */
-  if(dt_camctl_can_enter_tether_mode(darktable.camctl, NULL)) return FALSE;
+  // verify that camera supports tethering and is available
+  if(dt_camctl_can_enter_tether_mode(darktable.camctl, NULL))
+    return FALSE; // returned value treated as error flag, FALSE = no error
 
-  dt_control_log(_("no camera with tethering support available for use..."));
-  return TRUE;
+  dt_control_log(_("camera with tethering support is not connected or not mounted in the import module"));
+  return TRUE; // raise error flag
 }
 
 static void _capture_mipmaps_updated_signal_callback(gpointer instance,
@@ -585,7 +587,7 @@ void enter(dt_view_t *self)
                             _view_capture_filmstrip_activate_callback, self);
 
   // register listener
-  lib->listener = g_malloc0(sizeof(dt_camctl_listener_t));
+  lib->listener = g_try_malloc0(sizeof(dt_camctl_listener_t));
   if(lib->listener)
   {
     lib->listener->data = lib;
@@ -682,7 +684,7 @@ int button_pressed(dt_view_t *self,
           && cam->is_live_viewing) // zoom the live view
   {
     cam->live_view_zoom = !cam->live_view_zoom;
-    if(cam->live_view_zoom == TRUE)
+    if(cam->live_view_zoom)
       dt_camctl_camera_set_property_string(darktable.camctl, NULL, "eoszoom", "5");
     else
       dt_camctl_camera_set_property_string(darktable.camctl, NULL, "eoszoom", "1");
@@ -706,6 +708,7 @@ int button_released(dt_view_t *self,
   }
   return 0;
 }
+
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent

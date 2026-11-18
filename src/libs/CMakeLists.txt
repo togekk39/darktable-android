@@ -6,7 +6,7 @@ add_definitions(-include common/module_api.h)
 add_definitions(-include libs/lib_api.h)
 
 # The modules
-set(MODULES import export copy_history styles tagging image select collect recentcollect filtering metadata metadata_view navigation histogram history snapshots modulegroups backgroundjobs colorpicker masks session duplicate ioporder)
+set(MODULES import export copy_history styles tagging image select collect recentcollect filtering metadata metadata_view navigation histogram history snapshots modulegroups backgroundjobs colorpicker masks_flexi_host session duplicate ioporder)
 
 # The tools
 set(MODULES ${MODULES} viewswitcher)
@@ -44,7 +44,7 @@ add_library(snapshots MODULE "snapshots.c")
 add_library(modulegroups MODULE "modulegroups.c")
 add_library(backgroundjobs MODULE "backgroundjobs.c")
 add_library(colorpicker MODULE "colorpicker.c")
-add_library(masks MODULE "masks.c")
+add_library(masks_flexi_host MODULE "masks_flexi_host.c")
 add_library(session MODULE "session.c")
 add_library(duplicate MODULE "duplicate.c")
 add_library(ioporder MODULE "ioporder.c")
@@ -110,10 +110,10 @@ add_library(geotagging MODULE "geotagging.c")
 set(MODULES ${MODULES} geotagging)
 
 # the module specific to print mode
-if(CUPS_FOUND)
+if(CUPS_FOUND OR WIN32)
   add_library(print_settings MODULE "print_settings.c")
   set(MODULES ${MODULES} print_settings)
-endif(CUPS_FOUND)
+endif()
 
 # AI neural restore module
 if(USE_AI)
@@ -124,9 +124,6 @@ endif(USE_AI)
 
 # Add libs references
 foreach(module ${MODULES})
-  if(ANDROID)
-    set_target_properties(${module} PROPERTIES PREFIX "libdt_lib_")
-  endif()
   target_link_libraries(${module} lib_darktable)
 endforeach(module)
 

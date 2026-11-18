@@ -15,6 +15,7 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
+
 // neural restore — lighttable module for AI-based image restoration
 //
 // overview
@@ -177,7 +178,8 @@
 // CONF_BIT_DEPTH           — output TIFF bit depth (0=8, 1=16, 2=32)
 // CONF_COMPRESSION         — output TIFF compression (0=none, 1=deflate, 2=deflate+predictor)
 // CONF_ADD_CATALOG         — auto-import output into library
-// CONF_OUTPUT_DIR          — output directory pattern (supports variables)
+// CONF_OUTPUT_DIR          - the old output directory, kept only to migrate it
+// CONF_PATTERN_*           - per-task output path, without an extension
 // CONF_ICC_TYPE            — output ICC profile type (image settings by default)
 // CONF_ICC_FILE            — filename for file-type ICC profiles
 // CONF_PRESERVE_WIDE_GAMUT — pass-through out-of-sRGB-gamut pixels during denoise
@@ -190,6 +192,7 @@
 #include "common/ai/restore_raw_bayer.h"
 #include "common/ai/restore_raw_linear.h"
 #include "control/conf.h"
+#include "control/control.h"
 #include "bauhaus/bauhaus.h"
 #include "common/act_on.h"
 #include "common/collection.h"
@@ -200,6 +203,7 @@
 #include "common/exif.h"
 #include "common/film.h"
 #include "common/grouping.h"
+#include "common/history.h"
 #include "common/image_cache.h"
 #include "common/colorlabels.h"
 #include "common/metadata.h"
@@ -214,6 +218,7 @@
 #include "gui/accelerators.h"
 #include "imageio/imageio_common.h"
 #include "imageio/imageio_module.h"
+
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -231,7 +236,12 @@ DT_MODULE(1)
 #define CONF_BIT_DEPTH "plugins/lighttable/neural_restore/bit_depth"
 #define CONF_COMPRESSION "plugins/lighttable/neural_restore/compression"
 #define CONF_ADD_CATALOG "plugins/lighttable/neural_restore/add_to_catalog"
+#define CONF_MARK_OUTPUT "plugins/lighttable/neural_restore/mark_output"
 #define CONF_OUTPUT_DIR "plugins/lighttable/neural_restore/output_directory"
+#define CONF_PATTERN_RAW_DENOISE \
+  "plugins/lighttable/neural_restore/output_pattern/raw_denoise"
+#define CONF_PATTERN_DENOISE "plugins/lighttable/neural_restore/output_pattern/denoise"
+#define CONF_PATTERN_UPSCALE "plugins/lighttable/neural_restore/output_pattern/upscale"
 #define CONF_ICC_TYPE "plugins/lighttable/neural_restore/icc_type"
 #define CONF_ICC_FILE "plugins/lighttable/neural_restore/icc_filename"
 #define CONF_PRESERVE_WIDE_GAMUT "plugins/lighttable/neural_restore/preserve_wide_gamut"
@@ -320,13 +330,18 @@ typedef struct dt_lib_neural_restore_t
   int export_h;
   unsigned char *export_cairo;
   int export_cairo_stride;
+  // fingerprint of the history the cached preview + export were built
+  // from, so an edit between two previews invalidates both
+  guint8 *preview_hash;
+  int preview_hash_len;
+  dt_imgid_t preview_hash_imgid;
 
   // raw denoise preview state — disjoint from the export-based preview
   // above. cached per-image (CFA for Bayer, demosaicked lin_rec2020 for
   // X-Trans / linear) so re-picking a new crop on the same image skips
   // the slow load + demosaic; freed on imgid or sensor-type change.
   dt_imgid_t preview_raw_imgid;
-  // imgid we last showed the "pre-demosaiced" warning for, so the
+  // imgid we last showed the "already demosaiced" warning for, so the
   // toast doesn't fire every patch-click move during preview
   dt_imgid_t preview_linear_warned_imgid;
   dt_restore_sensor_class_t preview_raw_sensor_class;
@@ -378,8 +393,8 @@ typedef struct dt_lib_neural_restore_t
   GtkWidget *profile_combo;
   GtkWidget *preserve_wide_gamut_toggle;
   GtkWidget *catalog_toggle;
-  GtkWidget *output_dir_entry;
-  GtkWidget *output_dir_button;
+  GtkWidget *output_pattern_entry;
+  GtkWidget *output_pattern_button;
 } dt_lib_neural_restore_t;
 
 typedef struct dt_neural_job_t
@@ -400,13 +415,13 @@ typedef struct dt_neural_job_t
   dt_neural_bpp_t bpp;
   dt_neural_compress_t compression;
   gboolean add_to_catalog;
-  char *output_dir;  // NULL = same as source
+  char *output_pattern;  // whole output path, variables unexpanded, no extension
   // output color profile. DT_COLORSPACE_NONE means "use image's working profile"
   dt_colorspaces_color_profile_type_t icc_type;
   char *icc_filename;  // only used when icc_type == DT_COLORSPACE_FILE
   // when TRUE, wide-gamut pixels pass through unchanged on denoise
   gboolean preserve_wide_gamut;
-  // raw denoise only: TRUE after we've toasted the "pre-demosaiced"
+  // raw denoise only: TRUE after we've toasted the "already demosaiced"
   // caveat for any LINEAR image in this batch; avoids one warning
   // per file when the user kicks off a multi-image job
   gboolean linear_warned;
@@ -437,12 +452,13 @@ typedef struct dt_neural_preview_data_t
   int preview_w;
   int preview_h;
   float patch_center[2];
-  // when re-picking, borrow cached export instead of re-exporting.
-  // pointer is valid for the thread's lifetime (main thread joins
-  // before freeing). thread must NOT free this
-  const float *reuse_pixels;
+  // when re-picking, a private copy of the cached export saves a
+  // re-export. owned by the worker, which frees it on every exit
+  float *reuse_pixels;
   int reuse_w;
   int reuse_h;
+  // whether a picker thumbnail existed when this worker was launched
+  gboolean have_export;
 } dt_neural_preview_data_t;
 
 typedef struct dt_neural_preview_result_t
@@ -537,6 +553,18 @@ static inline float _linear_to_srgb(const float v)
   if(v <= 0.0f) return 0.0f;
   if(v >= 1.0f) return 1.0f;
   return (v <= 0.0031308f) ? 12.92f * v : 1.055f * powf(v, 1.0f / 2.4f) - 0.055f;
+}
+
+// stamp the finished DNG as already denoised. after the writer, which
+// merges the source exif blob in and would overwrite an earlier stamp
+static void _mark_neural_restore_output(const char *path)
+{
+  if(!dt_conf_get_bool(CONF_MARK_OUTPUT)) return;
+
+  if(!dt_exif_xmp_write_neural_restore(path, "raw-denoise"))
+    dt_print(DT_DEBUG_AI,
+             "[neural_restore] could not mark %s as denoised; an "
+             "auto-applied denoise preset may run on it", path);
 }
 
 // pull the camera's embedded JPEG preview from the source raw, to embed
@@ -910,7 +938,7 @@ static int _ai_write_image(dt_imageio_module_data_t *data,
     cmsSaveProfileToMem(dst_cp->profile, NULL, &icc_len);
     if(icc_len > 0)
     {
-      uint8_t *icc_buf = g_malloc(icc_len);
+      uint8_t *icc_buf = g_try_malloc(icc_len);
       if(icc_buf)
       {
         cmsSaveProfileToMem(dst_cp->profile, icc_buf, &icc_len);
@@ -1074,13 +1102,18 @@ static void _import_image(const char *filename,
         g_list_free_full(meta, g_free);
       }
 
-      dt_grouping_add_to_group(source_imgid, newid);
+      const dt_image_t *src = dt_image_cache_get(source_imgid, 'r');
+      // get source image group ID; fallback to source_imgid if cache miss to
+      // avoid invalid 0 (NO_IMGID) group ID
+      const dt_imgid_t grpid = (src && dt_is_valid_imgid(src->group_id)) ?
+        src->group_id : source_imgid;
+      dt_image_cache_read_release(src);
+      dt_grouping_add_to_group(grpid, newid);
+
       // promote the output as group leader, but only when the source
       // was the current leader — preserves any manually-set leader the
       // user deliberately chose
-      const dt_image_t *src = dt_image_cache_get(source_imgid, 'r');
-      const gboolean source_is_leader = src && src->group_id == source_imgid;
-      dt_image_cache_read_release(src);
+      const gboolean source_is_leader = (grpid == source_imgid);
       if(source_is_leader)
         dt_grouping_change_representative(newid);
 
@@ -1107,16 +1140,71 @@ static void _import_image(const char *filename,
   }
 }
 
-static const char *_task_suffix(const dt_neural_task_t task)
+// one per task, because each wants its own suffix. all upscale factors share
+// one: the page offers them through a single combo
+static const char *_task_pattern_key(const dt_neural_task_t task)
 {
   switch(task)
   {
-    case NEURAL_TASK_DENOISE:     return "_denoise";
-    case NEURAL_TASK_RAW_DENOISE: return "_raw-denoise";
-    case NEURAL_TASK_UPSCALE_2X:  return "_upscale-2x";
-    case NEURAL_TASK_UPSCALE_4X:  return "_upscale-4x";
-    default:                      return "_restore";
+    case NEURAL_TASK_RAW_DENOISE: return CONF_PATTERN_RAW_DENOISE;
+    case NEURAL_TASK_DENOISE:     return CONF_PATTERN_DENOISE;
+    default:                      return CONF_PATTERN_UPSCALE;
   }
+}
+
+// an emptied entry means "give the default back", not a path of nothing
+static char *_task_output_pattern(const dt_neural_task_t task)
+{
+  const char *key = _task_pattern_key(task);
+  char *pattern = dt_conf_get_string(key);
+  if(pattern && pattern[0]) return pattern;
+
+  g_free(pattern);
+  // dt_confgen_get answers "" for a key the installed darktableconfig.xml does
+  // not declare (src/control/conf.c:681), and an empty path writes ./.tif
+  // the literal also keeps this from ever returning "", which _output_pattern_browse
+  // relies on to avoid naming the file "."
+  const char *def = dt_confgen_get(key, DT_DEFAULT);
+  return g_strdup(def && def[0] ? def : "$(FILE_FOLDER)/$(FILE.NAME)_restore");
+}
+
+// a one-shot config upgrade, not a second way to name a file: 5.6.x stored a
+// directory, so fold an existing one in and clear it. naming reads the patterns
+static void _migrate_output_dir(void)
+{
+  char *legacy = dt_conf_get_string(CONF_OUTPUT_DIR);
+  if(legacy && legacy[0])
+  {
+    const dt_neural_task_t tasks[]
+      = { NEURAL_TASK_RAW_DENOISE, NEURAL_TASK_DENOISE, NEURAL_TASK_UPSCALE_2X };
+    for(size_t i = 0; i < sizeof(tasks) / sizeof(*tasks); i++)
+    {
+      char *current = _task_output_pattern(tasks[i]);
+      char *name = g_path_get_basename(current);
+      char *pattern = g_build_filename(legacy, name, NULL);
+      dt_conf_set_string(_task_pattern_key(tasks[i]), pattern);
+      g_free(pattern);
+      g_free(name);
+      g_free(current);
+    }
+    dt_conf_set_string(CONF_OUTPUT_DIR, "");
+  }
+  g_free(legacy);
+}
+
+// the entry shows one task at a time, so it follows the active one
+static void _output_pattern_refresh(dt_lib_neural_restore_t *d)
+{
+  if(!d->output_pattern_entry) return;
+  char *pattern = _task_output_pattern(d->task);
+  GtkEntry *entry = GTK_ENTRY(d->output_pattern_entry);
+  // setting the text re-enters the changed handler, so only touch what differs
+  if(g_strcmp0(pattern, gtk_entry_get_text(entry)))
+  {
+    gtk_entry_set_text(entry, pattern);
+    gtk_editable_set_position(GTK_EDITABLE(entry), -1);
+  }
+  g_free(pattern);
 }
 
 static int _task_scale(const dt_neural_task_t task)
@@ -1169,7 +1257,7 @@ static void _job_cleanup(void *param)
   }
   dt_pthread_mutex_unlock(&d->ctx_lock);
   dt_restore_unref(job->ctx);
-  g_free(job->output_dir);
+  g_free(job->output_pattern);
   g_free(job->icc_filename);
   g_list_free(job->images);
   g_free(job);
@@ -1322,6 +1410,7 @@ static int _process_raw_denoise_bayer(dt_neural_job_t *j,
   g_free(exif_blob);
   g_free(cfa_out);
   if(res != 0) g_unlink(out_filename);
+  if(res == 0) _mark_neural_restore_output(out_filename);
   return res;
 }
 
@@ -1374,6 +1463,7 @@ static int _process_raw_denoise_linear(dt_neural_job_t *j,
   g_free(exif_blob);
   dt_free_align(rgb);
   if(res != 0) g_unlink(out_filename);
+  if(res == 0) _mark_neural_restore_output(out_filename);
   return res;
 }
 
@@ -1449,7 +1539,7 @@ static int _process_raw_denoise_one(dt_neural_job_t *j,
       if(!j->linear_warned && !(flags & DT_IMAGE_4BAYER))
       {
         j->linear_warned = TRUE;
-        dt_control_log(_("raw denoise: this image is already pre-demosaiced "
+        dt_control_log(_("raw denoise: this image is already demosaiced "
                          "(sRaw / computational raw); results may be limited"));
       }
       return _process_raw_denoise_linear(j, imgid, out_filename,
@@ -1516,7 +1606,11 @@ static int32_t _process_job_run(dt_job_t *job)
   const int total = g_list_length(j->images);
   int count = 0;
   int successes = 0;  // images that made it through export (for the completion toast)
-  const char *suffix = _task_suffix(j->task);
+
+  // one set of variables for the whole batch: $(SEQUENCE) only advances if the
+  // same params survive from image to image
+  dt_variables_params_t *vp = NULL;
+  dt_variables_params_init(&vp);
 
   for(GList *iter = j->images;
       iter;
@@ -1529,36 +1623,28 @@ static int32_t _process_job_run(dt_job_t *job)
     char srcpath[PATH_MAX];
     dt_image_full_path(imgid, srcpath, sizeof(srcpath), NULL);
 
-    // build base name (strip extension)
-    char *basename = g_path_get_basename(srcpath);
-    char *dot = strrchr(basename, '.');
-    if(dot) *dot = '\0';
-
-    // expand output directory variables (e.g. $(FILE_FOLDER))
-    char *dir_pattern = (j->output_dir && j->output_dir[0])
-      ? j->output_dir : "$(FILE_FOLDER)";
-    dt_variables_params_t *vp = NULL;
-    dt_variables_params_init(&vp);
+    // the pattern is the whole path bar the extension: nothing is appended to
+    // what it expands to, and nothing stripped
     vp->filename = srcpath;
     vp->imgid = imgid;
-    char *out_dir = dt_variables_expand(vp,
-                                        (gchar *)dir_pattern,
-                                        FALSE);
-    dt_variables_params_destroy(vp);
+    char *expanded
+      = dt_variables_expand_path(vp, (gchar *)j->output_pattern, TRUE);
 
-    // if basename already ends with the suffix, don't
-    // append it again (e.g. re-processing a denoised file)
-    const gboolean has_suffix = g_str_has_suffix(basename, suffix);
-
-    // build base path without .tif for collision loop
     char base[PATH_MAX];
-    if(has_suffix)
-      snprintf(base, sizeof(base), "%s/%s", out_dir, basename);
-    else
-      snprintf(base, sizeof(base), "%s/%s%s", out_dir, basename, suffix);
+    g_strlcpy(base, expanded ? expanded : "", sizeof(base));
+    g_free(expanded);
 
-    g_free(out_dir);
-    g_free(basename);
+    // a pattern of variables alone can expand to nothing, which would write a
+    // bare extension into the working directory
+    if(!base[0])
+    {
+      dt_print(DT_DEBUG_AI,
+               "[neural_restore] output pattern expands to nothing for imgid %d",
+               imgid);
+      dt_control_log(_("neural restore: the output pattern expands to nothing"));
+      dt_control_job_set_progress(job, (double)++count / total);
+      continue;
+    }
 
     // ensure output directory exists
     char *out_dir_resolved = g_path_get_dirname(base);
@@ -1582,6 +1668,8 @@ static int32_t _process_job_run(dt_job_t *job)
     char filename[PATH_MAX];
     snprintf(filename, sizeof(filename), "%s.%s", base, ext);
 
+    // a pattern with no suffix resolves onto the source, and the source is on
+    // disk, so this steps past it like any other collision
     if(g_file_test(filename, G_FILE_TEST_EXISTS))
     {
       gboolean found = FALSE;
@@ -1664,6 +1752,9 @@ static int32_t _process_job_run(dt_job_t *job)
     successes++;
     dt_control_job_set_progress(job, (double)++count / total);
   }
+
+  // srcpath went out of scope with the loop, but destroy never reads vp->filename
+  dt_variables_params_destroy(vp);
 
   dt_restore_unref(j->ctx);
   j->ctx = NULL;
@@ -1829,6 +1920,7 @@ static void _schedule_preview_failed(dt_lib_module_t *self,
 
 static void _task_changed(dt_lib_neural_restore_t *d)
 {
+  _output_pattern_refresh(d);
   d->model_available = _check_model_available(d, d->task);
   if(!d->model_available)
   {
@@ -2358,6 +2450,7 @@ static gpointer _preview_thread(gpointer data)
   result->patch_center[0] = pd->patch_center[0];
   result->patch_center[1] = pd->patch_center[1];
   g_idle_add(_preview_result_idle, result);
+  g_free(pd->reuse_pixels);
   g_free(pd);
   return NULL;
 
@@ -2365,6 +2458,7 @@ cleanup:
   // bail: clear preview_generating on UI thread (stale-sequence bails dropped)
   if(pd->sequence == g_atomic_int_get(&d->preview_sequence))
     _schedule_preview_failed(pd->self, err);
+  g_free(pd->reuse_pixels);
   g_free(pd);
   return NULL;
 }
@@ -2377,12 +2471,11 @@ static void _cancel_preview(dt_lib_module_t *self)
   // bump sequence so any in-flight worker (and its idle callback)
   // discards its result. we DO NOT join here — that would block the
   // UI for the full duration of a running inference. the worker
-  // keeps running in the background and exits silently. but: we DO
-  // need to wait for it before freeing export_pixels below, since the
-  // worker may still be reading from them. take + release the
-  // inference lock as a synchronisation barrier — the worker holds
-  // it during the heavy work, so once we get it we know it's done
-  // touching shared buffers
+  // keeps running in the background and exits silently. the barrier
+  // below (take + release the inference lock, which the worker holds
+  // for its whole run) is kept as a conservative serialisation point
+  // on image change; its original reason — waiting before freeing
+  // export_pixels — no longer applies now that workers copy those
   g_atomic_int_inc(&d->preview_sequence);
   if(d->preview_trigger_timer)
   {
@@ -2759,6 +2852,9 @@ static gpointer _preview_thread_raw(gpointer data)
 
   // bail reason for cleanup path; unsupported-sensor branch overrides
   dt_nr_preview_err_t bail_err = DT_NR_PREVIEW_ERR_INIT_FAILED;
+  // declared up here so every `goto cleanup` below can free it: the
+  // export is expensive to redo and large enough to matter
+  float *take_export_pixels = NULL;
 
   // 1. load source image metadata to determine sensor type.
   //    on a fresh session dt_image_cache_get returns img_meta with a
@@ -2821,7 +2917,7 @@ static gpointer _preview_thread_raw(gpointer data)
      && d->preview_linear_warned_imgid != pd->imgid)
   {
     d->preview_linear_warned_imgid = pd->imgid;
-    dt_control_log(_("raw denoise: this image is already pre-demosaiced "
+    dt_control_log(_("raw denoise: this image is already demosaiced "
                      "(sRaw / computational raw); results may be limited"));
   }
 
@@ -2972,10 +3068,15 @@ static gpointer _preview_thread_raw(gpointer data)
   //      full pipeline at ~1024 long edge, giving a display-accurate
   //      thumbnail whose colours match what the user sees in darkroom
   //      (and match our before/after ROI pipe outputs).
-  float *take_export_pixels = NULL;
-  int    export_thumb_w = 0;
-  int    export_thumb_h = 0;
-  if(!cache_matches)
+  int export_thumb_w = 0;
+  int export_thumb_h = 0;
+  // NB: also gated on the thumbnail itself. _cancel_preview frees
+  // export_pixels but leaves preview_full_cfa alone, so keying this on
+  // cache_matches alone left the picker (which tests export_pixels)
+  // insensitive until restart — issue #21879. the flag is a snapshot
+  // taken on the main thread at launch, so this never reads
+  // d->export_pixels from the worker
+  if(!cache_matches || !pd->have_export)
   {
     dt_neural_preview_capture_t cap = {0};
     const int export_size = dt_conf_get_int(CONF_PREVIEW_EXPORT_SIZE);
@@ -3060,21 +3161,47 @@ static gpointer _preview_thread_raw(gpointer data)
     goto cleanup;
   }
 
-  // display-normalised click (u, v) -> sensor pixel, inverting whatever
-  // combination of swap/flip the flip iop will apply during display.
-  // matches dt_iop_flip:distort_backtransform semantics
-  const int disp_w = swap_xy ? full_h : full_w;
-  const int disp_h = swap_xy ? full_w : full_h;
-  float dx_disp = pd->patch_center[0] * disp_w;
-  float dy_disp = pd->patch_center[1] * disp_h;
-  float sx, sy;
-  if(swap_xy) { sx = dy_disp; sy = dx_disp; }
-  else        { sx = dx_disp; sy = dy_disp; }
-  if(ori & ORIENTATION_FLIP_X) sx = (float)full_w - sx;
-  if(ori & ORIENTATION_FLIP_Y) sy = (float)full_h - sy;
+  // display-normalised click (u, v) -> sensor patch. the picker
+  // normalises against the exported thumbnail — the fully processed
+  // image — so the whole geometry chain has to be inverted, not just
+  // the flip iop (issue #21879). the helper also validates the rect
+  // against the forward transform, so a pick near a cropped border
+  // retreats inward instead of rendering nothing.
+  //
+  // it answers in raw sensor coords. the Bayer buffer is the raw
+  // sensor, but the linear one is the post-rawprepare visible area,
+  // so shift into whichever space full_w / full_h are
+  const int buf_off_x = use_linear ? img_meta.crop_x : 0;
+  const int buf_off_y = use_linear ? img_meta.crop_y : 0;
 
-  int crop_x = (int)sx - crop_w / 2;
-  int crop_y = (int)sy - crop_h / 2;
+  int crop_x = 0, crop_y = 0;
+  if(dt_restore_display_to_sensor(pd->imgid, img_meta.width, img_meta.height,
+                                  pd->patch_center[0], pd->patch_center[1],
+                                  crop_w, crop_h, use_linear ? 1 : 2,
+                                  &crop_x, &crop_y) == 0)
+  {
+    crop_x -= buf_off_x;
+    crop_y -= buf_off_y;
+  }
+  else
+  {
+    // no geometry chain: fall back to orientation-only, correct for
+    // an uncropped image and better than failing outright
+    dt_print(DT_DEBUG_AI,
+             "[neural_restore] raw preview: geometry backtransform "
+             "failed, falling back to orientation-only mapping");
+    const int disp_w = swap_xy ? full_h : full_w;
+    const int disp_h = swap_xy ? full_w : full_h;
+    const float dx_disp = pd->patch_center[0] * disp_w;
+    const float dy_disp = pd->patch_center[1] * disp_h;
+    float sx, sy;
+    if(swap_xy) { sx = dy_disp; sy = dx_disp; }
+    else        { sx = dx_disp; sy = dy_disp; }
+    if(ori & ORIENTATION_FLIP_X) sx = (float)full_w - sx;
+    if(ori & ORIENTATION_FLIP_Y) sy = (float)full_h - sy;
+    crop_x = (int)sx - crop_w / 2;
+    crop_y = (int)sy - crop_h / 2;
+  }
   crop_x = CLAMP(crop_x, 0, full_w - crop_w);
   crop_y = CLAMP(crop_y, 0, full_h - crop_h);
   if(!use_linear)
@@ -3159,11 +3286,14 @@ static gpointer _preview_thread_raw(gpointer data)
   res->export_thumb_w = export_thumb_w;
   res->export_thumb_h = export_thumb_h;
   g_idle_add(_preview_raw_result_idle, res);
+  g_free(pd->reuse_pixels);
   g_free(pd);
   return NULL;
 
 cleanup:
   // bail: clear preview_generating on UI thread (stale-sequence bails dropped)
+  g_free(take_export_pixels);
+  g_free(pd->reuse_pixels);
   if(pd->sequence == g_atomic_int_get(&d->preview_sequence))
     _schedule_preview_failed(pd->self, bail_err);
   g_free(pd);
@@ -3188,6 +3318,7 @@ static gpointer _preview_thread_dispatch(gpointer data)
   if(pd->sequence != g_atomic_int_get(&d->preview_sequence))
   {
     g_mutex_unlock(&d->preview_inference_lock);
+    g_free(pd->reuse_pixels);
     g_free(pd);
     return NULL;
   }
@@ -3249,6 +3380,61 @@ static void _trigger_preview(dt_lib_module_t *self)
 
   if(!dt_is_valid_imgid(imgid)) return;
 
+  // an edit since the last preview invalidates the cached results AND
+  // the exported thumbnail. the thumbnail matters beyond freshness:
+  // the picker normalises clicks against it while the raw worker
+  // inverts the CURRENT geometry chain, so a stale export would
+  // reintroduce the #21879 offset from the other side. the history
+  // write above has already brought the DB hash up to date
+  dt_history_hash_values_t hh = { 0 };
+  dt_history_hash_read(imgid, &hh);
+  if(d->preview_hash_imgid != imgid
+     || d->preview_hash_len != hh.current_len
+     || (hh.current_len > 0
+         && (!d->preview_hash
+             || memcmp(d->preview_hash, hh.current, hh.current_len) != 0)))
+  {
+    // bump the sequence first: in-flight results then discard
+    // themselves on delivery, and a worker that has not started yet
+    // exits before touching any of the state below
+    g_atomic_int_inc(&d->preview_sequence);
+    _preview_cache_invalidate_all(d);
+    // the export needs no barrier: workers get their own copy of the
+    // pixels, and their own snapshot of whether one existed at launch
+    g_free(d->export_pixels);
+    d->export_pixels = NULL;
+    g_free(d->export_cairo);
+    d->export_cairo = NULL;
+    // NB: preview_full_lin is deliberately NOT dropped here, though
+    // it is history-dependent (it comes out of rawprepare +
+    // highlights). an in-flight raw worker borrows it for the whole of
+    // its run, so freeing it needs either a barrier — which would
+    // block the GTK thread for an entire inference — or a deferred
+    // ownership scheme. neither belongs in a mapping fix. the cost is
+    // that on linear / X-Trans, editing highlight reconstruction or
+    // the raw black/white point leaves the model reading a stale
+    // demosaic while the un-prepare math uses current metadata, which
+    // can show as a level step in the patched region
+    g_free(d->preview_hash);
+    d->preview_hash = NULL;
+    if(hh.current && hh.current_len > 0)
+    {
+      d->preview_hash = g_malloc(hh.current_len);
+      memcpy(d->preview_hash, hh.current, hh.current_len);
+    }
+    d->preview_hash_len = hh.current_len;
+    d->preview_hash_imgid = imgid;
+    // the picker draws from the export we just dropped: close it
+    // through the toggle so the button visual follows, and refresh
+    // sensitivity now that export_pixels is NULL
+    if(d->picking_thumbnail)
+      gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(d->pick_button), FALSE);
+    _update_button_sensitivity(d);
+  }
+  g_free(hh.basic);
+  g_free(hh.auto_apply);
+  g_free(hh.current);
+
   // per-task cache lookup: if we already have a result for this exact
   // (task, imgid, patch_center) tuple, install it and skip the worker
   if(_preview_cache_hit(d, d->task, imgid))
@@ -3293,14 +3479,24 @@ static void _trigger_preview(dt_lib_module_t *self)
   pd->patch_center[0] = d->patch_center[0];
   pd->patch_center[1] = d->patch_center[1];
 
-  // borrow cached export pixels if available (re-pick scenario).
-  // the pointer is valid for the thread's lifetime because
-  // _cancel_preview joins before freeing export_pixels
-  if(d->export_pixels)
+  // hand the worker its OWN copy of the cached export (re-pick
+  // scenario). aliasing d->export_pixels would tie every invalidation
+  // to a barrier against the in-flight reader; a copy costs one memcpy
+  // and lets the main thread replace the buffer whenever it likes.
+  // the raw worker exports its own thumbnail and never reads this
+  pd->have_export = (d->export_pixels != NULL);
+  if(d->task != NEURAL_TASK_RAW_DENOISE
+     && d->export_pixels && d->export_w > 0 && d->export_h > 0)
   {
-    pd->reuse_pixels = d->export_pixels;
-    pd->reuse_w = d->export_w;
-    pd->reuse_h = d->export_h;
+    const size_t n = (size_t)d->export_w * d->export_h * 4;
+    float *dup = g_try_malloc(n * sizeof(float));
+    if(dup)
+    {
+      memcpy(dup, d->export_pixels, n * sizeof(float));
+      pd->reuse_pixels = dup;
+      pd->reuse_w = d->export_w;
+      pd->reuse_h = d->export_h;
+    }
   }
   // detach the previous worker (don't join — that would block the
   // UI thread for the duration of the in-flight inference / pipe
@@ -3430,10 +3626,7 @@ static void _process_clicked(GtkWidget *widget, gpointer user_data)
     = dt_conf_key_exists(CONF_ADD_CATALOG)
       ? dt_conf_get_bool(CONF_ADD_CATALOG)
       : TRUE;
-  char *out_dir = dt_conf_get_string(CONF_OUTPUT_DIR);
-  job_data->output_dir
-    = (out_dir && out_dir[0]) ? out_dir : NULL;
-  if(!job_data->output_dir) g_free(out_dir);
+  job_data->output_pattern = _task_output_pattern(job_data->task);
   job_data->icc_type = dt_conf_key_exists(CONF_ICC_TYPE)
     ? dt_conf_get_int(CONF_ICC_TYPE)
     : DT_COLORSPACE_NONE;
@@ -4066,6 +4259,7 @@ static void _preview_motion_cb(GtkEventControllerMotion *controller,
   // move crop rectangle while hovering in picking mode
   if(d->picking_thumbnail && d->export_cairo)
   {
+    dt_gui_cursor_set(widget, NULL, "neural-restore/divider");
     const int w = gtk_widget_get_allocated_width(widget);
     const int h = gtk_widget_get_allocated_height(widget);
     double img_w, img_h, ox, oy;
@@ -4095,6 +4289,7 @@ static void _preview_motion_cb(GtkEventControllerMotion *controller,
 
   if(d->dragging_split)
   {
+    dt_gui_cursor_set(widget, NULL, "neural-restore/divider");
     const int w = gtk_widget_get_allocated_width(widget);
     const int pw = d->preview_w;
     const int ph = d->preview_h;
@@ -4110,7 +4305,9 @@ static void _preview_motion_cb(GtkEventControllerMotion *controller,
     return;
   }
 
-  // change cursor near divider
+  // Change the cursor near the divider. The same helper also clears it
+  // when the preview is unavailable, so a completed/cancelled preview
+  // cannot leave the resize cursor behind.
   if(d->preview_ready
      && d->preview_w > 0
      && d->preview_h > 0)
@@ -4122,26 +4319,22 @@ static void _preview_motion_cb(GtkEventControllerMotion *controller,
     const double ox = (w - d->preview_w * scale) / 2.0;
     const double div_x
       = ox + d->split_pos * d->preview_w * scale;
-
-    GdkWindow *win = gtk_widget_get_window(widget);
-    if(win)
-    {
-      const gboolean near = fabs(ex - div_x) < PREVIEW_DIVIDER_NEAR_PX;
-      if(near)
-      {
-        GdkCursor *cursor = gdk_cursor_new_from_name(
-          gdk_display_get_default(), "col-resize");
-        gdk_window_set_cursor(win, cursor);
-        g_object_unref(cursor);
-      }
-      else
-      {
-        gdk_window_set_cursor(win, NULL);
-      }
-    }
+    const gboolean near = fabs(ex - div_x) < PREVIEW_DIVIDER_NEAR_PX;
+    dt_gui_cursor_set(widget,
+                      near ? "col-resize" : NULL,
+                      "neural-restore/divider");
   }
+  else
+    dt_gui_cursor_set(widget, NULL, "neural-restore/divider");
 
   return;
+}
+
+static void _preview_leave_cb(GtkEventControllerMotion *controller,
+                              gpointer user_data)
+{
+  (void)user_data;
+  dt_gui_cursor_set(dt_gui_get_widget(controller), NULL, "neural-restore/divider");
 }
 
 static void _selection_changed_callback(gpointer instance,
@@ -4243,41 +4436,63 @@ static void _preserve_wide_gamut_toggled(GtkWidget *w,
   _update_info_label((dt_lib_neural_restore_t *)self->data);
 }
 
-static void _output_dir_changed(GtkEditable *editable,
-                                dt_lib_module_t *self)
+static void _output_pattern_changed(GtkEditable *editable,
+                                    dt_lib_module_t *self)
 {
-  dt_conf_set_string(CONF_OUTPUT_DIR,
+  dt_lib_neural_restore_t *d = (dt_lib_neural_restore_t *)self->data;
+  dt_conf_set_string(_task_pattern_key(d->task),
                      gtk_entry_get_text(GTK_ENTRY(editable)));
 }
 
-static void _output_dir_browse(GtkWidget *button,
-                               dt_lib_module_t *self)
+static void _output_pattern_browse(GtkWidget *button,
+                                   dt_lib_module_t *self)
 {
   dt_lib_neural_restore_t *d
     = (dt_lib_neural_restore_t *)self->data;
   GtkWidget *dialog
-    = gtk_file_chooser_dialog_new(_("select output folder"),
+    = gtk_file_chooser_dialog_new(_("select directory"),
                                   GTK_WINDOW(dt_ui_main_window(darktable.gui->ui)),
                                   GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER,
                                   _("_cancel"), GTK_RESPONSE_CANCEL,
                                   _("_select"), GTK_RESPONSE_ACCEPT,
                                   NULL);
 
+  // the entry holds a whole path now, so split it. an emptied one has no halves
+  // to keep, and g_path_get_basename("") would name the file "."
   const char *current
-    = gtk_entry_get_text(GTK_ENTRY(d->output_dir_entry));
-  if(current && current[0])
-    gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(dialog), current);
+    = gtk_entry_get_text(GTK_ENTRY(d->output_pattern_entry));
+  char *edited = (current && current[0])
+    ? g_strdup(current)
+    : _task_output_pattern(d->task);
+  char *cur_dir = g_path_get_dirname(edited);
+  if(g_file_test(cur_dir, G_FILE_TEST_IS_DIR))
+    gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(dialog), cur_dir);
 
   if(gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT)
   {
     char *folder = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
     if(folder)
     {
-      gtk_entry_set_text(GTK_ENTRY(d->output_dir_entry), folder);
-      dt_conf_set_string(CONF_OUTPUT_DIR, folder);
+      // the dialog only picks a folder, so keep whatever names the file. "." and
+      // "/" come back from a path with no name in it, and name nothing
+      char *name = g_path_get_basename(edited);
+      if(!g_strcmp0(name, ".") || !g_strcmp0(name, G_DIR_SEPARATOR_S))
+      {
+        char *def = _task_output_pattern(d->task);
+        g_free(name);
+        name = g_path_get_basename(def);
+        g_free(def);
+      }
+      char *pattern = g_build_filename(folder, name, NULL);
+      gtk_entry_set_text(GTK_ENTRY(d->output_pattern_entry), pattern);
+      gtk_editable_set_position(GTK_EDITABLE(d->output_pattern_entry), -1);
+      g_free(pattern);
+      g_free(name);
       g_free(folder);
     }
   }
+  g_free(cur_dir);
+  g_free(edited);
   gtk_widget_destroy(dialog);
 }
 
@@ -4287,7 +4502,7 @@ void gui_init(dt_lib_module_t *self)
   self->data = d;
   d->env = dt_restore_env_init();
   d->processing_images = g_hash_table_new(g_direct_hash, g_direct_equal);
-  dt_pthread_mutex_init(&d->ctx_lock, NULL);
+  dt_pthread_mutex_init(&d->ctx_lock);
   g_mutex_init(&d->preview_inference_lock);
   d->split_pos = 0.5f;
 
@@ -4355,18 +4570,20 @@ void gui_init(dt_lib_module_t *self)
     gtk_notebook_set_current_page(d->notebook, saved_page);
   _update_task_from_ui(d);
   d->model_available = _check_model_available(d, d->task);
+  d->preview_hash_imgid = NO_IMGID;
 
   // pick area button
   d->patch_center[0] = 0.5f;
   d->patch_center[1] = 0.5f;
   d->picking_thumbnail = FALSE;
-  d->pick_button = dtgtk_togglebutton_new(dtgtk_cairo_paint_colorpicker,
-                                          0, NULL);
-  gtk_widget_set_tooltip_text(d->pick_button,
-                              _("click to pick preview area on the image thumbnail\n"
-                                "double-click to reset to center"));
-  g_signal_connect(d->pick_button, "toggled",
-                   G_CALLBACK(_pick_toggled), self);
+  d->pick_button = dtgtk_togglebutton_new_full(dtgtk_cairo_paint_colorpicker,
+                                               0, NULL,
+      &(dtgtk_button_config_t){
+        .tooltip = _("click to pick preview area on the image thumbnail\n"
+          "double-click to reset to center"),
+        .toggled_cb = G_CALLBACK(_pick_toggled),
+        .toggled_data = self,
+      });
   dt_gui_connect_click_all(d->pick_button, _pick_double_click_cb, NULL, self);
 
   // preview area (resizable via dt_ui_resize_wrap)
@@ -4374,7 +4591,7 @@ void gui_init(dt_lib_module_t *self)
   g_signal_connect(d->preview_area, "draw",
                    G_CALLBACK(_preview_draw), self);
   dt_gui_connect_click(d->preview_area, _preview_button_press_cb, _preview_button_release_cb, self);
-  dt_gui_connect_motion(d->preview_area, _preview_motion_cb, NULL, NULL, self);
+  dt_gui_connect_motion(d->preview_area, _preview_motion_cb, NULL, _preview_leave_cb, self);
   // hover-zoom tooltip: shows the same preview at 2x so the user can
   // see individual pixels. only fires when there's a valid preview;
   // suppressed during inference / picking / dragging
@@ -4506,28 +4723,34 @@ void gui_init(dt_lib_module_t *self)
   dt_gui_box_add(catalog_box, d->catalog_toggle);
   dt_gui_box_add(cs_box, catalog_box);
 
-  // output directory
+  // output path
   GtkWidget *dir_box = dt_gui_hbox();
-  d->output_dir_entry = gtk_entry_new();
-  char *saved_dir = dt_conf_get_string(CONF_OUTPUT_DIR);
-  gtk_entry_set_text(GTK_ENTRY(d->output_dir_entry),
-                     (saved_dir && saved_dir[0])
-                       ? saved_dir : "$(FILE_FOLDER)");
-  g_free(saved_dir);
-  gtk_widget_set_tooltip_text(d->output_dir_entry,
-                              _("output folder — supports darktable variables\n"
-                                "$(FILE_FOLDER) = source image folder"));
-  gtk_widget_set_hexpand(d->output_dir_entry, TRUE);
-  g_signal_connect(d->output_dir_entry, "changed",
-                   G_CALLBACK(_output_dir_changed), self);
+  d->output_pattern_entry = gtk_entry_new();
+  _migrate_output_dir();
+  char *saved_pattern = _task_output_pattern(d->task);
+  gtk_entry_set_text(GTK_ENTRY(d->output_pattern_entry), saved_pattern);
+  // the file name is the part being edited, and it is off the right-hand end
+  gtk_editable_set_position(GTK_EDITABLE(d->output_pattern_entry), -1);
+  g_free(saved_pattern);
+  gtk_widget_set_tooltip_text(d->output_pattern_entry,
+                              _("where this task writes, without the extension."
+                                " whatever follows the source name is the"
+                                " suffix\n"
+                                "$(FILE_FOLDER) = source image folder\n"
+                                "$(FILE.NAME) = source name without extension"));
+  gtk_widget_set_hexpand(d->output_pattern_entry, TRUE);
+  g_signal_connect(d->output_pattern_entry, "changed",
+                   G_CALLBACK(_output_pattern_changed), self);
 
-  d->output_dir_button = dtgtk_button_new(dtgtk_cairo_paint_directory, 0, NULL);
-  gtk_widget_set_tooltip_text(d->output_dir_button, _("select output folder"));
-  g_signal_connect(d->output_dir_button, "clicked",
-                   G_CALLBACK(_output_dir_browse), self);
+  d->output_pattern_button = dtgtk_button_new_full(dtgtk_cairo_paint_directory, 0, NULL,
+      &(dtgtk_button_config_t){
+        .tooltip = _("select directory"),
+        .clicked_cb = G_CALLBACK(_output_pattern_browse),
+        .clicked_data = self,
+      });
 
-  dt_gui_box_add(dir_box, d->output_dir_entry);
-  dt_gui_box_add(dir_box, d->output_dir_button);
+  dt_gui_box_add(dir_box, d->output_pattern_entry);
+  dt_gui_box_add(dir_box, d->output_pattern_button);
   dt_gui_box_add(cs_box, dir_box);
 
   g_signal_connect(d->notebook, "switch-page",
@@ -4587,6 +4810,7 @@ void gui_cleanup(dt_lib_module_t *self)
     g_free(d->cairo_after);
     g_free(d->export_pixels);
     g_free(d->export_cairo);
+    g_free(d->preview_hash);
 
     g_free(d->preview_full_cfa);
     dt_free_align(d->preview_full_lin);
@@ -4619,7 +4843,10 @@ void gui_reset(dt_lib_module_t *self)
   gtk_notebook_set_current_page(d->notebook, 0);
   dt_conf_set_int(CONF_ACTIVE_PAGE, 0);
   dt_bauhaus_combobox_set(d->scale_combo, 0);
-  d->task = NEURAL_TASK_DENOISE;
+  // page 0 is raw denoise: take the task from the page rather than naming one,
+  // or the entry shows one task's pattern while editing writes another's
+  _update_task_from_ui(d);
+  _output_pattern_refresh(d);
   d->model_available = _check_model_available(d, d->task);
   d->preview_requested = FALSE;
   _cancel_preview(self);

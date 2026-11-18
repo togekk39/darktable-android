@@ -28,6 +28,14 @@
 #include "common/collection.h"
 #include "common/colorspaces.h"
 #include "common/darktable.h"
+#include "develop/masks/check.h"
+#include "develop/masks/persist.h"
+#include "develop/masks/harvest.h"
+#include "develop/masks/roundtrip.h"
+#include "develop/masks/styleapply.h"
+#include "develop/masks/undo.h"
+#include "develop/masks/lockcheck.h"
+#include "develop/masks/verify.h"
 #include "common/datetime.h"
 #include "common/exif.h"
 #include "common/pwstorage/pwstorage.h"
@@ -43,6 +51,7 @@
 #include "common/grealpath.h"
 #include "common/image.h"
 #include "common/image_cache.h"
+#include "develop/masks.h"
 #include "common/iop_order.h"
 #include "common/l10n.h"
 #include "common/mipmap_cache.h"
@@ -64,6 +73,7 @@
 #include "control/jobs/sidecar_jobs.h"
 #include "control/signal.h"
 #include "develop/blend.h"
+#include "develop/frame.h"
 #include "develop/imageop.h"
 #include "gui/accelerators.h"
 #include "gui/workspace.h"
@@ -78,6 +88,7 @@
 #include "lua/init.h"
 #include "views/view.h"
 #include "conf_gen.h"
+#include "whereami.h"
 
 #include <errno.h>
 #include <glib.h>
@@ -129,6 +140,106 @@
 
 darktable_t darktable;
 
+#ifdef _WIN32
+static gboolean _console_notice_requested = FALSE;
+
+void dt_request_console_notice(void)
+{
+  _console_notice_requested = TRUE;
+}
+
+static void _show_console_notice(void)
+{
+  const char *notice = _("this console window is required by darktable on this "
+                         "version of Windows.\n"
+                         "on Windows 11 24H2 and later, darktable normally runs "
+                         "without this window.\n"
+                         "do not close it or press ctrl+c while darktable is running.\n"
+                         "it will close automatically when darktable exits.\n"
+                         "\n"
+                         "to hide this window anyway, follow the instructions at:\n"
+                         "https://www.darktable.org/about/faq/#faq-windows-terminal\n");
+  gchar **notice_lines = g_strsplit(notice, "\n", -1);
+  gchar *console_notice = g_strjoinv("\r\n", notice_lines);
+  g_strfreev(notice_lines);
+
+  glong length = 0;
+  gunichar2 *wide_notice = g_utf8_to_utf16(console_notice, -1, NULL, &length, NULL);
+  g_free(console_notice);
+  if(!wide_notice) return;
+
+  const HANDLE output = CreateFileW(L"CONOUT$", GENERIC_WRITE,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                                    OPEN_EXISTING, 0, NULL);
+  if(output != INVALID_HANDLE_VALUE)
+  {
+    DWORD written;
+    WriteConsoleW(output, wide_notice, (DWORD)length, &written, NULL);
+    CloseHandle(output);
+  }
+
+  g_free(wide_notice);
+}
+#endif
+
+/* the report path for a harvest FILE: FILE + `suffix`, without a trailing
+   ".gz", so that a compressed harvest and the same one unpacked get the same
+   report name */
+static gchar *_masks_report_path(const char *input, const char *suffix)
+{
+  const size_t len = strlen(input);
+  if(len > 3 && !strcmp(input + len - 3, ".gz"))
+  {
+    gchar *stem = g_strndup(input, len - 3);
+    gchar *out = g_strconcat(stem, suffix, NULL);
+    g_free(stem);
+    return out;
+  }
+  return g_strconcat(input, suffix, NULL);
+}
+
+#ifdef _WIN32
+  const char *system_name = "windows";
+#else
+  #ifdef __APPLE__
+    const char *system_name = "mac";
+  #else
+    #ifdef __linux__
+      const char *system_name = "linux";
+    #else
+      const char *system_name = "other";
+    #endif
+  #endif
+#endif
+
+#if (defined(__amd64__) || defined(__amd64) || defined(__x86_64__) || defined(__x86_64))
+  #if !defined(__SSE2__) || !defined(__SSE__)
+    const char *platform_name = "x64";
+  #else
+    const char *platform_name = "x64 sse2";
+  #endif
+#else
+  #if defined(__aarch64__) && (defined(__ARM_64BIT_STATE) && defined(__ARM_ARCH) && (defined(__ARM_ARCH_8A) || __ARM_ARCH_PROFILE == 'A') || defined(__APPLE__) || defined(__MINGW64__))
+    #if defined(__ARM_NEON)
+      const char *platform_name = "arm neon";
+    #else
+      const char *platform_name = "arm";
+    #endif
+  #else
+    const char *platform_name = "other";
+  #endif
+#endif
+
+#ifdef _DEBUG
+  const char *build_name = "debug";
+#else
+  #ifdef _DARKTABLE_RELEASE
+    const char *build_name = "release";
+  #else
+    const char *build_name = "reldebinfo";
+  #endif
+#endif
+
 static int usage(const char *argv0)
 {
 #ifdef _WIN32
@@ -143,7 +254,7 @@ static int usage(const char *argv0)
 // Trying to keep the length of the text within 80 columns
 // Using 2-4 spaces for the indentation of the inline help
 
-  printf("darktable %s\n"
+  printf("darktable %s [%s %s %s]\n"
          "Copyright (C) 2012-%s Johannes Hanika and other contributors.\n\n"
          "<https://www.darktable.org>\n"
          "darktable is an open source photography workflow application and\n"
@@ -152,6 +263,9 @@ static int usage(const char *argv0)
          "This is free software: you are free to change and redistribute it.\n"
          "There is NO WARRANTY, to the extent permitted by law.\n\n",
          darktable_package_version,
+         system_name,
+         platform_name,
+         build_name,
          darktable_last_commit_year);
 
   printf("Usage:\n"
@@ -179,6 +293,95 @@ static int usage(const char *argv0)
          "    The default location depends on your installation.\n"
          "    Typical locations are /opt/darktable/share/darktable/ \n"
          "    and /usr/share/darktable/\n"
+         "\n"
+         "--check-masks FILE\n"
+         "    Run every migration check over a --harvest-masks FILE and exit. The\n"
+         "    five checks are: the save/load round trip, the before/after render\n"
+         "    comparison, the classic-style application, persistence across a\n"
+         "    save and reload between panel edits (--persist-masks), and undo\n"
+         "    and redo of every panel action (--undo-masks). All five always run,\n"
+         "    even after one fails. Writes one self-contained FILE.check.json\n"
+         "    holding a row for every harvested edit plus a summary of each\n"
+         "    check, so nothing has to be read off the terminal. Exits 0 only if\n"
+         "    all five passed.\n"
+         "\n"
+         "    Use --library :memory: with this: it writes to a scratch image id\n"
+         "    and must never be pointed at a real catalog.\n"
+         "\n"
+         "    FILE may be gzipped; the .gz a contributor sends is read directly,\n"
+         "    with no need to unpack it first. The same is true of every option\n"
+         "    below that takes a --harvest-masks FILE.\n"
+         "\n"
+         "    Each check can also be run on its own, which is useful when\n"
+         "    investigating one of them: --roundtrip-masks, --verify-masks,\n"
+         "    --styleapply-masks, --persist-masks and --undo-masks, each taking\n"
+         "    the same FILE. --check-masks is what a contributed harvest should\n"
+         "    be run through. --lock-masks is not one of them: it reads no\n"
+         "    harvest.\n"
+         "\n"
+         "--persist-masks FILE\n"
+         "    Replay the mask configurations in a --harvest-masks FILE, migrate\n"
+         "    each one, then apply short sequences of panel edits to it twice:\n"
+         "    once wholly in memory, once saving and reopening the image between\n"
+         "    every edit. The two must render the same mask. Writes\n"
+         "    FILE.persist.json.\n"
+         "\n"
+         "    Needs `--library :memory:`: it writes to the database.\n"
+         "\n"
+         "    Catches state that a save does not carry, such as migrated\n"
+         "    blend_params reaching the database without the group markers\n"
+         "    migration made: the mask would then render wrong from the second\n"
+         "    load on, with no edit involved.\n"
+         "\n"
+         "--undo-masks FILE\n"
+         "    Replay the mask configurations in a --harvest-masks FILE, migrate\n"
+         "    each one, then for every action the masks panel offers: make the\n"
+         "    change, undo it, and redo it. Undoing must give back the mask that\n"
+         "    was there before, and redoing the one that was there after. Writes\n"
+         "    FILE.undo.json.\n"
+         "\n"
+         "    Needs `--library :memory:`: it writes to the database.\n"
+         "\n"
+         "    Undo is the one operation that has to RECOVER a mask rather than\n"
+         "    build one, and it recovers it from a copy taken before the edit.\n"
+         "    Nothing else here exercises that copy.\n"
+         "\n"
+         "--lock-masks\n"
+         "    Check that a locked mask survives paste, in append and overwrite\n"
+         "    mode, and styles, on two scratch images. Prints one line per case.\n"
+         "\n"
+         "    Needs `--library :memory:`: it writes to the database.\n"
+         "\n"
+         "--verify-masks FILE\n"
+         "    Replay the mask configurations in a --harvest-masks FILE, rendering\n"
+         "    each one before and after migration to the new mask model and\n"
+         "    comparing the results, then exit. Writes FILE.report.json.\n"
+         "\n"
+         "--harvest-masks-xmp DIR FILE\n"
+         "    The same, for people who do not use darktable's library: walk DIR\n"
+         "    recursively, read the mask configurations out of every .xmp sidecar\n"
+         "    found and write them to FILE (plus FILE.gz). Reads nothing else from\n"
+         "    the sidecars -- no file names, no GPS, no timestamps -- and writes\n"
+         "    nothing anywhere else.\n"
+         "\n"
+         "--harvest-masks FILE\n"
+         "    Export every mask configuration in the library to FILE as JSON, then\n"
+         "    exit. Used to check that migrating masks to the new model leaves real\n"
+         "    edits rendering identically; sharing the file with the developers helps\n"
+         "    test that against a wider range of edits than we can invent.\n"
+         "\n"
+         "    The library is opened strictly read-only and is never locked, written\n"
+         "    to, or schema-upgraded. Use --library / --configdir to choose which\n"
+         "    library to read.\n"
+         "\n"
+         "    The output is plain, readable JSON holding only numbers and darktable\n"
+         "    module names: no file or folder names, no shape, group or module\n"
+         "    instance names, no image content or thumbnails, no EXIF, no timestamps.\n"
+         "    Images appear only as pixel dimensions and a sequential index. Please\n"
+         "    read the file before sharing it.\n"
+         "\n"
+         "    A compressed copy is also written to FILE.gz (this data compresses by\n"
+         "    roughly 12x). Read FILE, send FILE.gz -- they hold the same thing.\n"
          "\n"
          "--library FILE\n"
          "    Specifies an alternate location for darktable's image information database,\n"
@@ -222,6 +425,15 @@ static int usage(const char *argv0)
          "    Typical locations are /opt/darktable/share/darktable/noiseprofile.json\n"
          "    and /usr/share/darktable/noiseprofile.json\n"
          "\n"
+         "--print-paths\n"
+         "    Print the resolved configdir, cachedir, tmpdir, datadir,\n"
+         "    moduledir, localedir and library paths for this install,\n"
+         "    honoring any of the above overrides, then exit.\n"
+         "\n"
+         "--print-paths-as-flags\n"
+         "    Like --print-paths, but printed as a single line of\n"
+         "    --flag value pairs ready to splice into another invocation.\n"
+         "\n"
          "-t, --threads NUM\n"
          "    Limit number of openmp threads to use in openmp parallel sections\n"
          "\n"
@@ -246,9 +458,17 @@ static int usage(const char *argv0)
          "--disable-opencl\n"
          "    Prevent darktable from initializing the OpenCL subsystem.\n"
          "\n"
-         "--opencl-tiling\n"
-         "    Enforce fast opencl tiling even if not required.\n"
+         "--opencl-tiling --opencl-no-tiling\n"
+         "    Enforce or disable fast opencl tiling even if not required.\n"
          "    Use for performance/debugging sessions only.\n"
+         "\n"
+         "--opencl-migrate\n"
+         "    Enforce safe on-device cl_mem allocation.\n"
+         "    Use for debugging sessions analysing cl_mem usage because of a performance penalty.\n"
+         "\n"
+         "--opencl-diffstat\n"
+         "    Report statistics about OpenCL vs CPU module processing.\n"
+         "    Use for debugging sessions only.\n"
          "\n"
 #endif
          "--disable-pipecache\n"
@@ -260,17 +480,19 @@ static int usage(const char *argv0)
          "\n"
          "--dump-pipe MODULE_A,MODULE_B\n"
          "\n"
+#ifdef HAVE_OPENCL
          "--dump-diff-pipe MODULE_A,MODULE_B\n"
          "\n"
+#endif
          "--dumpdir DIR\n"
          "\n"
          "-d CHANNEL\n"
          "    Enable debug output to the terminal (or to the log file if on Windows).\n"
          "    Valid channels are:\n\n"
          "    act_on, ai, cache, camctl, camsupport, control, dev, expose,\n"
-         "    imageio, input, ioporder, lighttable, lua, masks, memory,\n"
-         "    nan, opencl, params, perf, pipe, print, pwstorage, signal,\n"
-         "    sql, tiling, picker, undo\n"
+         "    hdr_merge, imageio, input, ioporder, lighttable, lua, masks,\n"
+         "    memory, nan, opencl, params, perf, pipe, print, pwstorage,\n"
+         "    signal, sql, tiling, picker, undo\n"
          "\n"
          "    It is also possible to specify names that activate all channels\n"
          "    or a certain subset, as well as increase verbosity:\n"
@@ -609,20 +831,18 @@ void dt_dump_pfm_file(
   }
 
   char fname[256]= { 0 };
-  snprintf(fname, sizeof(fname), "%04d_%s_%s_%s%s.%s",
+  snprintf(fname, sizeof(fname), "%04d_%s_%s%s.%s",
      written,
      modname,
-     cpu ? "cpu" : "GPU",
-     (input && output) ? "diff_" : ((!input && !output) ? "" : ((input) ? "in_" : "out_")),
-     (bpp != 16) ? "M" : "C",
-     (bpp==2) ? "ppm" : "pfm");
-
+     (input && output) ? "diff" : cpu ? "cpu" : "gpu",
+     (input && output) ? "" : ((!input && !output) ? "" : ((input) ? "_in" : "_out")),
+     bpp == sizeof(float) || bpp == sizeof(uint16_t) ? "pgm" : "ppm");
 
   if((width < 1) || (height < 1) || !data)
     goto finalize;
 
   fullname = g_build_filename(path, fname, NULL);
-  dt_write_pfm(fullname, width, height, data, bpp);
+  dt_write_ppm(fullname, width, height, data, bpp);
 
   dt_print(DT_DEBUG_ALWAYS, "%-20s %s,  %dx%d, bpp=%d", head, fullname, width, height, bpp);
   written += 1;
@@ -799,19 +1019,6 @@ static char *_get_version_string(void)
   const char *libraw_version = LIBRAW_VERSION_STR "\n";
 #endif
 
-#ifdef _WIN32
-  const char *system_name = "windows";
-#else
-  #ifdef __APPLE__
-    const char *system_name = "mac";
-  #else
-    #ifdef __linux__
-      const char *system_name = "linux";
-    #else
-      const char *system_name = "other";
-    #endif
-  #endif
-#endif
 
 #ifdef USE_LUA
   const char *lua_api_version = strcmp(LUA_API_VERSION_SUFFIX, "") ?
@@ -825,31 +1032,20 @@ static char *_get_version_string(void)
 #endif
 
 char *version = g_strdup_printf(
-               "darktable %s [%s]\n"
+               "darktable %s [%s %s %s]\n"
                "Copyright (C) 2012-%s Johannes Hanika and other contributors.\n\n"
                "Compile options:\n"
-               "  Bit depth              -> %zu bit\n"
                "%s%s%s%s%s%s%s%s%s\n"
                "See %s for detailed documentation.\n"
                "See %s to report bugs.\n",
                darktable_package_version,
                system_name,
+               platform_name,
+               build_name,
                darktable_last_commit_year,
-               CHAR_BIT * sizeof(void *),
 
                "  Exiv2                  -> ", exiv2_version,
                "  Lensfun                -> ", liblensfun_version,
-#ifdef _DEBUG
-               "  Debug                  -> ENABLED\n"
-#else
-               "  Debug                  -> DISABLED\n"
-#endif
-
-#if defined(__SSE2__) && defined(__SSE__)
-               "  SSE2 optimizations     -> ENABLED\n"
-#else
-               "  SSE2 optimizations     -> DISABLED\n"
-#endif
 
 #ifdef _OPENMP
                "  OpenMP                 -> ENABLED\n"
@@ -863,6 +1059,12 @@ char *version = g_strdup_printf(
                "  OpenCL                 -> DISABLED - GPU acceleration is NOT available\n"
 #endif
 
+#ifdef HAVE_OPENCV
+               "  OpenCV                 -> ENABLED  - HDR bracket auto-alignment is available\n"
+#else
+               "  OpenCV                 -> DISABLED - HDR bracket auto-alignment is NOT available\n"
+#endif
+
 #ifdef USE_LUA
                "  Lua                    -> ENABLED  - API version ", lua_api_version,
 #else
@@ -873,6 +1075,12 @@ char *version = g_strdup_printf(
                "  Colord                 -> ENABLED\n"
 #else
                "  Colord                 -> DISABLED\n"
+#endif
+
+#ifdef HAVE_WAYLAND
+               "  Wayland color mgmt     -> ENABLED\n"
+#else
+               "  Wayland color mgmt     -> DISABLED\n"
 #endif
 
 #ifdef HAVE_GPHOTO2
@@ -965,8 +1173,6 @@ int dt_init(int argc,
             const gboolean load_data,
             lua_State *L)
 {
-  const double start_wtime = dt_get_wtime();
-
 #ifndef _WIN32
   if(getuid() == 0 || geteuid() == 0)
     dt_print(DT_DEBUG_ALWAYS,
@@ -987,31 +1193,45 @@ int dt_init(int argc,
   // make sure that stack/frame limits are good (musl)
   dt_set_rlimits();
 
+  // darktable-cli and darktable-generate-cache call dt_loc_init() before
+  // us to find the locale dir; dt_loc_init() below allocates these again
+  g_free(darktable.datadir);
+  g_free(darktable.sharedir);
+  g_free(darktable.plugindir);
+  g_free(darktable.localedir);
+  g_free(darktable.tmpdir);
+  g_free(darktable.configdir);
+  g_free(darktable.cachedir);
+
   // init all pointers to 0:
   memset(&darktable, 0, sizeof(darktable_t));
 
-  darktable.start_wtime = start_wtime;
+  darktable.start_mtime = g_get_monotonic_time();
 
   darktable.progname = argv[0];
 
-  // FIXME: move there into dt_database_t
-  pthread_mutexattr_t recursive_locking;
-  pthread_mutexattr_init(&recursive_locking);
-  pthread_mutexattr_settype(&recursive_locking, PTHREAD_MUTEX_RECURSIVE);
   for(int k=0; k<DT_IMAGE_DBLOCKS; k++)
-  {
-    dt_pthread_mutex_init(&darktable.db_image[k], &recursive_locking);
-  }
-  dt_pthread_mutex_init(&darktable.plugin_threadsafe, NULL);
-  dt_pthread_mutex_init(&darktable.dev_threadsafe, NULL);
-  dt_pthread_mutex_init(&darktable.capabilities_threadsafe, NULL);
-  dt_pthread_mutex_init(&darktable.exiv2_threadsafe, NULL);
-  dt_pthread_mutex_init(&darktable.readFile_mutex, NULL);
-  dt_pthread_mutex_init(&darktable.metadata_threadsafe, NULL);
+    dt_pthread_recursive_mutex_init(&darktable.db_image[k]);
+
+  dt_pthread_mutex_init(&darktable.plugin_threadsafe);
+  dt_pthread_mutex_init(&darktable.dev_threadsafe);
+  dt_pthread_mutex_init(&darktable.capabilities_threadsafe);
+  dt_pthread_mutex_init(&darktable.exiv2_threadsafe);
+  dt_pthread_mutex_init(&darktable.readFile_mutex);
+  dt_pthread_mutex_init(&darktable.metadata_threadsafe);
   darktable.control = calloc(1, sizeof(dt_control_t));
 
   // database
   char *dbfilename_from_command = NULL;
+  char *harvest_masks_output = NULL;
+  char *harvest_masks_xmp_dir = NULL;
+  char *verify_masks_input = NULL;
+  char *roundtrip_masks_input = NULL;
+  char *styleapply_masks_input = NULL;
+  char *persist_masks_input = NULL;
+  char *undo_masks_input = NULL;
+  gboolean lock_masks = FALSE;
+  char *check_masks_input = NULL;
   char *noiseprofiles_from_command = NULL;
   char *datadir_from_command = NULL;
   char *moduledir_from_command = NULL;
@@ -1019,12 +1239,15 @@ int dt_init(int argc,
   char *tmpdir_from_command = NULL;
   char *configdir_from_command = NULL;
   char *cachedir_from_command = NULL;
+  gboolean print_paths = FALSE;
+  gboolean print_paths_as_flags = FALSE;
 
   darktable.dump_pfm_module = NULL;
   darktable.dump_pfm_pipe = NULL;
   darktable.dump_diff_pipe = NULL;
   darktable.tmp_directory = NULL;
   darktable.bench_module = NULL;
+  darktable.cldiff_stats = FALSE;
 
   int options = DT_OPENCL_OPTION_EXCLUDE;
   gboolean print_statistics = FALSE;
@@ -1042,7 +1265,47 @@ int dt_init(int argc,
   darktable.unmuted = 0;
   GSList *config_override = NULL;
 
-  // keep a copy of argv array for possibly reporting later
+  /* Keep original argv for possible workspace relaunch (before gtk_init
+   * mutates argv). Always copy argv[0] at least. */
+  darktable.restart = FALSE;
+  darktable.restart_argv = NULL;
+  if(init_gui)
+  {
+    darktable.restart_argv = g_new0(char *, (gsize)argc + 1);
+    for(int i = 0; i < argc; i++)
+      darktable.restart_argv[i] = g_strdup(argv[i] ? argv[i] : "");
+
+    /* Prefer absolute executable path so spawn works from any cwd. */
+    int dirname_length = 0;
+    const int length = wai_getExecutablePath(NULL, 0, &dirname_length);
+    if(length > 0)
+    {
+      char *exe = g_malloc((gsize)length + 1);
+      wai_getExecutablePath(exe, length, &dirname_length);
+      exe[length] = '\0';
+      g_free(darktable.restart_argv[0]);
+      darktable.restart_argv[0] = exe;
+    }
+
+    /* --library would override the workspace DB on relaunch */
+    GPtrArray *args = g_ptr_array_new();
+    for(int i = 0; darktable.restart_argv[i]; i++)
+    {
+      if(!strcmp(darktable.restart_argv[i], "--library"))
+      {
+        g_free(darktable.restart_argv[i]);
+        if(darktable.restart_argv[i + 1])
+          g_free(darktable.restart_argv[++i]);
+        continue;
+      }
+      g_ptr_array_add(args, darktable.restart_argv[i]);
+    }
+    g_free(darktable.restart_argv);
+    g_ptr_array_add(args, NULL);
+    darktable.restart_argv = (char **)g_ptr_array_free(args, FALSE);
+  }
+
+  /* Keep a copy of argv array for possibly reporting later */
   gchar **myoptions = init_gui && argc > 1 ? g_strdupv(argv) : NULL;
 
   for(int k = 1; k < argc; k++)
@@ -1098,6 +1361,115 @@ int dt_init(int argc,
       {
         dbfilename_from_command = argv[++k];
         argv[k-1] = NULL;
+        argv[k] = NULL;
+      }
+      else if(!strcmp(argv[k], "--harvest-masks-xmp"))
+      {
+        if(argc <= k + 2 || argv[k + 1][0] == '-' || argv[k + 2][0] == '-')
+        {
+          g_strfreev(myoptions);
+          return usage(argv[0]);
+        }
+        harvest_masks_xmp_dir = argv[++k];
+        harvest_masks_output = argv[++k];
+        argv[k - 2] = NULL;
+        argv[k - 1] = NULL;
+        argv[k] = NULL;
+        // handled below, before anything opens a database
+        continue;
+      }
+      else if(!strcmp(argv[k], "--harvest-masks"))
+      {
+        if(argc <= k + 1 || argv[k + 1][0] == '-')
+        {
+          g_strfreev(myoptions);
+          return usage(argv[0]);
+        }
+        harvest_masks_output = argv[++k];
+        argv[k-1] = NULL;
+        argv[k] = NULL;
+      }
+      else if(!strcmp(argv[k], "--verify-masks"))
+      {
+        if(argc <= k + 1 || argv[k + 1][0] == '-')
+        {
+          g_strfreev(myoptions);
+          return usage(argv[0]);
+        }
+        verify_masks_input = argv[++k];
+        argv[k-1] = NULL;
+        argv[k] = NULL;
+      }
+      else if(!strcmp(argv[k], "--persist-masks"))
+      {
+        if(argc <= k + 1 || argv[k + 1][0] == '-')
+        {
+          g_strfreev(myoptions);
+          return usage(argv[0]);
+        }
+        persist_masks_input = argv[++k];
+        argv[k-1] = NULL;
+        argv[k] = NULL;
+      }
+      else if(!strcmp(argv[k], "--lock-masks"))
+      {
+        lock_masks = TRUE;
+        argv[k] = NULL;
+      }
+      else if(!strcmp(argv[k], "--undo-masks"))
+      {
+        if(argc <= k + 1 || argv[k + 1][0] == '-')
+        {
+          g_strfreev(myoptions);
+          return usage(argv[0]);
+        }
+        undo_masks_input = argv[++k];
+        argv[k-1] = NULL;
+        argv[k] = NULL;
+      }
+      else if(!strcmp(argv[k], "--roundtrip-masks"))
+      {
+        if(argc <= k + 1 || argv[k + 1][0] == '-')
+        {
+          g_strfreev(myoptions);
+          return usage(argv[0]);
+        }
+        roundtrip_masks_input = argv[++k];
+        argv[k-1] = NULL;
+        argv[k] = NULL;
+      }
+      else if(!strcmp(argv[k], "--styleapply-masks"))
+      {
+        if(argc <= k + 1 || argv[k + 1][0] == '-')
+        {
+          g_strfreev(myoptions);
+          return usage(argv[0]);
+        }
+        styleapply_masks_input = argv[++k];
+        argv[k-1] = NULL;
+        argv[k] = NULL;
+      }
+      else if(!strcmp(argv[k], "--check-masks"))
+      {
+        if(argc <= k + 1 || argv[k + 1][0] == '-')
+        {
+          g_strfreev(myoptions);
+          return usage(argv[0]);
+        }
+        check_masks_input = argv[++k];
+        argv[k-1] = NULL;
+        argv[k] = NULL;
+      }
+      else if(!strcmp(argv[k], "--print-paths"))
+      {
+        print_paths = TRUE;
+        print_paths_as_flags = FALSE;
+        argv[k] = NULL;
+      }
+      else if(!strcmp(argv[k], "--print-paths-as-flags"))
+      {
+        print_paths_as_flags = TRUE;
+        print_paths = FALSE;
         argv[k] = NULL;
       }
       else if(!strcmp(argv[k], "--datadir") && argc > k + 1)
@@ -1176,6 +1548,7 @@ int dt_init(int argc,
           !strcmp(darg, "expose") ? DT_DEBUG_EXPOSE :
           !strcmp(darg, "picker") ? DT_DEBUG_PICKER :
           !strcmp(darg, "ai") ? DT_DEBUG_AI : // AI related stuff.
+          !strcmp(darg, "hdr_merge") ? DT_DEBUG_HDR_MERGE : // HDR bracket merge + auto-alignment
           0;
         if(dadd)
           darktable.unmuted |= dadd;
@@ -1346,9 +1719,28 @@ int dt_init(int argc,
 #endif
         argv[k] = NULL;
       }
+      else if(!strcmp(argv[k], "--opencl-no-tiling"))
+      {
+#ifdef HAVE_OPENCL
+        options |= DT_OPENCL_OPTION_NOFAST_TILE;
+#endif
+        argv[k] = NULL;
+      }
+      else if(!strcmp(argv[k], "--opencl-migrate"))
+      {
+#ifdef HAVE_OPENCL
+        options |= DT_OPENCL_OPTION_MIGRATE;
+#endif
+        argv[k] = NULL;
+      }
       else if(!strcmp(argv[k], "--disable-pipecache"))
       {
         darktable.pipe_cache = FALSE;
+        argv[k] = NULL;
+      }
+      else if(!strcmp(argv[k], "--opencl-diffstat"))
+      {
+        darktable.cldiff_stats = TRUE;
         argv[k] = NULL;
       }
       else if(!strcmp(argv[k], "--gimp"))
@@ -1477,6 +1869,42 @@ int dt_init(int argc,
              darktable.tmp_directory ? darktable.tmp_directory : "NOT AVAILABLE");
   }
 
+  if(harvest_masks_xmp_dir)
+  {
+    // here for the reason --harvest-masks below is: before anything opens or
+    // locks a database
+    const gboolean ok =
+      dt_masks_harvest_xmp_dir(harvest_masks_xmp_dir, harvest_masks_output);
+    exit(ok ? 0 : 1);
+  }
+
+  if(harvest_masks_output)
+  {
+    // harvest and exit here, before dt_database_init() locks the library and
+    // may upgrade its schema: the user's library must not be touched (see
+    // harvest.h)
+    gchar *library = NULL;
+    if(dbfilename_from_command)
+      library = g_strdup(dbfilename_from_command);
+    else
+    {
+      gchar *cfg = configdir_from_command
+        ? g_strdup(configdir_from_command)
+        : g_build_filename(g_get_user_config_dir(), "darktable", NULL);
+      library = g_build_filename(cfg, "library.db", NULL);
+      g_free(cfg);
+    }
+
+    const gboolean ok = dt_masks_harvest_library(library, harvest_masks_output);
+    if(!ok)
+      fprintf(stderr,
+              "[harvest] no output written.\n"
+              "[harvest] Use --library FILE to name the library explicitly, or\n"
+              "[harvest] --configdir DIR to name the directory holding library.db.\n");
+    g_free(library);
+    exit(ok ? 0 : 1);
+  }
+
   // Set directories as requested or default.
   // Set a result flag so if we can't create certain directories, we can
   // later, after initializing the GUI, show the user a message and exit.
@@ -1567,7 +1995,8 @@ int dt_init(int argc,
   }
 
 #ifdef _OPENMP
-  omp_set_num_threads(darktable.num_openmp_threads);
+  // avoid allocating per-thread buffers for workers excluded by the hard limit
+  darktable.num_openmp_threads = MIN(darktable.num_openmp_threads, omp_get_thread_limit());
   omp_set_dynamic(FALSE);
 #endif
 
@@ -1600,8 +2029,63 @@ int dt_init(int argc,
   // darktableconfig.xml.in.
   dt_conf_init(darktable.conf, darktablerc_common, TRUE, config_override);
 
+  if(print_paths || print_paths_as_flags)
+  {
+    // Resolve the same darktablerc-<label>/database-key path real
+    // startup uses below, but before gtk_init()/dt_workspace_create()
+    // ever run - so this needs no display and never shows the
+    // workspace picker. Reports the current default, same as what a
+    // headless darktable-cli run (which skips that GUI code too) would use.
+    const char *dblabel = dt_conf_get_string_const("workspace/label");
+    const gboolean default_dbname = strcmp(dblabel, "") == 0;
+
+    char darktablerc[PATH_MAX] = { 0 };
+    snprintf(darktablerc, sizeof(darktablerc),
+             "%s/darktablerc%s%s", datadir,
+             default_dbname ? "" : "-",
+             default_dbname ? "" : dblabel);
+
+    dt_conf_init(darktable.conf, darktablerc, FALSE, config_override);
+
+    // mirrors the alternative/database-key/:memory:/relative/absolute
+    // resolution in dt_database_init() (database.c), without its
+    // migration and mipmap-cleanup side effects.
+    gchar library_path[PATH_MAX] = { 0 };
+    if(dbfilename_from_command)
+    {
+      g_strlcpy(library_path, dbfilename_from_command, sizeof(library_path));
+    }
+    else
+    {
+      const char *libname = dt_conf_get_string_const("database");
+      if(!libname)
+        snprintf(library_path, sizeof(library_path),
+                 "%s%slibrary.db", datadir, G_DIR_SEPARATOR_S);
+      else if(!strcmp(libname, ":memory:"))
+        g_strlcpy(library_path, libname, sizeof(library_path));
+      else if(libname[0] != '/')
+        snprintf(library_path, sizeof(library_path),
+                 "%s%s%s", datadir, G_DIR_SEPARATOR_S, libname);
+      else
+        g_strlcpy(library_path, libname, sizeof(library_path));
+    }
+    dt_loc_print_paths(stdout, library_path, print_paths_as_flags);
+    // dt_init()'s return value only signals error-vs-continue to its
+    // callers (0 means "keep starting up") - exit directly so we
+    // don't fall through into normal GUI/CLI startup.
+    exit(0);
+  }
+
   // set the interface language and prepare selection for prefs & confgen
   darktable.l10n = dt_l10n_init(init_gui);
+
+#ifdef _WIN32
+  if(_console_notice_requested)
+  {
+    _console_notice_requested = FALSE;
+    _show_console_notice();
+  }
+#endif
 
   gboolean has_workspace = FALSE;
 
@@ -1653,8 +2137,8 @@ int dt_init(int argc,
   // now load darktablerc for the given library. Either darktablerc
   // for the default library or darktablerc-<label> for the other
   // libraries.
-  const char *dbname = dt_conf_get_string("database");
-  const char *dblabel = dt_conf_get_string("workspace/label");
+  gchar *dbname = dt_conf_get_string("database");
+  gchar *dblabel = dt_conf_get_string("workspace/label");
   const gboolean multiple_db = dt_conf_get_bool("database/multiple_workspace");
 
   const gboolean default_dbname = strcmp(dblabel, "") == 0;
@@ -1667,7 +2151,7 @@ int dt_init(int argc,
 
   dt_conf_init(darktable.conf, darktablerc, FALSE, config_override);
 
-  g_slist_free_full(config_override, g_free);
+  g_slist_free_full(config_override, dt_conf_string_entry_free);
 
   if(has_workspace)
   {
@@ -1680,6 +2164,7 @@ int dt_init(int argc,
     dt_conf_set_string("workspace/label", dblabel);
     dt_conf_set_bool("database/multiple_workspace", multiple_db);
   }
+  g_free(dbname);
 
   if(init_gui)
   {
@@ -1717,6 +2202,7 @@ int dt_init(int argc,
   {
     dt_print(DT_DEBUG_ALWAYS, "ERROR : cannot open database");
     dt_splash_screen_destroy();
+    g_free(dblabel);
     return 1;
   }
   else if(!dt_database_get_lock_acquired(darktable.db))
@@ -1750,10 +2236,12 @@ int dt_init(int argc,
     }
     dt_splash_screen_destroy(); // dismiss splash screen before potentially showing error dialog
     if(!image_loaded_elsewhere && init_gui) dt_database_show_error(darktable.db, dblabel);
+    g_free(dblabel);
 
     dt_print(DT_DEBUG_ALWAYS, "ERROR: can't acquire database lock, aborting.");
     return 1;
   }
+  g_free(dblabel);
 
   dt_splash_screen_set_progress(_("preparing database"));
   dt_upgrade_maker_model(darktable.db);
@@ -1778,13 +2266,7 @@ int dt_init(int argc,
   }
 
   // import default styles from shared directory
-#ifdef __ANDROID__
-  /* The APK stages the installed darktable tree as data/, with styles inside
-   * it, rather than retaining the desktop share/darktable directory name. */
-  gchar *styledir = g_build_filename(darktable.datadir, "styles", NULL);
-#else
   gchar *styledir = g_build_filename(sharedir, "darktable/styles", NULL);
-#endif
   if(styledir)
   {
     dt_splash_screen_set_progress(_("importing default styles"));
@@ -1805,7 +2287,11 @@ int dt_init(int argc,
   GList *changed_xmp_files = NULL;
   if(init_gui)
   {
-    if(dt_conf_get_bool("run_crawler_on_start") && !dt_gimpmode())
+    // when crawling in the background the scan is started once the gui is
+    // up, so nothing happens here and startup is not delayed by it
+    if(dt_conf_get_bool("run_crawler_on_start")
+       && !dt_conf_get_bool("run_crawler_in_background")
+       && !dt_gimpmode())
     {
       dt_splash_screen_allow_create(TRUE); // allow splash screen if a message is to be displayed
       // scan for cases where the database and xmp files have different timestamps
@@ -1980,7 +2466,7 @@ int dt_init(int argc,
   }
 
   dt_splash_screen_set_progress(_("loading image formats"));
- 
+
   darktable.imageio = (dt_imageio_t *)calloc(1, sizeof(dt_imageio_t));
   dt_imageio_init(darktable.imageio);
 
@@ -1997,6 +2483,82 @@ int dt_init(int argc,
     dt_print(DT_DEBUG_ALWAYS, "[dt_init] ERROR: iop order looks bad, aborting.");
     dt_splash_screen_destroy();
     return 1;
+  }
+
+  if(verify_masks_input)
+  {
+    // here: the replay runs the real blend, which needs the color profiles
+    // (dt_colorspaces_init) and real module instances (dt_iop_load_modules_so)
+    // above, but no window, so that it runs headless and in CI
+    dt_splash_screen_destroy();
+    gchar *report = _masks_report_path(verify_masks_input, ".report.json");
+    const gboolean ok = dt_masks_verify_harvest(verify_masks_input, report);
+    g_free(report);
+    exit(ok ? 0 : 1);
+  }
+
+  if(roundtrip_masks_input)
+  {
+    // here for the reason --verify-masks is, and it drives the real history
+    // reader and writer too, so it needs a library: a throwaway one,
+    // `--library :memory:`, never a real one, as it creates and wipes a
+    // scratch image
+    dt_splash_screen_destroy();
+    gchar *report = _masks_report_path(roundtrip_masks_input, ".roundtrip.json");
+    const gboolean ok = dt_masks_roundtrip_harvest(roundtrip_masks_input, report);
+    g_free(report);
+    exit(ok ? 0 : 1);
+  }
+
+  if(styleapply_masks_input)
+  {
+    // as --roundtrip-masks: `--library :memory:`, never a real library
+    dt_splash_screen_destroy();
+    gchar *report = _masks_report_path(styleapply_masks_input, ".styleapply.json");
+    const gboolean ok = dt_masks_styleapply_harvest(styleapply_masks_input, report);
+    g_free(report);
+    exit(ok ? 0 : 1);
+  }
+
+  if(persist_masks_input)
+  {
+    // renders as --verify-masks does, and drives the history reader and
+    // writer as --roundtrip-masks does: `--library :memory:`, never a real
+    // library
+    dt_splash_screen_destroy();
+    gchar *report = _masks_report_path(persist_masks_input, ".persist.json");
+    const gboolean ok = dt_masks_persist_harvest(persist_masks_input, report);
+    g_free(report);
+    exit(ok ? 0 : 1);
+  }
+
+  if(undo_masks_input)
+  {
+    // as --persist-masks: `--library :memory:`, never a real library
+    dt_splash_screen_destroy();
+    gchar *report = _masks_report_path(undo_masks_input, ".undo.json");
+    const gboolean ok = dt_masks_undo_harvest(undo_masks_input, report);
+    g_free(report);
+    exit(ok ? 0 : 1);
+  }
+
+  if(lock_masks)
+  {
+    // drives the history reader and writer, paste and styles against two
+    // scratch images: `--library :memory:`, never a real library
+    dt_splash_screen_destroy();
+    exit(dt_masks_lock_check() ? 0 : 1);
+  }
+
+  if(check_masks_input)
+  {
+    // --roundtrip-masks, --verify-masks and --styleapply-masks in one run and
+    // one report: `--library :memory:`, never a real library
+    dt_splash_screen_destroy();
+    gchar *report = _masks_report_path(check_masks_input, ".check.json");
+    const gboolean ok = dt_masks_check_harvest(check_masks_input, report);
+    g_free(report);
+    exit(ok ? 0 : 1);
   }
 
   if(darktable.dump_pfm_module)
@@ -2092,6 +2654,11 @@ int dt_init(int argc,
         // files are newer than the db entry
         dt_control_crawler_show_image_list(changed_xmp_files);
       }
+
+      // the gui is up, so the crawl can now proceed out of the user's way,
+      // starting with the most recently opened film rolls
+      if(dt_conf_get_bool("run_crawler_in_background"))
+        dt_control_crawler_start_background();
     }
 
     // show the main window and restore its geometry to that saved in the config file
@@ -2100,6 +2667,7 @@ int dt_init(int argc,
     dt_gui_process_events();
     dt_splash_screen_destroy();
     dt_welcome_screen_run_if_needed();
+    dt_colorspaces_notify_retired_selection();
 
     // finally set the cursor to be the default.
     // for some reason this is needed on some systems to pick up the correctly themed cursor
@@ -2120,8 +2688,14 @@ int dt_init(int argc,
   dt_capabilities_add("nonapple");
 #endif
 
+#ifdef HAVE_OPENCV
+  // gates the HDR alignment preferences: without OpenCV the whole merge
+  // auto-alignment path is compiled out, so those prefs are shown greyed out
+  dt_capabilities_add("opencv");
+#endif
+
   dt_print(DT_DEBUG_CONTROL,
-           "[dt_init] startup took %f seconds", dt_get_wtime() - start_wtime);
+           "[dt_init] startup took %f seconds", dt_get_wtime());
 
   dt_print_mem_usage("after successful startup");
 
@@ -2174,6 +2748,8 @@ void dt_cleanup()
   const gboolean init_gui = (darktable.gui != NULL);
 
   dt_stop_backthumbs_crawler(TRUE);
+  // must finish before the database is closed underneath it
+  dt_control_crawler_stop(TRUE);
 
   // last chance to ask user for any input...
 
@@ -2248,6 +2824,7 @@ void dt_cleanup()
     dt_control_cleanup(TRUE);
     dt_undo_cleanup(darktable.undo);
     darktable.undo = NULL;
+    dt_gui_gtk_cleanup(darktable.gui);
     free(darktable.gui);
     darktable.gui = NULL;
   }
@@ -2255,9 +2832,11 @@ void dt_cleanup()
     dt_control_cleanup(FALSE);
 
 
+  dt_masks_pixel_cache_cleanup();
   dt_image_cache_cleanup();
   dt_mipmap_cache_cleanup();
 
+  dt_frame_cleanup();
   dt_colorspaces_cleanup(darktable.color_profiles);
 #ifdef HAVE_AI
   dt_ai_models_cleanup();
@@ -2354,6 +2933,12 @@ void dt_cleanup()
   dt_pthread_mutex_destroy(&(darktable.metadata_threadsafe));
 
   dt_exif_cleanup();
+
+  if(!darktable.restart && darktable.restart_argv)
+  {
+    g_strfreev(darktable.restart_argv);
+    darktable.restart_argv = NULL;
+  }
 }
 
 /* The dt_print variations can be used with a combination of DT_DEBUG_ flags.
@@ -2370,7 +2955,7 @@ void dt_print_ext(const char *msg, ...)
   vsnprintf(vbuf, sizeof(vbuf), msg, ap);
   va_end(ap);
 
-  printf("%11.4f %s\n", dt_get_wtime() - darktable.start_wtime, vbuf);
+  printf("%11.4f %s\n", dt_get_wtime(), vbuf);
   fflush(stdout);
 }
 

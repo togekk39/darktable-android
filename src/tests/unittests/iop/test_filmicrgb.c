@@ -33,7 +33,13 @@
 #include "../util/tracing.h"
 #include "../util/testimg.h"
 
+// mocked by renaming the calls, not with the linker's --wrap, which macOS's
+// linker lacks. filmicrgb.c is compiled into this file, so this reaches it
+#define dt_iop_color_picker_reset __wrap_dt_iop_color_picker_reset
+
 #include "iop/filmicrgb.c"
+
+#undef dt_iop_color_picker_reset
 
 #ifdef _WIN32
 #include "win/main_wrapper.h"
@@ -54,7 +60,15 @@
 void __wrap_dt_iop_color_picker_reset(dt_iop_module_t *module, gboolean update)
 {
   check_expected_ptr(module);
+  /* cmocka 1.1.8 deprecated the untyped check_expected() in favour of the
+     width-explicit variants, and the tests are built with -Werror, so the old
+     spelling is a hard build failure there. Keep both spellings: the typed
+     macro does not exist in cmocka 1.1.0, which the build still accepts. */
+#ifdef check_expected_int
+  check_expected_int(update);
+#else
   check_expected(update);
+#endif
 }
 
 

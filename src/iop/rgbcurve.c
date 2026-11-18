@@ -355,6 +355,12 @@ static void _rgbcurve_show_hide_controls(dt_iop_rgbcurve_params_t *p,
                          p->curve_autoscale == DT_S_SCALE_AUTOMATIC_RGB);
 }
 
+static inline int _rgbcurve_nodes(const int nodes)
+{
+  // stored counts index the fixed node arrays, and the last node at nodes - 1
+  return CLAMP(nodes, 1, DT_IOP_RGBCURVE_MAXNODES);
+}
+
 static gboolean _is_identity(dt_iop_rgbcurve_params_t *p,
                              rgbcurve_channel_t channel)
 {
@@ -988,8 +994,7 @@ static gboolean _area_draw_callback(GtkWidget *widget,
       {
         PangoLayout *layout;
         PangoRectangle ink;
-        PangoFontDescription *desc =
-          pango_font_description_copy_static(darktable.bauhaus->pango_font_desc);
+        PangoFontDescription *desc = dt_gui_get_font();
         pango_font_description_set_weight(desc, PANGO_WEIGHT_BOLD);
         pango_font_description_set_absolute_size(desc, PANGO_SCALE);
         layout = pango_cairo_create_layout(cr);
@@ -1044,8 +1049,7 @@ static gboolean _area_draw_callback(GtkWidget *widget,
   {
     PangoLayout *layout;
     PangoRectangle ink;
-    PangoFontDescription *desc =
-      pango_font_description_copy_static(darktable.bauhaus->pango_font_desc);
+    PangoFontDescription *desc = dt_gui_get_font();
     pango_font_description_set_weight(desc, PANGO_WEIGHT_BOLD);
     pango_font_description_set_absolute_size(desc, PANGO_SCALE);
     layout = pango_cairo_create_layout(cr);
@@ -1078,8 +1082,7 @@ static gboolean _area_draw_callback(GtkWidget *widget,
     // draw information about current selected node
     PangoLayout *layout;
     PangoRectangle ink;
-    PangoFontDescription *desc =
-      pango_font_description_copy_static(darktable.bauhaus->pango_font_desc);
+    PangoFontDescription *desc = dt_gui_get_font();
     pango_font_description_set_weight(desc, PANGO_WEIGHT_BOLD);
     pango_font_description_set_absolute_size(desc, PANGO_SCALE);
     layout = pango_cairo_create_layout(cr);
@@ -1399,6 +1402,10 @@ static void _area_button_press_callback(GtkGestureSingle *gesture,
   }
   else if(gtk_gesture_single_get_current_button(gesture) == GDK_BUTTON_SECONDARY && g->selected >= 0)
   {
+    // consume the event so it does not bubble to the module body's
+    // right-click handler (which opens the presets menu)
+    dt_gui_claim(gesture);
+
     if(g->selected == 0 || g->selected == nodes - 1)
     {
       const float reset_value = g->selected == 0 ? 0.f : 1.f;
@@ -1406,6 +1413,7 @@ static void _area_button_press_callback(GtkGestureSingle *gesture,
       dt_iop_color_picker_reset(self, TRUE);
       dt_dev_add_history_item_target(darktable.develop, self, TRUE, widget + ch);
       gtk_widget_queue_draw(GTK_WIDGET(g->area));
+      return; // an endpoint reset must not fall through into node removal
     }
 
     for(int k = g->selected; k < nodes - 1; k++)
@@ -1492,7 +1500,7 @@ void gui_init(dt_iop_module_t *self)
                                 "ctrl+click or right-click to select an area"));
   gtk_widget_set_name(g->colorpicker, "keep-active");
   dt_action_define_iop(self, N_("pickers"), N_("show color"),
-                       g->colorpicker, &dt_action_def_toggle);
+                       g->colorpicker, &dt_action_def_color_picker);
   g->colorpicker_set_values = dt_color_picker_new(self,
                                                   DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_IO,
                                                   NULL);
@@ -1507,7 +1515,7 @@ void gui_init(dt_iop_module_t *self)
                                 "ctrl+drag to create a positive curve\n"
                                 "shift+drag to create a negative curve"));
   dt_action_define_iop(self, N_("pickers"), N_("create curve"),
-                       g->colorpicker_set_values, &dt_action_def_toggle);
+                       g->colorpicker_set_values, &dt_action_def_color_picker);
 
   g->area = GTK_DRAWING_AREA(dtgtk_drawing_area_new_with_height(0));
   g_object_set_data(G_OBJECT(g->area), "iop-instance", self);
@@ -1561,6 +1569,10 @@ void gui_update(dt_iop_module_t *self)
 {
   dt_iop_rgbcurve_gui_data_t *g = self->gui_data;
   dt_iop_rgbcurve_params_t *p = self->params;
+
+  // every GUI handler uses the stored count, and adding a node writes through it
+  for(int ch = 0; ch < DT_IOP_RGBCURVE_MAX_CHANNELS; ch++)
+    p->curve_num_nodes[ch] = _rgbcurve_nodes(p->curve_num_nodes[ch]);
 
   dt_bauhaus_combobox_set(g->autoscale, p->curve_autoscale);
   dt_bauhaus_combobox_set(g->interpolator, p->curve_type[DT_IOP_RGBCURVE_R]);
@@ -1750,6 +1762,8 @@ void commit_params(dt_iop_module_t *self,
     d->curve_changed[ch] = d->params.curve_type[ch] != p->curve_type[ch];
 
   memcpy(&d->params, p, sizeof(dt_iop_rgbcurve_params_t));
+  for(int ch = 0; ch < DT_IOP_RGBCURVE_MAX_CHANNELS; ch++)
+    d->params.curve_num_nodes[ch] = _rgbcurve_nodes(d->params.curve_num_nodes[ch]);
 
   // working color profile
   d->type_work = DT_COLORSPACE_NONE;
@@ -1885,7 +1899,7 @@ void process(dt_iop_module_t *self,
   const _coeffs_table_ptr restrict unbounded_coeffs = d->unbounded_coeffs;
 
   DT_OMP_FOR()
-  for(int y = 0; y < 4*npixels; y += 4)
+  for(size_t y = 0; y < 4*npixels; y += 4)
   {
     if(autoscale == DT_S_SCALE_MANUAL_RGB)
     {

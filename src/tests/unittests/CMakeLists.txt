@@ -1,8 +1,20 @@
+add_subdirectory(catalog)
+add_subdirectory(common)
+add_subdirectory(hdr)
 add_subdirectory(iop)
+add_subdirectory(masks)
 
 if(USE_AI)
   add_subdirectory(ai)
 endif(USE_AI)
+
+if(USE_MCP)
+  add_subdirectory(mcp)
+endif(USE_MCP)
+
+if(USE_LUA)
+  add_subdirectory(lua)
+endif(USE_LUA)
 
 add_cmocka_test(test_sample
                 SOURCES test_sample.c
@@ -12,4 +24,27 @@ add_cmocka_test(test_sample
 if(WIN32)
     target_link_libraries(test_sample PRIVATE lib_darktable)
     _copy_required_library(test_sample lib_darktable)
+endif(WIN32)
+
+# HDR exposure-bracket auto-alignment. Calls the public dt_hdr_alignment_* API
+# exported from lib_darktable (which carries the OpenCV-linked objects); the test
+# itself adapts at runtime to OpenCV-present / -absent builds.
+add_cmocka_test(test_hdr_alignment
+                SOURCES test_hdr_alignment.c
+                LINK_LIBRARIES lib_darktable cmocka)
+
+if(WIN32)
+    _copy_required_library(test_hdr_alignment lib_darktable)
+endif(WIN32)
+
+# White-box tests for the internal (static) helpers of the HDR alignment code.
+# Following test_filmicrgb.c, the implementation is #included directly for static
+# access; lib_darktable supplies what it links against (OpenCV, glib, ...).
+# C++ because hdr_alignment.cc is (OpenCV 4 has no C API).
+add_cmocka_test(test_hdr_alignment_internal
+                SOURCES test_hdr_alignment_internal.cc
+                LINK_LIBRARIES lib_darktable cmocka)
+
+if(WIN32)
+    _copy_required_library(test_hdr_alignment_internal lib_darktable)
 endif(WIN32)

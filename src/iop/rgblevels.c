@@ -15,6 +15,7 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
+
 #include "common/gdk_event_utils.h"
 
 #include "common/iop_profile.h"
@@ -1054,7 +1055,7 @@ void gui_init(dt_iop_module_t *self)
 #define PICKER_SETUP(color, name, tooltip)                                 \
   g->color##pick = dt_color_picker_new(self, DT_COLOR_PICKER_POINT, NULL); \
   dt_action_define_iop(self, N_("pickers"), name, g->color##pick,          \
-                       &dt_action_def_toggle);                             \
+                       &dt_action_def_color_picker);                             \
   gtk_widget_set_tooltip_text(g->color##pick, tooltip);                    \
   gtk_widget_set_name(GTK_WIDGET(g->color##pick), "picker-"#color);        \
   g_signal_connect(dt_gui_expand(g->color##pick), "toggled",               \
@@ -1069,14 +1070,16 @@ void gui_init(dt_iop_module_t *self)
                        &dt_action_def_button);
   gtk_widget_set_tooltip_text(g->bt_auto_levels, _("apply auto levels"));
 
-  g->bt_select_region = dtgtk_togglebutton_new(dtgtk_cairo_paint_colorpicker, 0, NULL);
+  g->bt_select_region = dtgtk_togglebutton_new_full(dtgtk_cairo_paint_colorpicker, 0, NULL,
+      &(dtgtk_button_config_t){
+        .tooltip = _("apply auto levels based on a region defined by the user\n"
+          "click and drag to draw the area\n"
+          "right-click to cancel"),
+        .action = DT_ACTION(self),
+        .action_label = N_("auto region"),
+        .action_def = &dt_action_def_toggle,
+      });
   dt_gui_add_class(g->bt_select_region, "dt_transparent_background");
-  dt_action_define_iop(self, NULL, N_("auto region"), g->bt_select_region,
-                       &dt_action_def_toggle);
-  gtk_widget_set_tooltip_text(g->bt_select_region,
-                              _("apply auto levels based on a region defined by the user\n"
-                                "click and drag to draw the area\n"
-                                "right-click to cancel"));
 
   dt_gui_box_add(self->widget, g->channel_tabs, g->area,
                  dt_gui_hbox(g->blackpick, g->greypick, g->whitepick),
@@ -1295,7 +1298,7 @@ void process(dt_iop_module_t *self,
     const dt_aligned_pixel_t max_levels
       = { d->params.levels[0][2], d->params.levels[1][2], d->params.levels[2][2], 1.0f };
     DT_OMP_FOR()
-    for(int k = 0; k < 4U*npixels; k += 4)
+    for(size_t k = 0; k < 4U*npixels; k += 4)
     {
       for(int c = 0; c < 3; c++)
       {
@@ -1330,7 +1333,7 @@ void process(dt_iop_module_t *self,
     const float max_level = levels[2];
     static const dt_aligned_pixel_t zero = { 0.0f, 0.0f, 0.0f, 0.0f };
     DT_OMP_FOR()
-    for(int k = 0; k < 4U*npixels; k += 4)
+    for(size_t k = 0; k < 4U*npixels; k += 4)
     {
       const float lum = dt_rgb_norm(in+k, d->params.preserve_colors, work_profile);
       if(lum > min_level)
@@ -1395,7 +1398,7 @@ int process_cl(dt_iop_module_t *self,
 
   cl_mem dev_profile_info = NULL;
   cl_mem dev_profile_lut = NULL;
-  dt_colorspaces_iccprofile_info_cl_t *profile_info_cl;
+  dt_colorspaces_iccprofile_info_cl_t *profile_info_cl = NULL;
   cl_float *profile_lut_cl = NULL;
 
   const int use_work_profile = (work_profile == NULL) ? 0 : 1;

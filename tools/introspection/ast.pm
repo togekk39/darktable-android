@@ -15,7 +15,6 @@
 #  along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 
 use scanner;
-use Scalar::Util ();
 
 package ast;
 
@@ -30,7 +29,7 @@ our @arrays;
 our @assignments;
 my $linearisation_pos;
 
-my %enum_arrays; # a mapping of enum type identity to linearisation_pos, for reusing value definitions
+my %enum_arrays; # a mapping of typename to linearisation_pos. this allows us to re-use enum value definitions
 
 sub print_debug
 {
@@ -170,6 +169,10 @@ sub new
 
   $reference->{type} = $type;
   $reference->{name} = $name;
+
+  # enum value arrays are shared by type name (%enum_arrays), so an anonymous
+  # enum takes its typedef name; otherwise all of them get the first one's values
+  $type->{name} = $name if((ref $type) eq "ast_type_enum_node" && !defined($type->{name}));
 
   return $reference;
 }
@@ -691,16 +694,17 @@ sub get_type
   return "Double";
 }
 
-# Numeric metadata uses sizeof(member) and G_STRUCT_OFFSET in the generated C,
-# so the target compiler supplies the actual alignment, including nested and
-# mixed double layouts. Introspection does not change the parameter struct or
-# make architecture-specific binary history layouts interchangeable. In
-# particular, legacy double parameters must retain their original storage.
+sub check_tree
+{
+  my $self = shift;
+  $self->print_warning("'double' shouldn't be used due to different padding on 32 and 64 bit platforms");
+  return 0;
+}
 
 sub get_limits
 {
   my $self = shift;
-  return ("-G_MAXDOUBLE", "G_MAXDOUBLE", "0.0");
+  return ("-G_MINDOUBLE", "G_MAXDOUBLE", "0.0");
 }
 
 #################### FLOAT COMPLEX TYPE ####################
@@ -966,16 +970,11 @@ sub get_introspection_code
   my ($self, $name_prefix, $params_type, $declaration) = @_;
   my @enumerator_list = @{$self->{enumerator_list}};
   my $size = @enumerator_list;
-  # Anonymous enum declarations all have an empty name. They are distinct
-  # types, so sharing by name would attach the first enum's choices to every
-  # later anonymous enum (even when their entry counts differ).
-  my $enum_key = length($self->{name}) ? "named:".$self->{name}
-                                      : "anonymous:".Scalar::Util::refaddr($self);
 
   # add entry to @arrays and @assignments
   # we only do that once per type. if the same enum is used more than once then we can reuse that array.
   my $_linearisation_pos;
-  if(not defined $enum_arrays{$enum_key})
+  if(not defined $enum_arrays{$self->{name}})
   {
     my $arrays_line = "static dt_introspection_type_enum_tuple_t f".$linearisation_pos."[] = { ";
     foreach(@enumerator_list)
@@ -989,12 +988,12 @@ sub get_introspection_code
     }
     $arrays_line .= "\n    { NULL, 0 },\n  };";
     push(@arrays, $arrays_line);
-    $enum_arrays{$enum_key} = $linearisation_pos;
+    $enum_arrays{$self->{name}} = $linearisation_pos;
     $_linearisation_pos = $linearisation_pos;
   }
   else
   {
-    $_linearisation_pos = $enum_arrays{$enum_key};
+    $_linearisation_pos = $enum_arrays{$self->{name}};
   }
   push(@assignments, "introspection_linear[$linearisation_pos].Enum.values = f$_linearisation_pos;");
 

@@ -17,6 +17,7 @@
 */
 
 #include "common/collection.h"
+#include "common/collection_navigation.h"
 #include "common/debug.h"
 #include "common/image.h"
 #include "common/image_cache.h"
@@ -34,13 +35,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-
-
-#ifdef _WIN32
-//MSVCRT does not have strptime implemented
-#include "win/strptime.h"
-#endif
-
 
 #ifdef USE_LUA
 #include "lua/call.h"
@@ -112,6 +106,7 @@ const dt_collection_t *dt_collection_new(const dt_collection_t *clone)
 
 void dt_collection_free(const dt_collection_t *collection)
 {
+  if(!collection->clone) dt_collection_navigation_cleanup();
   DT_CONTROL_SIGNAL_DISCONNECT_ALL(collection, "collection");
 
   g_free(collection->query);
@@ -1201,7 +1196,10 @@ void dt_collection_split_operator_exposure(const gchar *input,
     gchar *inv = g_match_info_fetch(match_info, 1);
 
     if(strstr(inv, "1/") != NULL)
+    {
       *number1 = g_strdup_printf("1.0/%s", n1);
+      g_free(n1);
+    }
     else
       *number1 = n1;
     g_free(inv);
@@ -1210,7 +1208,10 @@ void dt_collection_split_operator_exposure(const gchar *input,
     inv = g_match_info_fetch(match_info, 4);
 
     if(strstr(inv, "1/") != NULL)
+    {
       *number2 = g_strdup_printf("1.0/%s", n2);
+      g_free(n2);
+    }
     else
       *number2 = n2;
     g_free(inv);
@@ -1236,7 +1237,10 @@ void dt_collection_split_operator_exposure(const gchar *input,
     gchar *inv = g_match_info_fetch(match_info, 2);
 
     if(strstr(inv, "1/") != NULL)
+    {
       *number1 = g_strdup_printf("1.0/%s", n1);
+      g_free(n1);
+    }
     else
       *number1 = n1;
     g_free(inv);
@@ -2863,6 +2867,7 @@ void dt_collection_update_query(const dt_collection_t *collection,
   /* raise signal of collection change, only if this is an original */
   if(!collection->clone)
   {
+    dt_collection_navigation_record_current();
     dt_collection_memory_update();
     DT_CONTROL_SIGNAL_RAISE(DT_SIGNAL_COLLECTION_CHANGED,
                             query_change, changed_property,
@@ -3313,6 +3318,7 @@ void dt_collection_history_save()
   // save current history
   dt_conf_set_string("plugins/lighttable/collect/history0", buf);
 }
+
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent

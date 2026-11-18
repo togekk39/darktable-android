@@ -1,0 +1,20 @@
+--- a/src/iop/spots.c
++++ b/src/iop/spots.c
+@@ -192,7 +192,7 @@
+   int nalgo[64] = { 2 };
+ 
+   // we go through all forms in blend params
+-  dt_masks_form_t *grp = dt_masks_get_from_id(darktable.develop, bp->mask_id);
++  dt_masks_form_t *grp = dt_masks_get_from_id(self->dev, bp->mask_id);
+   if(grp && (grp->type & DT_MASKS_GROUP))
+   {
+     int i = 0;
+@@ -219,6 +219,8 @@
+     p->clone_id[i] = nid[i];
+   }
+ }
++
++#include "mobile/adapters/iop/spots.inc"
+ 
+ static gboolean _reset_form_creation(GtkWidget *widget, dt_iop_module_t *self)
+ {

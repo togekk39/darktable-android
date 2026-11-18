@@ -1,0 +1,11 @@
+--- a/src/develop/develop.h
++++ b/src/develop/develop.h
+@@ -645,6 +645,8 @@
+ /*
+  * multi instances
+  */
++#include "develop/mobile.h"
++
+ /** duplicate a existent module */
+ struct dt_iop_module_t *dt_dev_module_duplicate_ext(dt_develop_t *dev,
+                                                     struct dt_iop_module_t *base,

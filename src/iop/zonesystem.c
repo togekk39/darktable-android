@@ -15,15 +15,15 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
+
 #include "common/gdk_event_utils.h"
-#include <assert.h>
+
 #include <stdlib.h>
 #include <string.h>
 
 #include "common/darktable.h"
 #include "common/gaussian.h"
 #include "common/math.h"
-#include "common/zonemap.h"
 #include "common/opencl.h"
 #include "control/conf.h"
 #include "control/control.h"
@@ -126,10 +126,38 @@ static inline int _iop_zonesystem_zone_index_from_lightness(float lightness, flo
   return size - 1;
 }
 
+static inline int _zonesystem_size(const int size)
+{
+  // the size bounds the fixed zonemap arrays, and zone indices are clamped to size - 2
+  return CLAMP(size, 2, MAX_ZONE_SYSTEM_SIZE);
+}
+
 /* calculate a zonemap with scale values for each zone based on controlpoints from param */
 static inline void _iop_zonesystem_calculate_zonemap(dt_iop_zonesystem_params_t *p, float *zonemap)
 {
-  dt_zonesystem_calculate_zonemap(p->zone, p->size, zonemap);
+  int steps = 0;
+  int pk = 0;
+
+  for(int k = 0; k < p->size; k++)
+  {
+    if((k > 0 && k < p->size - 1) && p->zone[k] == -1)
+      steps++;
+    else
+    {
+      /* set 0 and 1.0 for first and last element in zonesystem size, or the actually parameter value */
+      zonemap[k] = k == 0 ? 0.0 : k == (p->size - 1) ? 1.0 : p->zone[k];
+
+      /* for each step from pk to k, calculate values
+          for now this is linear distributed
+      */
+      for(int l = 1; l <= steps; l++)
+        zonemap[pk + l] = zonemap[pk] + (((zonemap[k] - zonemap[pk]) / (steps + 1)) * l);
+
+      /* store k into pk and reset zone steps for next range*/
+      pk = k;
+      steps = 0;
+    }
+  }
 }
 
 static void process_common_setup(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
@@ -186,7 +214,7 @@ static void process_common_cleanup(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t
 
     dt_gaussian_t *gauss = dt_gaussian_init(width, height, 1, Lmax, Lmin, sigma, DT_IOP_GAUSSIAN_ZERO);
 
-    float *tmp = g_malloc_n((size_t)width * height, sizeof(float));
+    float *tmp = g_try_malloc_n((size_t)width * height, sizeof(float));
 
     if(gauss && tmp)
     {
@@ -328,6 +356,7 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
   dt_iop_zonesystem_data_t *d = piece->data;
 
   d->params = *p;
+  d->params.size = _zonesystem_size(p->size);
   d->rzscale = (d->params.size - 1) / 100.0f;
 
   /* calculate zonemap */
@@ -356,6 +385,9 @@ void cleanup_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelp
 void gui_update(dt_iop_module_t *self)
 {
   dt_iop_zonesystem_gui_data_t *g = self->gui_data;
+  dt_iop_zonesystem_params_t *p = self->params;
+  // the GUI handlers use the stored size directly
+  p->size = _zonesystem_size(p->size);
   gtk_widget_queue_draw(GTK_WIDGET(g->zones));
 }
 
@@ -770,7 +802,7 @@ static gboolean dt_iop_zonesystem_preview_draw(GtkWidget *widget, cairo_t *crf, 
   return TRUE;
 }
 
-void _iop_zonesystem_redraw_preview_callback(gpointer instance, dt_iop_module_t *self)
+static void _iop_zonesystem_redraw_preview_callback(gpointer instance, dt_iop_module_t *self)
 {
   dt_iop_zonesystem_gui_data_t *g = self->gui_data;
 
@@ -782,4 +814,3 @@ void _iop_zonesystem_redraw_preview_callback(gpointer instance, dt_iop_module_t 
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
 // clang-format on
-

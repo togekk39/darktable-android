@@ -1,0 +1,29 @@
+--- a/src/develop/blend.c
++++ b/src/develop/blend.c
+@@ -24,6 +24,7 @@
+ #include "common/opencl.h"
+ #include "control/control.h"
+ #include "develop/imageop.h"
++#include "develop/mask_context.h"
+ #include "develop/masks.h"
+ #include "develop/tiling.h"
+ #include "develop/imageop_math.h"
+@@ -3033,7 +3034,8 @@
+   dt_develop_blend_params_t *n = new_params;
+   // a reserved field before, which older versions do not keep zero
+   n->blend_mask_id = NO_MASKID;
+-  dt_masks_migrate_classic_to_flexi(module, n, history_num);
++  if(!dt_mobile_mask_edit_context(module ? module->dev : NULL))
++    dt_masks_migrate_classic_to_flexi(module, n, history_num);
+   // every conversion is from a version older than the lock, whose reserved
+   // field it took over
+   n->mask_lock = 0;
+@@ -3093,6 +3095,8 @@
+                                                dt_develop_blend_params_t *bp,
+                                                const int history_num)
+ {
++  if(module && dt_mobile_mask_edit_context(module->dev)) return FALSE;
++
+   // a uniform blend with no flexi bit, which development builds of 5.7 stored
+   // as the migration of a classic mask rendering a constant: a flexi mask with
+   // no group, as the panel expects, which needs no image

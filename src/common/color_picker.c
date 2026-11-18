@@ -21,11 +21,17 @@
 #include "common/darktable.h"
 #include "common/colorspaces_inline_conversions.h"
 #include "common/iop_profile.h"
+#include "common/opencl.h"
 #include "develop/format.h"
 #include "develop/imageop.h"
 #include "develop/imageop_math.h"
 
 typedef DT_ALIGNED_PIXEL uint32_t dt_aligned_weights_t[4];
+
+// each row is summed in float and the rows are added up in double: a single
+// float sum over a large box stops taking in small values once it has grown,
+// which pulled the mean of a box of hues near 0 and 1 off by 0.08
+typedef double dt_picker_sum_t[4];
 
 static inline size_t _box_size(const int *const box)
 {
@@ -207,7 +213,7 @@ static void _color_picker_work_4ch(const float *const source,
   const size_t off_mul = 4 * width;
   const size_t off_add = 4 * box[0];
 
-  dt_aligned_pixel_t acc = { 0.0f, 0.0f, 0.0f, 0.0f };
+  dt_picker_sum_t acc = { 0.0, 0.0, 0.0, 0.0 };
   dt_aligned_pixel_t low = { FLT_MAX, FLT_MAX, FLT_MAX, FLT_MAX };
   dt_aligned_pixel_t high = { -FLT_MAX, -FLT_MAX, -FLT_MAX, -FLT_MAX };
 
@@ -217,14 +223,16 @@ static void _color_picker_work_4ch(const float *const source,
   for(size_t j = box[1]; j < box[3]; j++)
   {
     const size_t offset = j * off_mul + off_add;
-    worker(acc, low, high, source + offset, stride, profile);
+    dt_aligned_pixel_t row = { 0.0f, 0.0f, 0.0f, 0.0f };
+    worker(row, low, high, source + offset, stride, profile);
+    for_four_channels(c) acc[c] += row[c];
   }
 
   // copy all four channels, as four some colorspaces there may be
   // meaningful data in the fourth channel
   for_four_channels(c)
   {
-    pick[DT_PICK_MEAN][c] = acc[c] / (float)size;
+    pick[DT_PICK_MEAN][c] = acc[c] / (double)size;
     pick[DT_PICK_MIN][c] = low[c];
     pick[DT_PICK_MAX][c] = high[c];
   }
@@ -240,7 +248,7 @@ static void _color_picker_nomat(const float *const source,
   cmsHPROFILE *Lab = dt_colorspaces_get_profile(DT_COLORSPACE_LAB, "", DT_PROFILE_DIRECTION_ANY)->profile;
   cmsHTRANSFORM *xform = cmsCreateTransform(input, TYPE_RGBA_FLT, Lab, TYPE_LabA_FLT, profile->intent, 0);
  
-  dt_aligned_pixel_t acc = { 0.0f, 0.0f, 0.0f, 0.0f };
+  dt_picker_sum_t acc = { 0.0, 0.0, 0.0, 0.0 };
   dt_aligned_pixel_t low = { FLT_MAX, FLT_MAX, FLT_MAX, FLT_MAX };
   dt_aligned_pixel_t high = { -FLT_MAX, -FLT_MAX, -FLT_MAX, -FLT_MAX };
 
@@ -248,6 +256,7 @@ static void _color_picker_nomat(const float *const source,
   DT_OMP_FOR(if (bsize > 10) reduction(+ : acc[:4]) reduction(min : low[:4]) reduction(max : high[:4]))
   for(size_t y = box[1]; y < box[3]; y++)
   {
+    dt_aligned_pixel_t row = { 0.0f, 0.0f, 0.0f, 0.0f };
     for(size_t x = box[0]; x < box[2]; x++)
     {
       dt_aligned_pixel_t JzAzBz = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -261,14 +270,15 @@ static void _color_picker_nomat(const float *const source,
       dt_XYZ_D50_2_XYZ_D65(XYZ_D50, XYZ_D65);
       dt_XYZ_2_JzAzBz(XYZ_D65, JzAzBz);
       dt_JzAzBz_2_JzCzhz(JzAzBz, JzCzhz);
-      _update_stats_4ch(acc, low, high, JzCzhz);
+      _update_stats_4ch(row, low, high, JzCzhz);
     }
+    for_four_channels(c) acc[c] += row[c];
   }
 
   cmsDeleteTransform(xform);
   for_four_channels(c)
   {
-    pick[DT_PICK_MEAN][c] = acc[c] / (float)bsize;
+    pick[DT_PICK_MEAN][c] = acc[c] / (double)bsize;
     pick[DT_PICK_MIN][c] = low[c];
     pick[DT_PICK_MAX][c] = high[c];
   }
@@ -283,7 +293,7 @@ static void _color_picker_work_1ch(const float *const pixel,
                                    const size_t min_for_threads)
 {
   const int width = roi->width;
-  dt_aligned_pixel_t acc = { 0.0f, 0.0f, 0.0f, 0.0f };
+  dt_picker_sum_t acc = { 0.0, 0.0, 0.0, 0.0 };
   dt_aligned_pixel_t low = { FLT_MAX, FLT_MAX, FLT_MAX, FLT_MAX };
   dt_aligned_pixel_t high = { -FLT_MAX, -FLT_MAX, -FLT_MAX, -FLT_MAX };
   dt_aligned_weights_t weights = { 0u, 0u, 0u, 0u };
@@ -293,7 +303,9 @@ static void _color_picker_work_1ch(const float *const pixel,
   DT_OMP_FOR(if (_box_size(box) > min_for_threads) reduction(+ : acc[:4], weights[:4]) reduction(min : low[:4]) reduction(max : high[:4]))
   for(size_t j = box[1]; j < box[3]; j++)
   {
-    worker(acc, low, high, weights, pixel + width * j, j, roi, box, data);
+    dt_aligned_pixel_t row = { 0.0f, 0.0f, 0.0f, 0.0f };
+    worker(row, low, high, weights, pixel + width * j, j, roi, box, data);
+    for_four_channels(c) acc[c] += row[c];
   }
 
   copy_pixel(pick[DT_PICK_MIN], low);
@@ -301,7 +313,7 @@ static void _color_picker_work_1ch(const float *const pixel,
   // and finally normalize data. For bayer, there is twice as much green.
   // X-Trans RGB weighting averages to 2:5:2 for each 3x3 cell
   for_each_channel(c)
-    pick[DT_PICK_MEAN][c] = weights[c] ? (acc[c] / (float)weights[c]) : 0.0f;
+    pick[DT_PICK_MEAN][c] = weights[c] ? (acc[c] / (double)weights[c]) : 0.0f;
 }
 
 void dt_color_picker_backtransform_box(dt_develop_t *dev,
@@ -563,6 +575,165 @@ void dt_color_picker_helper(const dt_iop_buffer_dsc_t *dsc,
            dsc->channels, dsc->filters, image_cst, picker_cst, _box_size(box), denoise,
            dt_get_lap_time(&start_time.clock), dt_get_lap_utime(&start_time.user));
 }
+
+#ifdef HAVE_OPENCL
+dt_color_picker_cl_global_t *dt_color_picker_init_cl_global(void)
+{
+  dt_color_picker_cl_global_t *g = malloc(sizeof(dt_color_picker_cl_global_t));
+  if(!g) return NULL;
+  const int program = 2; // basic.cl, from programs.conf
+  g->kernel_stats_4ch = dt_opencl_create_kernel(program, "color_picker_stats_4ch");
+  g->kernel_stats_mosaic = dt_opencl_create_kernel(program, "color_picker_stats_mosaic");
+  return g;
+}
+
+void dt_color_picker_free_cl_global(dt_color_picker_cl_global_t *g)
+{
+  if(!g) return;
+  dt_opencl_free_kernel(g->kernel_stats_4ch);
+  dt_opencl_free_kernel(g->kernel_stats_mosaic);
+  free(g);
+}
+
+gboolean dt_color_picker_helper_cl(const int devid,
+                                   const dt_iop_buffer_dsc_t *dsc,
+                                   cl_mem img,
+                                   const dt_iop_roi_t *roi,
+                                   const int *const box,
+                                   const gboolean denoise,
+                                   lib_colorpicker_stats pick,
+                                   const dt_iop_colorspace_type_t image_cst,
+                                   const dt_iop_colorspace_type_t picker_cst,
+                                   const dt_iop_order_iccprofile_info_t *const profile)
+{
+  const dt_color_picker_cl_global_t *gd = darktable.opencl->color_picker;
+  if(!gd) return FALSE;
+
+  const gboolean mosaic = dsc->channels == 1u && dsc->filters != 0u;
+  int mode = 0;
+  if(dsc->channels == 4u)
+  {
+    const dt_iop_colorspace_type_t effective_cst =
+      image_cst == IOP_CS_RAW ? IOP_CS_RGB : image_cst;
+    if(effective_cst == IOP_CS_LAB && picker_cst == IOP_CS_LCH)
+      mode = 1;
+    else if(effective_cst == IOP_CS_RGB && picker_cst == IOP_CS_HSL)
+      mode = 2;
+    else if(effective_cst == IOP_CS_RGB && picker_cst == IOP_CS_JZCZHZ)
+    {
+      // a profile without a matrix needs LittleCMS
+      if(profile && !dt_is_valid_colormatrix(profile->matrix_in[0][0])) return FALSE;
+      mode = 3;
+    }
+    // the CPU code reports any other conversion
+    else if(effective_cst != picker_cst && picker_cst != IOP_CS_NONE)
+      return FALSE;
+  }
+  else if(!mosaic)
+    return FALSE;
+
+  dt_times_t start_time = { 0 };
+  dt_get_perf_times(&start_time);
+
+  // about 4096 tiles, so that the device has enough work items and the
+  // statistics read back stay small
+  const int bw = box[2] - box[0];
+  const int bh = box[3] - box[1];
+  const int side = MAX(1, (int)ceil(sqrt((double)bw * bh / 4096.0)));
+  const int tile_w = MIN(side, bw);
+  const int tile_h = MIN(side, bh);
+  const int tiles_x = (bw + tile_w - 1) / tile_w;
+  const int tiles_y = (bh + tile_h - 1) / tile_h;
+  const size_t n = (size_t)tiles_x * tiles_y;
+
+  dt_colorspaces_iccprofile_info_cl_t *profile_info_cl = NULL;
+  cl_float *profile_lut_cl = NULL;
+  cl_mem dev_profile_info = NULL;
+  cl_mem dev_profile_lut = NULL;
+  cl_mem dev_xtrans = NULL;
+  cl_mem dev_stats = dt_opencl_alloc_device_buffer(devid, n * 16 * sizeof(float));
+  float *stats = dt_alloc_align_float(n * 16);
+  cl_int err = dev_stats && stats ? CL_SUCCESS : CL_MEM_OBJECT_ALLOCATION_FAILURE;
+
+  if(err == CL_SUCCESS && mosaic)
+  {
+    dev_xtrans = dt_opencl_copy_host_to_device_constant(devid, sizeof(dsc->xtrans), (void *)dsc->xtrans);
+    const unsigned int filters = dsc->filters;
+    err = dev_xtrans == NULL
+      ? CL_MEM_OBJECT_ALLOCATION_FAILURE
+      : dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_stats_mosaic, tiles_x, tiles_y,
+          CLARG(img), CLARG(dev_stats), CLARG(box[0]), CLARG(box[1]), CLARG(box[2]), CLARG(box[3]),
+          CLARG(tile_w), CLARG(tile_h), CLARG(tiles_x), CLARG(tiles_y), CLARG(roi->x), CLARG(roi->y),
+          CLARG(filters), CLARG(dev_xtrans));
+  }
+  else if(err == CL_SUCCESS)
+  {
+    // without a profile the pixels are taken as XYZ D50, as in rgb_to_JzCzhz()
+    dt_iop_order_iccprofile_info_t xyz_profile;
+    const dt_iop_order_iccprofile_info_t *p = profile;
+    if(mode == 3 && !profile)
+    {
+      memset(&xyz_profile, 0, sizeof(xyz_profile));
+      for(int k = 0; k < 3; k++) xyz_profile.matrix_in[k][k] = 1.0f;
+      p = &xyz_profile;
+    }
+    err = dt_ioppr_build_iccprofile_params_cl(mode == 3 ? p : NULL, devid,
+                                              &profile_info_cl, &profile_lut_cl,
+                                              &dev_profile_info, &dev_profile_lut);
+    const int dn = denoise ? 1 : 0;
+    if(err == CL_SUCCESS)
+      err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_stats_4ch, tiles_x, tiles_y,
+              CLARG(img), CLARG(dev_stats), CLARG(roi->width), CLARG(roi->height),
+              CLARG(box[0]), CLARG(box[1]), CLARG(box[2]), CLARG(box[3]),
+              CLARG(tile_w), CLARG(tile_h), CLARG(tiles_x), CLARG(tiles_y), CLARG(mode), CLARG(dn),
+              CLARG(dev_profile_info), CLARG(dev_profile_lut));
+  }
+  if(err == CL_SUCCESS)
+    err = dt_opencl_read_buffer_from_device(devid, stats, dev_stats, 0, n * 16 * sizeof(float), TRUE);
+
+  dt_opencl_release_mem_object(dev_stats);
+  dt_opencl_release_mem_object(dev_xtrans);
+  dt_ioppr_free_iccprofile_params_cl(&profile_info_cl, &profile_lut_cl, &dev_profile_info, &dev_profile_lut);
+
+  if(err == CL_SUCCESS)
+  {
+    double sum[4] = { 0.0 };
+    double count[4] = { 0.0 };
+    for_four_channels(c)
+    {
+      pick[DT_PICK_MIN][c] = FLT_MAX;
+      pick[DT_PICK_MAX][c] = -FLT_MAX;
+    }
+    for(size_t i = 0; i < n; i++)
+    {
+      const float *const s = stats + 16 * i;
+      for_four_channels(c)
+      {
+        sum[c] += s[c];
+        pick[DT_PICK_MIN][c] = MIN(pick[DT_PICK_MIN][c], s[4 + c]);
+        pick[DT_PICK_MAX][c] = MAX(pick[DT_PICK_MAX][c], s[8 + c]);
+        count[c] += s[12 + c];
+      }
+    }
+    // a mosaic averages each color over its own pixels
+    for_four_channels(c)
+      pick[DT_PICK_MEAN][c] = mosaic ? (count[c] > 0.0 ? sum[c] / count[c] : 0.0f)
+                                     : sum[c] / ((double)bw * bh);
+
+    dt_print(DT_DEBUG_PERF,
+             "dt_color_picker_helper_cl stats reading %u channels (filters %u) cst %d -> %d "
+             "size %d denoised %d took %.3f secs",
+             dsc->channels, dsc->filters, image_cst, picker_cst, bw * bh, denoise,
+             dt_get_lap_time(&start_time.clock));
+  }
+  else
+    dt_print(DT_DEBUG_OPENCL, "[dt_color_picker_helper_cl] couldn't reduce on the device: %s",
+             cl_errstr(err));
+
+  dt_free_align(stats);
+  return err == CL_SUCCESS;
+}
+#endif
 
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py

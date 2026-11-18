@@ -26,6 +26,8 @@
 #include "control/control.h"
 #include "develop/imageop.h"
 #include "develop/imageop_math.h"
+#include "develop/develop.h"
+#include "develop/frame.h"
 #include "develop/pixelpipe.h"
 
 #include <stdio.h>
@@ -67,29 +69,54 @@ static void _clear_lut_curves(dt_iop_order_iccprofile_info_t *const profile_info
   }
 }
 
+static void _transform_hdr_lcms(cmsHTRANSFORM xform,
+                                const float *const image_in,
+                                float *const image_out,
+                                const int width, const int height,
+                                const int hdr_from, const int hdr_to)
+{
+  size_t padded_size = 0;
+  float *scratchlines = hdr_from ? dt_alloc_perthread_float(4 * width, &padded_size) : NULL;
+  if(hdr_from && !scratchlines) return;
+  DT_OMP_FOR()
+  for(int y = 0; y < height; y++)
+  {
+    const size_t offset = (size_t)4 * y * width;
+    const float *in = image_in + offset;
+    float *const out = image_out + offset;
+    if(hdr_from)
+    {
+      float *const scratch = dt_get_perthread(scratchlines, padded_size);
+      for(int x = 0; x < width; x++)
+      {
+        copy_pixel(scratch + 4*x, in + 4*x);
+        dt_hdr_decode(scratch + 4*x, hdr_from);
+      }
+      in = scratch;
+    }
+    cmsDoTransform(xform, in, out, width);
+    if(hdr_to)
+      for(int x = 0; x < width; x++) dt_hdr_encode(out + 4*x, hdr_to);
+  }
+  dt_free_align(scratchlines);
+}
+
 static void _transform_from_to_rgb_lab_lcms2(const float *const image_in,
                                              float *const image_out,
                                              const int width,
                                              const int height,
-                                             const dt_colorspaces_color_profile_type_t type,
-                                             const char *filename,
-                                             const int intent,
+                                             const dt_iop_order_iccprofile_info_t *const profile_info,
                                              const int direction)
 {
-  const int ch = 4;
-  cmsHTRANSFORM *xform = NULL;
-  cmsHPROFILE *rgb_profile = NULL;
-  cmsHPROFILE *lab_profile = NULL;
-
-  if(type == DT_COLORSPACE_DISPLAY || type == DT_COLORSPACE_DISPLAY2)
-    pthread_rwlock_rdlock(&darktable.color_profiles->xprofile_lock);
+  cmsHTRANSFORM xform = NULL;
+  cmsHPROFILE rgb_profile = NULL;
+  cmsHPROFILE lab_profile = NULL;
+  const dt_colorspaces_color_profile_type_t type = profile_info->type;
+  const char *filename = profile_info->filename;
+  const int intent = profile_info->intent;
 
   if(type != DT_COLORSPACE_NONE)
-  {
-    const dt_colorspaces_color_profile_t *profile =
-      dt_colorspaces_get_profile(type, filename, DT_PROFILE_DIRECTION_ANY);
-    if(profile) rgb_profile = profile->profile;
-  }
+    rgb_profile = profile_info->profile;
   else
     rgb_profile = dt_colorspaces_get_profile(DT_COLORSPACE_LIN_REC2020, "",
                                              DT_PROFILE_DIRECTION_WORK)->profile;
@@ -117,10 +144,14 @@ static void _transform_from_to_rgb_lab_lcms2(const float *const image_in,
              filename);
   }
 
+  const int hdr = dt_colorspaces_hdr_transfer(type);
+  cmsHPROFILE linear = hdr ? dt_colorspaces_linearize_profile(rgb_profile) : NULL;
+  if(hdr) rgb_profile = linear;
+
   lab_profile = dt_colorspaces_get_profile(DT_COLORSPACE_LAB, "", DT_PROFILE_DIRECTION_ANY)->profile;
 
-  cmsHPROFILE *input_profile = NULL;
-  cmsHPROFILE *output_profile = NULL;
+  cmsHPROFILE input_profile = NULL;
+  cmsHPROFILE output_profile = NULL;
   cmsUInt32Number input_format = TYPE_RGBA_FLT;
   cmsUInt32Number output_format = TYPE_LabA_FLT;
 
@@ -139,27 +170,18 @@ static void _transform_from_to_rgb_lab_lcms2(const float *const image_in,
     output_format = TYPE_RGBA_FLT;
   }
 
-  xform = cmsCreateTransform(input_profile, input_format, output_profile, output_format, intent, 0);
-
-  if(type == DT_COLORSPACE_DISPLAY || type == DT_COLORSPACE_DISPLAY2)
-    pthread_rwlock_unlock(&darktable.color_profiles->xprofile_lock);
+  xform = cmsCreateTransform(input_profile, input_format, output_profile, output_format, intent, cmsFLAGS_COPY_ALPHA);
 
   if(xform)
-  {
-    DT_OMP_FOR()
-    for(int y = 0; y < height; y++)
-    {
-      const float *const in = image_in + y * width * ch;
-      float *const out = image_out + y * width * ch;
-
-      cmsDoTransform(xform, in, out, width);
-    }
-  }
+    _transform_hdr_lcms(xform, image_in, image_out, width, height,
+                        direction == 1 ? hdr : DT_HDR_NONE,
+                        direction == 1 ? DT_HDR_NONE : hdr);
   else
     dt_print(DT_DEBUG_ALWAYS,
              "[_transform_from_to_rgb_lab_lcms2] cannot create transform");
 
   if(xform) cmsDeleteTransform(xform);
+  dt_colorspaces_cleanup_profile(linear);
 }
 
 static void _transform_rgb_to_rgb_lcms2
@@ -167,28 +189,18 @@ static void _transform_rgb_to_rgb_lcms2
    float *const image_out,
    const int width,
    const int height,
-   const dt_colorspaces_color_profile_type_t type_from,
-   const char *filename_from,
-   const dt_colorspaces_color_profile_type_t type_to,
-   const char *filename_to,
+   const dt_iop_order_iccprofile_info_t *const profile_info_from,
+   const dt_iop_order_iccprofile_info_t *const profile_info_to,
    const int intent)
 {
-  cmsHTRANSFORM *xform = NULL;
-  cmsHPROFILE *from_rgb_profile = NULL;
-  cmsHPROFILE *to_rgb_profile = NULL;
-
-  if(type_from == DT_COLORSPACE_DISPLAY
-     || type_to == DT_COLORSPACE_DISPLAY
-     || type_from == DT_COLORSPACE_DISPLAY2
-     || type_to == DT_COLORSPACE_DISPLAY2)
-    pthread_rwlock_rdlock(&darktable.color_profiles->xprofile_lock);
+  cmsHTRANSFORM xform = NULL;
+  cmsHPROFILE from_rgb_profile = NULL;
+  cmsHPROFILE to_rgb_profile = NULL;
+  const dt_colorspaces_color_profile_type_t type_from = profile_info_from->type;
+  const dt_colorspaces_color_profile_type_t type_to = profile_info_to->type;
 
   if(type_from != DT_COLORSPACE_NONE)
-  {
-    const dt_colorspaces_color_profile_t *profile_from
-        = dt_colorspaces_get_profile(type_from, filename_from, DT_PROFILE_DIRECTION_ANY);
-    if(profile_from) from_rgb_profile = profile_from->profile;
-  }
+    from_rgb_profile = profile_info_from->profile;
   else
   {
     dt_print(DT_DEBUG_ALWAYS, "[_transform_rgb_to_rgb_lcms2] invalid *from profile* `%s`",
@@ -196,11 +208,7 @@ static void _transform_rgb_to_rgb_lcms2
   }
 
   if(type_to != DT_COLORSPACE_NONE)
-  {
-    const dt_colorspaces_color_profile_t *profile_to
-        = dt_colorspaces_get_profile(type_to, filename_to, DT_PROFILE_DIRECTION_ANY);
-    if(profile_to) to_rgb_profile = profile_to->profile;
-  }
+    to_rgb_profile = profile_info_to->profile;
   else
   {
     dt_print(DT_DEBUG_ALWAYS,
@@ -236,6 +244,13 @@ static void _transform_rgb_to_rgb_lcms2
     to_rgb_profile = NULL;
   }
 
+  const int hdr_from = dt_colorspaces_hdr_transfer(type_from);
+  const int hdr_to = dt_colorspaces_hdr_transfer(type_to);
+  cmsHPROFILE linear_from = hdr_from ? dt_colorspaces_linearize_profile(from_rgb_profile) : NULL;
+  cmsHPROFILE linear_to = hdr_to ? dt_colorspaces_linearize_profile(to_rgb_profile) : NULL;
+  if(hdr_from) from_rgb_profile = linear_from;
+  if(hdr_to) to_rgb_profile = linear_to;
+
   if(from_rgb_profile && to_rgb_profile && to_is_cmyk)  // softproofing cmyk profile
   {
     cmsHPROFILE tmp_rgb_profile = dt_colorspaces_get_profile(DT_COLORSPACE_LIN_REC2020, "", DT_PROFILE_DIRECTION_ANY)->profile;
@@ -249,28 +264,17 @@ static void _transform_rgb_to_rgb_lcms2
   }
   else if(from_rgb_profile && to_rgb_profile)
   {
-    xform = cmsCreateTransform(from_rgb_profile, TYPE_RGBA_FLT, to_rgb_profile, TYPE_RGBA_FLT, intent, 0);
+    xform = cmsCreateTransform(from_rgb_profile, TYPE_RGBA_FLT, to_rgb_profile, TYPE_RGBA_FLT, intent, cmsFLAGS_COPY_ALPHA);
   }
-
-  if(type_from == DT_COLORSPACE_DISPLAY
-     || type_to == DT_COLORSPACE_DISPLAY
-     || type_from == DT_COLORSPACE_DISPLAY2
-     || type_to == DT_COLORSPACE_DISPLAY2)
-    pthread_rwlock_unlock(&darktable.color_profiles->xprofile_lock);
 
   if(xform)
-  {
-    DT_OMP_FOR()
-    for(int y = 0; y < height; y++)
-    {
-      const size_t offset = 4 * y * width;
-      cmsDoTransform(xform, image_in + offset, image_out + offset, width);
-    }
-  }
+    _transform_hdr_lcms(xform, image_in, image_out, width, height, hdr_from, hdr_to);
   else
     dt_print(DT_DEBUG_ALWAYS, "[_transform_rgb_to_rgb_lcms2] cannot create transform");
 
   if(xform) cmsDeleteTransform(xform);
+  dt_colorspaces_cleanup_profile(linear_from);
+  dt_colorspaces_cleanup_profile(linear_to);
 }
 
 static void _transform_lcms2(struct dt_iop_module_t *self,
@@ -290,16 +294,14 @@ static void _transform_lcms2(struct dt_iop_module_t *self,
     dt_print(DT_DEBUG_DEV,
              "[_transform_lcms2] transfoming from RGB to Lab (%s %s)",
              self->op, self->multi_name);
-    _transform_from_to_rgb_lab_lcms2(image_in, image_out, width, height, profile_info->type,
-                                     profile_info->filename, profile_info->intent, 1);
+    _transform_from_to_rgb_lab_lcms2(image_in, image_out, width, height, profile_info, 1);
   }
   else if(cst_from == IOP_CS_LAB && cst_to == IOP_CS_RGB)
   {
     dt_print(DT_DEBUG_DEV,
              "[_transform_lcms2] transfoming from Lab to RGB (%s %s)",
              self->op, self->multi_name);
-    _transform_from_to_rgb_lab_lcms2(image_in, image_out, width, height, profile_info->type,
-                                     profile_info->filename, profile_info->intent, -1);
+    _transform_from_to_rgb_lab_lcms2(image_in, image_out, width, height, profile_info, -1);
   }
   else
   {
@@ -319,11 +321,7 @@ static inline void _transform_lcms2_rgb(const float *const image_in,
                                         const dt_iop_order_iccprofile_info_t *const profile_info_to)
 {
   _transform_rgb_to_rgb_lcms2(image_in, image_out, width, height,
-                              profile_info_from->type,
-                              profile_info_from->filename,
-                              profile_info_to->type,
-                              profile_info_to->filename,
-                              profile_info_to->intent);
+                              profile_info_from, profile_info_to, profile_info_to->intent);
 }
 
 
@@ -361,240 +359,60 @@ static inline int _init_unbounded_coeffs(float *const lutr,
 }
 
 
-static inline void _apply_tonecurves(const float *const image_in,
-                                     float *const image_out,
-                                     const int width,
-                                     const int height,
-                                     const float *const restrict lutr,
-                                     const float *const restrict lutg,
-                                     const float *const restrict lutb,
-                                     const float *const restrict unbounded_coeffsr,
-                                     const float *const restrict unbounded_coeffsg,
-                                     const float *const restrict unbounded_coeffsb,
-                                     const int lutsize)
-{
-  const int ch = 4;
-  const float *const lut[3] = { lutr, lutg, lutb };
-  const float *const unbounded_coeffs[3] =
-    { unbounded_coeffsr, unbounded_coeffsg, unbounded_coeffsb };
-  const size_t stride = (size_t)ch * width * height;
-
-  // do we have any lut to apply, or is this a linear profile?
-  if((lut[0][0] >= 0.0f)
-     && (lut[1][0] >= 0.0f)
-     && (lut[2][0] >= 0.0f))
-  {
-    DT_OMP_FOR(collapse(2))
-    for(size_t k = 0; k < stride; k += ch)
-    {
-      for(int c = 0; c < 3; c++) // for_each_channel doesn't
-                                 // vectorize, and some code needs
-                                 // image_out[3] preserved
-      {
-        image_out[k + c] = (image_in[k + c] < 1.0f)
-          ? extrapolate_lut(lut[c], image_in[k + c], lutsize)
-          : eval_exp(unbounded_coeffs[c], image_in[k + c]);
-      }
-    }
-  }
-  else if((lut[0][0] >= 0.0f)
-          || (lut[1][0] >= 0.0f)
-          || (lut[2][0] >= 0.0f))
-  {
-    DT_OMP_FOR(collapse(2))
-    for(size_t k = 0; k < stride; k += ch)
-    {
-      for(int c = 0; c < 3; c++) // for_each_channel doesn't
-                                 // vectorize, and some code needs
-                                 // image_out[3] preserved
-      {
-        if(lut[c][0] >= 0.0f)
-        {
-          image_out[k + c] = (image_in[k + c] < 1.0f)
-            ? extrapolate_lut(lut[c], image_in[k + c], lutsize)
-            : eval_exp(unbounded_coeffs[c], image_in[k + c]);
-        }
-      }
-    }
-  }
-}
-
-
 static inline void _transform_rgb_to_lab_matrix
-  (const float *const restrict image_in,
-   float *const restrict image_out,
-   const int width,
-   const int height,
+  (const float *const image_in, float *const image_out,
+   const int width, const int height,
    const dt_iop_order_iccprofile_info_t *const profile_info)
 {
-  const int ch = 4;
-  const size_t stride = (size_t)width * height * ch;
-  const dt_colormatrix_t *matrix_ptr = &profile_info->matrix_in_transposed;
-
-  if(profile_info->nonlinearlut)
+  const size_t npixels = (size_t)width * height;
+  DT_OMP_FOR()
+  for(size_t k = 0; k < npixels; k++)
   {
-    // TODO : maybe optimize that path like _transform_matrix_rgb
-    _apply_tonecurves(image_in, image_out, width, height,
-                      profile_info->lut_in[0],
-                      profile_info->lut_in[1],
-                      profile_info->lut_in[2],
-                      profile_info->unbounded_coeffs_in[0],
-                      profile_info->unbounded_coeffs_in[1],
-                      profile_info->unbounded_coeffs_in[2],
-                      profile_info->lutsize);
-
-    DT_OMP_FOR()
-    for(size_t y = 0; y < stride; y += ch)
-    {
-      float *const restrict in = DT_IS_ALIGNED_PIXEL(image_out + y);
-      dt_aligned_pixel_t xyz; // inited in _ioppr_linear_rgb_matrix_to_xyz()
-      dt_apply_transposed_color_matrix(in, *matrix_ptr, xyz);
-      dt_XYZ_to_Lab(xyz, in);
-    }
-  }
-  else
-  {
-    DT_OMP_FOR()
-    for(size_t y = 0; y < stride; y += ch)
-    {
-      const float *const restrict in = DT_IS_ALIGNED_PIXEL(image_in + y);
-      float *const restrict out = DT_IS_ALIGNED_PIXEL(image_out + y);
-
-      dt_aligned_pixel_t xyz; // inited in _ioppr_linear_rgb_matrix_to_xyz()
-      dt_apply_transposed_color_matrix(in, *matrix_ptr, xyz);
-      dt_XYZ_to_Lab(xyz, out);
-    }
+    dt_aligned_pixel_t rgb, xyz;
+    const float alpha = image_in[4*k+3];
+    dt_ioppr_decode_rgb(image_in + 4*k, rgb, profile_info);
+    dt_apply_transposed_color_matrix(rgb, profile_info->matrix_in_transposed, xyz);
+    dt_XYZ_to_Lab(xyz, image_out + 4*k);
+    image_out[4*k+3] = alpha;
   }
 }
-
 
 static inline void _transform_lab_to_rgb_matrix
-  (const float *const image_in,
-   float *const image_out,
-   const int width,
-   const int height,
+  (const float *const image_in, float *const image_out,
+   const int width, const int height,
    const dt_iop_order_iccprofile_info_t *const profile_info)
 {
-  const int ch = 4;
-  const size_t stride = (size_t)width * height * ch;
-  const dt_colormatrix_t *matrix_ptr = &profile_info->matrix_out_transposed;
-
+  const size_t npixels = (size_t)width * height;
   DT_OMP_FOR()
-  for(size_t y = 0; y < stride; y += ch)
+  for(size_t k = 0; k < npixels; k++)
   {
-    const float *const restrict in = DT_IS_ALIGNED_PIXEL(image_in + y);
-    float *const restrict out = DT_IS_ALIGNED_PIXEL(image_out + y);
-
-    dt_aligned_pixel_t xyz;
-    const float alpha = in[3];
-    // some code does in-place conversions and relies on alpha being preserved
-    dt_Lab_to_XYZ(in, xyz);
-    dt_apply_transposed_color_matrix(xyz, *matrix_ptr, out);
-    out[3] = alpha;
-  }
-
-  if(profile_info->nonlinearlut)
-  {
-    // TODO : maybe optimize that path like _transform_matrix_rgb
-    _apply_tonecurves(image_out, image_out, width, height,
-                      profile_info->lut_out[0],
-                      profile_info->lut_out[1],
-                      profile_info->lut_out[2],
-                      profile_info->unbounded_coeffs_out[0],
-                      profile_info->unbounded_coeffs_out[1],
-                      profile_info->unbounded_coeffs_out[2],
-                      profile_info->lutsize);
+    dt_aligned_pixel_t xyz, rgb;
+    const float alpha = image_in[4*k+3];
+    dt_Lab_to_XYZ(image_in + 4*k, xyz);
+    dt_apply_transposed_color_matrix(xyz, profile_info->matrix_out_transposed, rgb);
+    rgb[3] = alpha;
+    dt_ioppr_encode_rgb(rgb, image_out + 4*k, profile_info);
   }
 }
 
-
 static inline void _transform_matrix_rgb
-  (const float *const restrict image_in,
-   float *const restrict image_out,
-   const int width,
-   const int height,
+  (const float *const image_in, float *const image_out,
+   const int width, const int height,
    const dt_iop_order_iccprofile_info_t *const profile_info_from,
    const dt_iop_order_iccprofile_info_t *const profile_info_to)
 {
-  const size_t stride = (size_t)width * height * 4;
-
-  // RGB -> XYZ -> RGB are 2 matrices products, they can be premultiplied globally ahead
-  // and put in a new matrix. then we spare one matrix product per pixel.
-  dt_colormatrix_t _matrix;
-  dt_colormatrix_mul(_matrix, profile_info_to->matrix_out, profile_info_from->matrix_in);
-  dt_colormatrix_t matrix;
-  transpose_3xSSE(_matrix, matrix);
-
-  if(profile_info_from->nonlinearlut || profile_info_to->nonlinearlut)
+  const size_t npixels = (size_t)width * height;
+  dt_colormatrix_t product, matrix;
+  dt_colormatrix_mul(product, profile_info_to->matrix_out, profile_info_from->matrix_in);
+  transpose_3xSSE(product, matrix);
+  DT_OMP_FOR(shared(matrix))
+  for(size_t k = 0; k < npixels; k++)
   {
-    const int run_lut_in[3] DT_ALIGNED_PIXEL= { (profile_info_from->lut_in[0][0] >= 0.0f),
-                                                (profile_info_from->lut_in[1][0] >= 0.0f),
-                                                (profile_info_from->lut_in[2][0] >= 0.0f) };
-
-    const int run_lut_out[3] DT_ALIGNED_PIXEL = { (profile_info_to->lut_out[0][0] >= 0.0f),
-                                                  (profile_info_to->lut_out[1][0] >= 0.0f),
-                                                  (profile_info_to->lut_out[2][0] >= 0.0f) };
-
-    DT_OMP_FOR(shared(matrix))
-    for(size_t y = 0; y < stride; y += 4)
-    {
-      const float *const restrict in = DT_IS_ALIGNED_PIXEL(image_in + y);
-      float *const restrict out = DT_IS_ALIGNED_PIXEL(image_out + y);
-      dt_aligned_pixel_t rgb;
-
-      // linearize if non-linear input
-      if(profile_info_from->nonlinearlut)
-      {
-        for(size_t c = 0; c < 3; c++)
-        {
-          rgb[c] = (run_lut_in[c]
-                    ? ((in[c] < 1.0f)
-                       ? extrapolate_lut(profile_info_from->lut_in[c], in[c],
-                                         profile_info_from->lutsize)
-                       : eval_exp(profile_info_from->unbounded_coeffs_in[c], in[c]))
-                    : in[c]);
-        }
-      }
-      else
-      {
-        for_each_channel(c)
-          rgb[c] = in[c];
-      }
-
-      if(profile_info_to->nonlinearlut)
-      {
-        // convert color space
-        dt_aligned_pixel_t temp;
-        dt_apply_transposed_color_matrix(rgb, matrix, temp);
-
-        // de-linearize non-linear output
-        for(size_t c = 0; c < 3; c++)
-        {
-          out[c] = (run_lut_out[c]
-                    ? ((temp[c] < 1.0f)
-                       ? extrapolate_lut(profile_info_to->lut_out[c],
-                                         temp[c], profile_info_to->lutsize)
-                       : eval_exp(profile_info_to->unbounded_coeffs_out[c], temp[c]))
-                    : temp[c]);
-        }
-      }
-      else
-      {
-        // convert color space
-        dt_apply_transposed_color_matrix(rgb, matrix, out);
-      }
-    }
-  }
-  else
-  {
-    DT_OMP_FOR(shared(matrix))
-    for(size_t y = 0; y < stride; y += 4)
-    {
-      const float *const restrict in = DT_IS_ALIGNED_PIXEL(image_in + y);
-      float *const restrict out = DT_IS_ALIGNED_PIXEL(image_out + y);
-
-      dt_apply_transposed_color_matrix(in, matrix, out);
-    }
+    dt_aligned_pixel_t rgb, converted;
+    dt_ioppr_decode_rgb(image_in + 4*k, rgb, profile_info_from);
+    dt_apply_transposed_color_matrix(rgb, matrix, converted);
+    converted[3] = rgb[3];
+    dt_ioppr_encode_rgb(converted, image_out + 4*k, profile_info_to);
   }
 }
 
@@ -634,6 +452,7 @@ void dt_ioppr_init_profile_info(dt_iop_order_iccprofile_info_t *profile_info,
 {
   profile_info->type = DT_COLORSPACE_NONE;
   profile_info->filename[0] = '\0';
+  profile_info->profile = NULL;
   profile_info->intent = DT_INTENT_PERCEPTUAL;
   _mark_as_nonmatrix_profile(profile_info);
   profile_info->unbounded_coeffs_in[0][0] = profile_info->unbounded_coeffs_in[1][0]
@@ -662,14 +481,17 @@ void dt_ioppr_cleanup_profile_info(dt_iop_order_iccprofile_info_t *profile_info)
   }
 }
 
-/** generate the info for the profile (type, filename) if matrix can be retrieved from lcms2
+/** generate the info for the profile (type, filename) of this content if matrix can be
+ * retrieved from lcms2
  * it can be called multiple time between init and cleanup
  * return TRUE in case of an error
  */
 static gboolean _ioppr_generate_profile_info(dt_iop_order_iccprofile_info_t *profile_info,
                                              const int type,
                                              const char *filename,
-                                             const int intent)
+                                             cmsHPROFILE profile,
+                                             const int intent,
+                                             const gboolean check_file)
 {
   _mark_as_nonmatrix_profile(profile_info);
   _clear_lut_curves(profile_info);
@@ -677,7 +499,7 @@ static gboolean _ioppr_generate_profile_info(dt_iop_order_iccprofile_info_t *pro
   profile_info->nonlinearlut = 0;
   profile_info->grey = 0.1842f;
 
-  if(type == DT_COLORSPACE_FILE
+  if(type == DT_COLORSPACE_FILE && check_file
     && (!filename || !filename[0] || !g_file_test(filename, G_FILE_TEST_IS_REGULAR)))
   {
     dt_print(DT_DEBUG_PARAMS, "[generate_profile_info] icc profile '%s' not available",
@@ -687,16 +509,10 @@ static gboolean _ioppr_generate_profile_info(dt_iop_order_iccprofile_info_t *pro
 
   profile_info->type = type;
   g_strlcpy(profile_info->filename, filename, sizeof(profile_info->filename));
+  profile_info->profile = profile;
   profile_info->intent = intent;
 
-  const gboolean locking = type == DT_COLORSPACE_DISPLAY || type == DT_COLORSPACE_DISPLAY2;
-  if(locking)
-    pthread_rwlock_rdlock(&darktable.color_profiles->xprofile_lock);
-
-  const dt_colorspaces_color_profile_t *profile =
-    dt_colorspaces_get_profile(type, filename, DT_PROFILE_DIRECTION_ANY);
-
-  cmsHPROFILE *rgb_profile = profile ? profile->profile : NULL;;
+  cmsHPROFILE *rgb_profile = profile;
 
   cmsColorSpaceSignature rgb_profile_color_space = rgb_profile ? cmsGetColorSpace(rgb_profile) : 0;
 
@@ -756,11 +572,11 @@ static gboolean _ioppr_generate_profile_info(dt_iop_order_iccprofile_info_t *pro
      && profile_info->nonlinearlut)
   {
     const dt_aligned_pixel_t rgb = { 0.1842f, 0.1842f, 0.1842f };
-    profile_info->grey = dt_ioppr_get_rgb_matrix_luminance(rgb, profile_info->matrix_in,
-                                                           profile_info->lut_in,
-                                                           profile_info->unbounded_coeffs_in,
-                                                           profile_info->lutsize,
-                                                           profile_info->nonlinearlut);
+    dt_aligned_pixel_t linear;
+    dt_ioppr_decode_rgb(rgb, linear, profile_info);
+    profile_info->grey = profile_info->matrix_in[1][0] * linear[0]
+                      + profile_info->matrix_in[1][1] * linear[1]
+                      + profile_info->matrix_in[1][2] * linear[2];
   }
 
   if(type == DT_COLORSPACE_FILE)
@@ -773,23 +589,23 @@ static gboolean _ioppr_generate_profile_info(dt_iop_order_iccprofile_info_t *pro
       dt_is_valid_colormatrix(profile_info->matrix_in[0][0]) ? "" : " NO matrix provided",
       profile_info->nonlinearlut ? " nonlinearlut" : "");
 
-  if(locking) // all safe now
-    pthread_rwlock_unlock(&darktable.color_profiles->xprofile_lock);
-
   return FALSE;
 }
 
 dt_iop_order_iccprofile_info_t *
 dt_ioppr_get_profile_info_from_list(struct dt_develop_t *dev,
                                     const dt_colorspaces_color_profile_type_t profile_type,
-                                    const char *profile_filename)
+                                    const char *profile_filename,
+                                    cmsHPROFILE profile)
 {
   dt_iop_order_iccprofile_info_t *profile_info = NULL;
 
   for(GList *profiles = dev->allprofile_info; profiles; profiles = g_list_next(profiles))
   {
     dt_iop_order_iccprofile_info_t *prof = profiles->data;
-    if(prof->type == profile_type && strcmp(prof->filename, profile_filename) == 0)
+    if(prof->type == profile_type
+       && prof->profile == profile
+       && strcmp(prof->filename, profile_filename) == 0)
     {
       profile_info = prof;
       break;
@@ -799,30 +615,87 @@ dt_ioppr_get_profile_info_from_list(struct dt_develop_t *dev,
   return profile_info;
 }
 
+static dt_iop_order_iccprofile_info_t *
+_new_profile_info(const dt_colorspaces_color_profile_type_t profile_type,
+                  const char *profile_filename,
+                  cmsHPROFILE profile,
+                  const int intent,
+                  const gboolean check_file)
+{
+  dt_iop_order_iccprofile_info_t *profile_info =
+    dt_alloc1_align_type(dt_iop_order_iccprofile_info_t);
+  if(!profile_info) return NULL;
+  dt_ioppr_init_profile_info(profile_info, 0);
+  if(_ioppr_generate_profile_info(profile_info, profile_type, profile_filename, profile,
+                                  intent, check_file))
+  {
+    dt_ioppr_free_profile_info(profile_info);
+    return NULL;
+  }
+  return profile_info;
+}
+
+dt_iop_order_iccprofile_info_t *
+dt_ioppr_new_profile_info(const dt_colorspaces_color_profile_type_t profile_type,
+                          const char *profile_filename,
+                          cmsHPROFILE profile,
+                          const int intent)
+{
+  // the profile, read when the session started, outlives its file
+  return _new_profile_info(profile_type, profile_filename, profile, intent, !profile);
+}
+
+void dt_ioppr_free_profile_info(dt_iop_order_iccprofile_info_t *profile_info)
+{
+  if(!profile_info) return;
+  dt_ioppr_cleanup_profile_info(profile_info);
+  dt_free_align(profile_info);
+}
+
+static dt_iop_order_iccprofile_info_t *
+_add_profile_info(struct dt_develop_t *dev,
+                  const dt_colorspaces_color_profile_type_t profile_type,
+                  const char *profile_filename,
+                  cmsHPROFILE profile,
+                  const int intent)
+{
+  dt_iop_order_iccprofile_info_t *profile_info =
+    dt_ioppr_get_profile_info_from_list(dev, profile_type, profile_filename, profile);
+  if(profile_info == NULL)
+  {
+    profile_info = _new_profile_info(profile_type, profile_filename, profile, intent, TRUE);
+    if(profile_info)
+      dev->allprofile_info = g_list_append(dev->allprofile_info, profile_info);
+  }
+  return profile_info;
+}
+
 dt_iop_order_iccprofile_info_t *
 dt_ioppr_add_profile_info_to_list(struct dt_develop_t *dev,
                                   const dt_colorspaces_color_profile_type_t profile_type,
                                   const char *profile_filename,
                                   const int intent)
 {
-  dt_iop_order_iccprofile_info_t *profile_info =
-    dt_ioppr_get_profile_info_from_list(dev, profile_type, profile_filename);
-  if(profile_info == NULL)
-  {
-    profile_info = dt_alloc1_align_type(dt_iop_order_iccprofile_info_t);
-    dt_ioppr_init_profile_info(profile_info, 0);
-    if(!_ioppr_generate_profile_info(profile_info, profile_type, profile_filename, intent))
-    {
-      dev->allprofile_info = g_list_append(dev->allprofile_info, profile_info);
-    }
-    else
-    {
-      dt_ioppr_cleanup_profile_info(profile_info);
-      dt_free_align(profile_info);
-      profile_info = NULL;
-    }
-  }
-  return profile_info;
+  const gboolean display = dt_colorspaces_replaced_in_session(profile_type);
+  if(display) pthread_rwlock_rdlock(&darktable.color_profiles->xprofile_lock);
+  const dt_colorspaces_color_profile_t *entry =
+    dt_colorspaces_get_profile(profile_type, profile_filename, DT_PROFILE_DIRECTION_ANY);
+  cmsHPROFILE profile = entry ? entry->profile : NULL;
+  if(display) pthread_rwlock_unlock(&darktable.color_profiles->xprofile_lock);
+
+  return _add_profile_info(dev, profile_type, profile_filename, profile, intent);
+}
+
+dt_iop_order_iccprofile_info_t *
+dt_ioppr_add_profile_info_for_content(struct dt_develop_t *dev,
+                                      const dt_colorspaces_color_profile_type_t profile_type,
+                                      const char *profile_filename,
+                                      cmsHPROFILE profile,
+                                      const int intent)
+{
+  if(!dt_colorspaces_replaced_in_session(profile_type))
+    return dt_ioppr_add_profile_info_to_list(dev, profile_type, profile_filename, intent);
+  return _add_profile_info(dev, profile_type, profile_filename, profile, intent);
 }
 
 dt_iop_order_iccprofile_info_t *dt_ioppr_get_iop_work_profile_info(const struct dt_iop_module_t *module,
@@ -937,8 +810,10 @@ dt_ioppr_set_pipe_input_profile_info(struct dt_develop_t *dev,
     dt_image_cache_write_release_info(wimg, DT_IMAGE_CACHE_RELAXED, NULL);
   }
 
-  if(ptype >= DT_COLORSPACE_EMBEDDED_ICC
-     && ptype <= DT_COLORSPACE_ALTERNATE_MATRIX)
+  if((ptype >= DT_COLORSPACE_EMBEDDED_ICC
+      && ptype <= DT_COLORSPACE_ALTERNATE_MATRIX)
+     || ptype == DT_COLORSPACE_FORWARD_MATRIX
+     || ptype == DT_COLORSPACE_DNG_LOOK)
   {
     /* We have a camera input matrix, these are not generated from files but in colorin,
     * so we need to fetch and replace them from somewhere.
@@ -953,15 +828,45 @@ dt_ioppr_set_pipe_input_profile_info(struct dt_develop_t *dev,
   return profile_info;
 }
 
+// per thread, so that an export job keeps the peak it was started with
+// without writing the setting shared with the export module and the darkroom
+static __thread int _thread_pq_peak_nits = 0;
+
+void dt_ioppr_set_thread_pq_peak_nits(const int nits)
+{
+  _thread_pq_peak_nits = nits;
+}
+
+float dt_ioppr_profile_headroom(const dt_colorspaces_color_profile_type_t type)
+{
+  switch(dt_colorspaces_hdr_transfer(type))
+  {
+    case DT_HDR_PQ:
+    {
+      const int nits = _thread_pq_peak_nits > 0
+        ? _thread_pq_peak_nits
+        : dt_conf_get_int("plugins/lighttable/export/pq_peak_nits");
+      return fmaxf(1.0f, nits / DT_HDR_REFERENCE_WHITE_NITS);
+    }
+    case DT_HDR_HLG_REC2020:
+    case DT_HDR_HLG_P3:
+      // colorout's OOTF clips HLG at the nominal 1000 nit display
+      return DT_HDR_HLG_PEAK_NITS / DT_HDR_REFERENCE_WHITE_NITS;
+    default:
+      return 1.0f;
+  }
+}
+
 dt_iop_order_iccprofile_info_t *
 dt_ioppr_set_pipe_output_profile_info(struct dt_develop_t *dev,
                                       struct dt_dev_pixelpipe_t *pipe,
                                       const dt_colorspaces_color_profile_type_t type,
                                       const char *filename,
+                                      cmsHPROFILE profile,
                                       const int intent)
 {
   dt_iop_order_iccprofile_info_t *profile_info =
-    dt_ioppr_add_profile_info_to_list(dev, type, filename, intent);
+    dt_ioppr_add_profile_info_for_content(dev, type, filename, profile, intent);
 
   if(!profile_info && dt_pipe_is_preview(pipe) && (type == DT_COLORSPACE_FILE))
     dt_control_log(_("output icc profile '%s' missing"), filename);
@@ -998,13 +903,38 @@ dt_ioppr_set_pipe_export_profile_info(struct dt_develop_t *dev,
   return profile_info;
 }
 
-dt_iop_order_iccprofile_info_t *dt_ioppr_get_histogram_profile_info(struct dt_develop_t *dev)
+dt_iop_order_iccprofile_info_t *dt_ioppr_get_scope_profile_info(struct dt_develop_t *dev,
+                                                                const dt_color_encoding_t *rendered)
 {
+  // in proof mode the scopes show what the preview pipe rendered: the
+  // proof profile, sRGB where colorout replaced a missing or unusable one,
+  // and the window's output for an ink proof, which is proofed already
+  if(darktable.color_profiles->mode != DT_PROFILE_NORMAL
+     && rendered && rendered->type != DT_COLORSPACE_NONE)
+    return dt_ioppr_add_profile_info_for_content(dev, rendered->type, rendered->filename,
+                                                 rendered->profile,
+                                                 DT_INTENT_RELATIVE_COLORIMETRIC);
+
   dt_colorspaces_color_profile_type_t histogram_profile_type;
   const char *histogram_profile_filename;
   dt_ioppr_get_histogram_profile_type(&histogram_profile_type, &histogram_profile_filename);
   return dt_ioppr_add_profile_info_to_list(dev, histogram_profile_type, histogram_profile_filename,
                                            DT_INTENT_RELATIVE_COLORIMETRIC);
+}
+
+dt_iop_order_iccprofile_info_t *dt_ioppr_get_histogram_profile_info(struct dt_develop_t *dev)
+{
+  // the encoding of the preview's last frame, which the pickers' samples
+  // and the scopes were made from; none before the preview has run
+  dt_color_encoding_t rendered = { .type = DT_COLORSPACE_NONE };
+  dt_dev_pixelpipe_t *const preview = dev ? dev->preview_pipe : NULL;
+  if(darktable.color_profiles->mode != DT_PROFILE_NORMAL && preview)
+  {
+    dt_frame_t *frame = dt_dev_pixelpipe_frame(preview);
+    if(frame) rendered = *dt_frame_encoding(frame);
+    dt_frame_unref(frame);
+  }
+  return dt_ioppr_get_scope_profile_info(dev, &rendered);
 }
 
 dt_iop_order_iccprofile_info_t *dt_ioppr_get_pipe_work_profile_info(const struct dt_dev_pixelpipe_t *pipe)
@@ -1020,6 +950,23 @@ dt_iop_order_iccprofile_info_t *dt_ioppr_get_pipe_input_profile_info(const struc
 dt_iop_order_iccprofile_info_t *dt_ioppr_get_pipe_output_profile_info(const struct dt_dev_pixelpipe_t *pipe)
 {
   return pipe->output_profile_info;
+}
+
+dt_iop_order_iccprofile_info_t *dt_ioppr_get_gui_profile_info(struct dt_develop_t *dev)
+{
+  dt_display_output_t output;
+  dt_colorspaces_get_display_output(DT_COLORSPACE_DISPLAY, &output);
+  const dt_color_encoding_t *device = &output.device;
+  dt_iop_order_iccprofile_info_t *info =
+    dt_ioppr_add_profile_info_for_content(dev, device->type, device->filename, device->profile,
+                                          device->intent);
+  // module GUIs compute with matrices: a profile without them is shown as
+  // sRGB, as master's output profile info stood in for it
+  if(!info
+     || !dt_is_valid_colormatrix(info->matrix_in[0][0])
+     || !dt_is_valid_colormatrix(info->matrix_out[0][0]))
+    info = dt_ioppr_add_profile_info_to_list(dev, DT_COLORSPACE_SRGB, "", device->intent);
+  return info;
 }
 
 dt_iop_order_iccprofile_info_t *dt_ioppr_get_pipe_current_profile_info(const dt_iop_module_t *module,
@@ -1086,6 +1033,12 @@ void dt_ioppr_get_work_profile_type(struct dt_develop_t *dev,
     char *_filename = colorin_so->get_p(colorin->params, "filename_work");
     if(_type && _filename)
     {
+      // stored params need not terminate the file name, and callers read it as
+      // a C string. Terminate it rather than returning NULL: the histogram
+      // profile path hands the name to strcmp() in
+      // dt_ioppr_get_profile_info_from_list() without a NULL check
+      const size_t size = colorin_so->get_f("filename_work")->header.size;
+      if(!memchr(_filename, '\0', size)) _filename[size - 1] = '\0';
       *profile_type = *_type;
       *profile_filename = _filename;
     }
@@ -1138,6 +1091,10 @@ void dt_ioppr_get_export_profile_type(struct dt_develop_t *dev,
     char *_filename = colorout_so->get_p(colorout->params, "filename");
     if(_type && _filename)
     {
+      // stored params need not terminate the file name; see
+      // dt_ioppr_get_work_profile_type()
+      const size_t size = colorout_so->get_f("filename")->header.size;
+      if(!memchr(_filename, '\0', size)) _filename[size - 1] = '\0';
       *profile_type = *_type;
       *profile_filename = _filename;
     }
@@ -1153,11 +1110,7 @@ void dt_ioppr_get_export_profile_type(struct dt_develop_t *dev,
 void dt_ioppr_get_histogram_profile_type(dt_colorspaces_color_profile_type_t *profile_type,
                                          const char **profile_filename)
 {
-  const dt_colorspaces_color_mode_t mode = darktable.color_profiles->mode;
-
-  // if in gamut check use soft proof
-  if(mode != DT_PROFILE_NORMAL
-     || darktable.color_profiles->histogram_type == DT_COLORSPACE_SOFTPROOF)
+  if(darktable.color_profiles->histogram_type == DT_COLORSPACE_SOFTPROOF)
   {
     *profile_type = darktable.color_profiles->softproof_type;
     *profile_filename = darktable.color_profiles->softproof_filename;
@@ -1278,10 +1231,22 @@ void dt_ioppr_transform_image_colorspace(struct dt_iop_module_t *self,
 }
 
 
+// the rule of dt_color_encoding_same_content(). an info without a
+// profile, such as a camera matrix, is named by type and file name only
+static inline gboolean _same_content(const dt_iop_order_iccprofile_info_t *const a,
+                                     const dt_iop_order_iccprofile_info_t *const b)
+{
+  if(a->profile || b->profile)
+    return a->profile == b->profile
+      && dt_colorspaces_hdr_transfer(a->type) == dt_colorspaces_hdr_transfer(b->type);
+  return a->type == b->type
+    && !strcmp(a->filename, b->filename);
+}
+
 __DT_CLONE_TARGETS__
 void dt_ioppr_transform_image_colorspace_rgb
-  (const float *const restrict image_in,
-   float *const restrict image_out,
+  (const float *const image_in,
+   float *const image_out,
    const int width,
    const int height,
    const dt_iop_order_iccprofile_info_t *const profile_info_from,
@@ -1298,8 +1263,7 @@ void dt_ioppr_transform_image_colorspace_rgb
     return;
   }
 
-  if(profile_info_from->type == profile_info_to->type
-     && strcmp(profile_info_from->filename, profile_info_to->filename) == 0)
+  if(_same_content(profile_info_from, profile_info_to))
   {
     if(image_in != image_out)
       dt_iop_image_copy_by_size(image_out, image_in, width, height, 4);
@@ -1334,6 +1298,29 @@ void dt_ioppr_transform_image_colorspace_rgb
              dt_get_lap_time(&start_time.clock),
              dt_get_lap_utime(&start_time.user),
              message ? message : "");
+}
+
+void dt_ioppr_device_to_output(struct dt_develop_t *dev,
+                               const struct dt_dev_pixelpipe_t *pipe,
+                               float *const rgb,
+                               const int width,
+                               const int height)
+{
+  const dt_color_encoding_t *device = &pipe->output.device;
+  const dt_color_encoding_t *image = &pipe->output_encoding;
+  if(device->type == DT_COLORSPACE_NONE || image->type == DT_COLORSPACE_NONE
+     || dt_color_encoding_same_content(device, image))
+    return;
+
+  const dt_iop_order_iccprofile_info_t *from =
+    dt_ioppr_add_profile_info_for_content(dev, device->type, device->filename,
+                                          device->profile, image->intent);
+  const dt_iop_order_iccprofile_info_t *to =
+    dt_ioppr_add_profile_info_for_content(dev, image->type, image->filename,
+                                          image->profile, image->intent);
+  if(from && to)
+    dt_ioppr_transform_image_colorspace_rgb(rgb, rgb, width, height, from, to,
+                                            "device values");
 }
 
 #ifdef HAVE_OPENCL
@@ -1386,6 +1373,7 @@ static void _ioppr_get_profile_info_cl(const dt_iop_order_iccprofile_info_t *con
   }
   profile_info_cl->nonlinearlut = profile_info->nonlinearlut;
   profile_info_cl->grey = profile_info->grey;
+  profile_info_cl->hdr_transfer = dt_colorspaces_hdr_transfer(profile_info->type);
 }
 
 // returns the profile_info trc to be used as a parameter when calling opencl
@@ -1481,6 +1469,55 @@ void dt_ioppr_free_iccprofile_params_cl(dt_colorspaces_iccprofile_info_cl_t **_p
   *_profile_lut_cl = NULL;
   *_dev_profile_info = NULL;
   *_dev_profile_lut = NULL;
+}
+
+/** Converts an image whose source and target are the same buffer.
+
+    The conversion kernels take their source as read_only and their target as write_only,
+    and OpenCL leaves the result undefined when one image object is bound as both (see
+    clSetKernelArg). Rather than converting a buffer onto itself, this allocates a second
+    image, converts into it, and hands it back in place of the original, which is then
+    released. Callers therefore end up with converted contents in a different object.
+
+    Peak use is two images for the duration of the call, so callers close to the device
+    memory limit should account for the extra one.
+
+    On failure the original buffer is left untouched and still owned by the caller. */
+gboolean dt_ioppr_transform_image_colorspace_replace_cl
+  (struct dt_iop_module_t *self,
+   const int devid,
+   cl_mem *dev_img,
+   const int width,
+   const int height,
+   const dt_iop_colorspace_type_t cst_from,
+   const dt_iop_colorspace_type_t cst_to,
+   dt_iop_colorspace_type_t *converted_cst,
+   const dt_iop_order_iccprofile_info_t *const profile_info)
+{
+  if(dev_img == NULL || *dev_img == NULL) return FALSE;
+
+  // Nothing to do, and no reason to spend an allocation on it.
+  if(cst_from == cst_to)
+  {
+    *converted_cst = cst_to;
+    return TRUE;
+  }
+
+  cl_mem replacement = dt_opencl_alloc_device(devid, width, height, 4 * sizeof(float));
+  if(replacement == NULL) return FALSE;
+
+  const gboolean ok = dt_ioppr_transform_image_colorspace_cl(self, devid, *dev_img, replacement,
+                                                             width, height, cst_from, cst_to,
+                                                             converted_cst, profile_info);
+  if(!ok)
+  {
+    dt_opencl_release_mem_object(replacement);
+    return FALSE;
+  }
+
+  dt_opencl_release_mem_object(*dev_img);
+  *dev_img = replacement;
+  return TRUE;
 }
 
 gboolean dt_ioppr_transform_image_colorspace_cl(struct dt_iop_module_t *self,
@@ -1656,8 +1693,7 @@ gboolean dt_ioppr_transform_image_colorspace_rgb_cl
 
   const size_t region[2] = { width, height };
 
-  if(profile_info_from->type == profile_info_to->type
-     && strcmp(profile_info_from->filename, profile_info_to->filename) == 0)
+  if(_same_content(profile_info_from, profile_info_to))
   {
     if(dev_img_in != dev_img_out)
     {

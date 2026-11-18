@@ -50,10 +50,7 @@ dt_undo_t *dt_undo_init(void)
   udata->redo_list = NULL;
   udata->disable_next = FALSE;
 
-  pthread_mutexattr_t recursive_locking;
-  pthread_mutexattr_init(&recursive_locking);
-  pthread_mutexattr_settype(&recursive_locking, PTHREAD_MUTEX_RECURSIVE);
-  dt_pthread_mutex_init(&udata->mutex, &recursive_locking);
+  dt_pthread_recursive_mutex_init(&udata->mutex);
 
   udata->group = DT_UNDO_NONE;
   udata->group_indent = 0;
@@ -206,12 +203,15 @@ static void _undo_do_undo_redo(dt_undo_t *self,
            g_list_length(*from),
            g_list_length(*to));
 
+  gboolean found = FALSE;
+
   for(GList *l = *from; l; l = g_list_next(l))
   {
     dt_undo_item_t *item = l->data;
 
-    if(item->type & filter)
-    {
+    if (item->type & filter) {
+      found = TRUE;
+
       if(item->is_group)
       {
         gboolean is_group = FALSE;
@@ -274,6 +274,11 @@ static void _undo_do_undo_redo(dt_undo_t *self,
     }
   }
   UNLOCK;
+
+  if(!found)
+  {
+    dt_control_log(_("end of the undo/redo list reached"));
+  }
 
   if(imgs)
   {

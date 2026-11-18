@@ -1,0 +1,11 @@
+--- a/src/iop/temperature.c
++++ b/src/iop/temperature.c
+@@ -830,6 +830,8 @@
+   free(piece->data);
+   piece->data = NULL;
+ }
++
++#include "mobile/adapters/iop/temperature.inc"
+ 
+ static int _generate_preset_combo(dt_iop_module_t *self)
+ {

@@ -15,6 +15,7 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
+
 #include "common/gdk_event_utils.h"
 
 #include "bauhaus/bauhaus.h"
@@ -629,7 +630,7 @@ void process(dt_iop_module_t *self,
       data->coeff_b[num_patches+3], 0.0f };
 
   DT_OMP_FOR()
-  for(int k=0; k < npixels; k++)
+  for(size_t k=0; k < npixels; k++)
   {
     dt_aligned_pixel_t inpx;
     copy_pixel(inpx, ((float *)ivoid) + 4*k);
@@ -732,7 +733,8 @@ void commit_params(dt_iop_module_t *self,
   dt_iop_colorchecker_params_t *p = (dt_iop_colorchecker_params_t *)p1;
   dt_iop_colorchecker_data_t *d = piece->data;
 
-  d->num_patches = MIN(MAX_PATCHES, p->num_patches);
+  // the stored count indexes the fixed patch arrays and sizes the processing buffers
+  d->num_patches = CLAMP(p->num_patches, 0, MAX_PATCHES);
   const unsigned N = MAX(0, d->num_patches);
   const unsigned N4 = N + 4;
 
@@ -980,7 +982,7 @@ void gui_reset(dt_iop_module_t *self)
   dt_iop_color_picker_reset(self, TRUE);
 }
 
-void _colorchecker_rebuild_patch_list(dt_iop_module_t *self)
+static void _colorchecker_rebuild_patch_list(dt_iop_module_t *self)
 {
   dt_iop_colorchecker_params_t *p = self->params;
   dt_iop_colorchecker_gui_data_t *g = self->gui_data;
@@ -1007,7 +1009,7 @@ void _colorchecker_rebuild_patch_list(dt_iop_module_t *self)
   }
 }
 
-void _colorchecker_update_sliders(dt_iop_module_t *self)
+static void _colorchecker_update_sliders(dt_iop_module_t *self)
 {
   dt_iop_colorchecker_params_t *p = self->params;
   dt_iop_colorchecker_gui_data_t *g = self->gui_data;
@@ -1047,6 +1049,10 @@ void _colorchecker_update_sliders(dt_iop_module_t *self)
 void gui_update(dt_iop_module_t *self)
 {
   dt_iop_colorchecker_gui_data_t *g = self->gui_data;
+  dt_iop_colorchecker_params_t *p = self->params;
+
+  // the GUI handlers use the stored count directly
+  p->num_patches = CLAMP(p->num_patches, 0, MAX_PATCHES);
 
   _colorchecker_rebuild_patch_list(self);
   _colorchecker_update_sliders(self);

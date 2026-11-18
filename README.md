@@ -14,28 +14,28 @@ darktable is **not** a free Adobe® Lightroom® replacement.
 1. [Documentation](#documentation)
 2. [Website](#website)
 3. [Requirements](#requirements)
-   - [Supported platforms](#supported-platforms)
-   - [Hardware](#hardware)
-   - [AI features (optional)](#ai-features-optional )
+    - [Supported platforms](#supported-platforms)
+    - [Hardware](#hardware)
+    - [AI features (optional)](#ai-features-optional )
 4. [Installing](#installing)
-   - [Latest release](#latest-release)
-   - [Development snapshot](#development-snapshot)
+    - [Latest release](#latest-release)
+    - [Development snapshot](#development-snapshot)
 5. [Updating from older versions](#updating-from-older-versions)
 6. [Obtaining extensions](#obtaining-extensions)
 7. [Building](#building)
-   - [Dependencies](#dependencies)
-   - [Get the source](#get-the-source)
-   - [Get submodules](#get-submodules)
-   - [Compile](#compile)
-   - [Further reading](#further-reading)
+    - [Dependencies](#dependencies)
+    - [Get the source](#get-the-source)
+    - [Get submodules](#get-submodules)
+    - [Compile](#compile)
+    - [Further reading](#further-reading)
 8. [Using](#using)
-   - [Test/unstable version](#testunstable-version)
-   - [Regular/stable version](#regularstable-version)
+    - [Test/unstable version](#testunstable-version)
+    - [Regular/stable version](#regularstable-version)
 9. [Contributing](#contributing)
 10. [FAQ](#faq)
-   - [Why is my camera not detected when plugged-in ?](#why-is-my-camera-not-detected-when-plugged-in-)
-   - [Why is my lens not detected/corrected in darkroom ?](#why-is-my-lens-not-detectedcorrected-in-darkroom-)
-   - [Why do the thumbnails in the lighttable view look different to the preview in the darkroom view ?](#why-do-the-thumbnails-in-the-lighttable-view-look-different-to-the-preview-in-the-darkroom-view-)
+    - [Why is my camera not detected when plugged-in ?](#why-is-my-camera-not-detected-when-plugged-in-)
+    - [Why is my lens not detected/corrected in darkroom ?](#why-is-my-lens-not-detectedcorrected-in-darkroom-)
+    - [Why do the thumbnails in the lighttable view look different to the preview in the darkroom view ?](#why-do-the-thumbnails-in-the-lighttable-view-look-different-to-the-preview-in-the-darkroom-view-)
 11. [Wiki](#wiki)
 12. [Community](#community)
 
@@ -61,8 +61,7 @@ Requirements
 * NetBSD
 * OpenBSD
 * Windows 10 and later
-* Apple Silicon Macs running macOS 14 and later
-* Intel Macs running macOS 15 and later
+* Apple Silicon Macs running macOS 15 and later
 
 *Big-endian platforms are not supported.*
 
@@ -155,13 +154,14 @@ you can build the software yourself following the instructions [below](#building
 
 ### Latest release
 
-5.6.0 (stable)
+5.6.2 (stable)
 
-* [Download package for Windows](https://github.com/darktable-org/darktable/releases/download/release-5.6.0/darktable-5.6.0-win64.exe)
-* [Download disk image for macOS on Apple Silicon](https://github.com/darktable-org/darktable/releases/download/release-5.6.0/darktable-5.6.0-arm64.dmg)
-* [Download disk image for macOS on Intel](https://github.com/darktable-org/darktable/releases/download/release-5.6.0/darktable-5.6.0-x86_64.dmg)
-* [Download AppImage for Linux](https://github.com/darktable-org/darktable/releases/download/release-5.6.0/Darktable-5.6.0-x86_64.AppImage)
-* [Install native packages or add a third-party repository for Linux distros](https://software.opensuse.org/download.html?project=graphics:darktable:stable&package=darktable)
+* [Download package for Windows](https://github.com/darktable-org/darktable/releases/download/release-5.6.2/darktable-5.6.2-win64.exe)
+* [Download package for Windows on Arm](https://github.com/darktable-org/darktable/releases/download/release-5.6.2/darktable-5.6.2-woa64.exe)
+* [Download disk image for macOS on Apple Silicon](https://github.com/darktable-org/darktable/releases/download/release-5.6.2/darktable-5.6.2-arm64.dmg)
+* [Download AppImage for Linux](https://github.com/darktable-org/darktable/releases/download/release-5.6.2/Darktable-5.6.2-x86_64.AppImage)
+* [Download AppImage for Linux on ARM64](https://github.com/darktable-org/darktable/releases/download/release-5.6.2/Darktable-5.6.2-aarch64.AppImage)
+* [Install native packages or add a third-party repository for Linux distros](https://software.opensuse.org/download.html?project=graphics:darktable&package=darktable)
 * [Install Flatpak package for Linux](https://flathub.org/apps/details/org.darktable.Darktable)
 * [More information about installing darktable on any system](https://www.darktable.org/install/)
 
@@ -239,6 +239,7 @@ Required dependencies (minimum version):
 * Exiv2 0.27.2 *(but at least 0.27.4 built with ISO BMFF support needed for Canon CR3 raw import)*
 * potrace 1.16
 * pugixml 1.8
+* libarchive 3.8.5 *(for the `.dtdata` sidecar; also used for AI models download)*
 
 Required dependencies (no version requirement):
 * Lensfun *(for automatic lens correction)* (Note: alpha 0.3.95 and git master branch are not supported)
@@ -256,10 +257,11 @@ Optional dependencies (minimum version):
 * Imath 3.1.0 *(for 16-bit "half" float TIFF export and faster import)*
 * libavif 0.9.3 *(for AVIF import & export)*
 * ONNX Runtime 1.18 *(for AI inference)*
-* libarchive 3.8.5 *(for AI models download)*
 * libheif 1.13.0 *(for HEIF import & export; also for AVIF import if no libavif)*
 * libjxl 0.7.0 *(for JPEG XL import & export)*
 * WebP 0.3.0 *(for WebP import & export)*
+* libwayland-client 1.20 *(for wide gamut and HDR display on Wayland)*
+* OpenCV 4 or 5 — only a few modules: core, imgproc, flann plus features2d and calib3d (OpenCV 4) or features and geometry (OpenCV 5) *(for HDR exposure-bracket auto-alignment)*
 
 Optional dependencies (no version requirement):
 * colord, Xatom *(for fetching the system display color profile)*
@@ -326,7 +328,7 @@ After backing up your `~/.config/darktable` directory and the sidecar .XMP files
 with the master branch, you may obtain the source as follows:
 
 ```bash
-git clone --recurse-submodules --depth 1 https://github.com/darktable-org/darktable.git
+git clone --recurse-submodules https://github.com/darktable-org/darktable.git
 cd darktable
 ```
 
@@ -334,17 +336,17 @@ See below (in "Using") how to start a test install of the unstable version witho
 
 #### Latest stable release
 
-5.6.0
+5.6.2
 
 The darktable project releases two major versions every year, on Summer and Winter Solstices, tagged with even numbers (e.g. 4.2, 4.4, 4.6, 4.8).
 Minor revisions are tagged with a third digit (e.g. 4.4.1, 4.4.2) and mostly provide bug fixes and camera support.
 You may want to compile these stable releases yourself to get better performance for your particular computer:
 
 ```bash
-git clone --recurse-submodules --depth 1 https://github.com/darktable-org/darktable.git
+git clone --recurse-submodules https://github.com/darktable-org/darktable.git
 cd darktable
 git fetch --tags
-git checkout tags/release-5.6.0
+git checkout tags/release-5.6.2
 ```
 
 ### Get submodules
@@ -384,13 +386,16 @@ This builds the software for your architecture only, with:
 * OpenCL support (GPU offloading) if detected,
 * Lua scripting support if detected.
 
-If you want to have dartkable displayed along your other applications, you only need to add a symbolic link:
+#### System Integration / fixing missing icon on wayland
+
+To display darktable alongside your installed applications, and to ensure darktable's application icon is displayed in wayland sessions, add these two symbolic links:
 
 ```bash
-ln -s /opt/darktable/share/applications/org.darktable.darktable.desktop /usr/share/applications/org.darktable.darktable.desktop
+sudo ln -s /opt/darktable/share/applications/org.darktable.darktable.desktop /usr/share/applications/org.darktable.darktable.desktop
+sudo ln -s /opt/darktable/share/icons/hicolor/scalable/apps/darktable.svg /usr/share/pixmaps/darktable.svg
 ```
 
-Now, your custom-built darktable is ready to be used just like any pre-packaged software.
+Signing out and into your session may be required for this to take effect.
 
 #### Manual way
 
@@ -442,6 +447,8 @@ If you experience crashes at startup, try launching darktable from a terminal wi
 ### Further reading
 
 There is a comprehensive list of build instructions for [Ubuntu/Debian related distributions](https://github.com/darktable-org/darktable/wiki/Build-instructions-for-Ubuntu) or for [Fedora and related distributions](https://github.com/darktable-org/darktable/wiki/Build-Instructions-for-Fedora). These build instructions can be easily adapted to many other Linux distributions.
+
+For contributors who prefer a **container-based build environment** that mirrors CI, see [.devcontainer/README.md](.devcontainer/README.md). It works with Docker or Podman alone (no IDE required), or with any [Dev Container-compatible IDE](https://containers.dev/supporting). This is particularly useful on immutable/atomic Linux systems, for infrequent contributors, or when reproducing a CI failure locally.
 
 
 Contributing

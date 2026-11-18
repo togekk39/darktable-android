@@ -31,7 +31,6 @@
 #include "imageio/imageio_common.h"
 #include "views/view.h"
 
-#include <assert.h>
 #include <gdk/gdkkeysyms.h>
 #include <glib/gstdio.h>
 #include <lcms2.h>
@@ -111,7 +110,10 @@ const dt_action_def_t dt_action_def_modifiers
 
 void dt_control_init(const gboolean withgui)
 {
-  dt_control_t *s = darktable.control = calloc(1, sizeof(dt_control_t));
+  // dt_init() has already allocated it, before opening the database;
+  // allocating again here dropped that block
+  dt_control_t *s = darktable.control;
+  if(!s) s = darktable.control = calloc(1, sizeof(dt_control_t));
   dt_atomic_set_int(&s->running, DT_CONTROL_STATE_DISABLED);
 
   if(!withgui) return;
@@ -225,21 +227,22 @@ void dt_control_init(const gboolean withgui)
   s->log_pos = s->log_ack = 0;
   s->busy = 0;
   s->log_message_timeout_id = 0;
-  dt_pthread_mutex_init(&s->log_mutex, NULL);
+  dt_pthread_mutex_init(&s->log_mutex);
 
   s->toast_pos = s->toast_ack = 0;
   s->toast_message_timeout_id = 0;
 
   // persistent log history initialization
   s->log_history = NULL;
-  dt_pthread_mutex_init(&s->log_history_mutex, NULL);
+  s->unread_messages = FALSE;
+  dt_pthread_mutex_init(&s->log_history_mutex);
 
   pthread_cond_init(&s->cond, NULL);
-  dt_pthread_mutex_init(&s->cond_mutex, NULL);
-  dt_pthread_mutex_init(&s->queue_mutex, NULL);
-  dt_pthread_mutex_init(&s->res_mutex, NULL);
-  dt_pthread_mutex_init(&s->global_mutex, NULL);
-  dt_pthread_mutex_init(&s->progress_system.mutex, NULL);
+  dt_pthread_mutex_init(&s->cond_mutex);
+  dt_pthread_mutex_init(&s->queue_mutex);
+  dt_pthread_mutex_init(&s->res_mutex);
+  dt_pthread_mutex_init(&s->global_mutex);
+  dt_pthread_mutex_init(&s->progress_system.mutex);
 
   // start threads
   dt_control_jobs_init();
@@ -252,93 +255,131 @@ void dt_control_init(const gboolean withgui)
 
 void dt_control_forbid_change_cursor()
 {
+  dt_control_cursor_debug("control/lock", "forbid", NULL, NULL);
   darktable.control->lock_cursor_shape = TRUE;
 }
 
 void dt_control_allow_change_cursor()
 {
+  dt_control_cursor_debug("control/lock", "allow", NULL, NULL);
   darktable.control->lock_cursor_shape = FALSE;
 }
 
-// last cursor set by dt_control_change_cursor() or a direct call to
-// gdk_window_set_cursor() outside of functions below
+// Last cursor set by dt_control_change_cursor(). Widget-local cursors use
+// dt_gui_cursor_set() and do not participate in this temporary override.
 static GdkCursor* _prev_cursor = NULL;
 
-void _change_cursor_with_fallback(const char *cursor_name,
-                                  gboolean is_temp)
+void dt_control_cursor_debug(const char *owner,
+                             const char *action,
+                             GtkWidget *widget,
+                             const char *cursor_name)
 {
-  GdkWindow *window = gtk_widget_get_window(dt_ui_main_window(darktable.gui->ui));
-  if(!window) return;
-  GdkDisplay *display = gdk_window_get_display(window);
-  GdkCursor *cursor = gdk_cursor_new_from_name(display, cursor_name);
+  const GdkCursor *current = dt_gui_cursor_get(widget);
+  dt_print(DT_DEBUG_INPUT,
+           "[cursor] owner=%s action=%s target=%p requested=%s current=%p temp=%s locked=%d thread=%p",
+           owner ? owner : "?",
+           action ? action : "?",
+           (void *)widget,
+           cursor_name ? cursor_name : "<clear>",
+           (void *)current,
+           _prev_cursor ? "yes" : "no",
+           darktable.control ? darktable.control->lock_cursor_shape : FALSE,
+           (void *)g_thread_self());
+}
 
-  // GTK3 fallback: some CSS cursor names are not supported by all
-  // backends (e.g. "wait" and "help" are missing from the GTK3 Win32
-  // mapping table despite Windows having IDC_WAIT and IDC_HELP;
-  // "none" is missing from both the Win32 and X11 backends).
-  // Fall back to the legacy GdkCursorType enum API for these cases.
-  // TODO(GTK4): remove this fallback when migrating to GTK4, where
-  // all backends support the full CSS cursor name spec.
-  if(!cursor)
-  {
-    GdkCursorType type = GDK_LEFT_PTR;
-    if(!strcmp(cursor_name, "none"))           type = GDK_BLANK_CURSOR;
-    else if(!strcmp(cursor_name, "wait"))      type = GDK_WATCH;
-    else if(!strcmp(cursor_name, "grab"))      type = GDK_HAND1;
-    else if(!strcmp(cursor_name, "cell"))      type = GDK_PLUS;
-    else if(!strcmp(cursor_name, "help"))      type = GDK_QUESTION_ARROW;
-    else if(!strcmp(cursor_name, "ns-resize")) type = GDK_DOUBLE_ARROW;
-    cursor = gdk_cursor_new_for_display(display, type);
-  }
+static void _change_cursor_with_fallback(const char *cursor_name,
+                                         gboolean is_temp,
+                                         const char *owner,
+                                         GtkWidget *widget)
+{
+  if(!widget) return;
+  GdkCursor *cursor = dt_gui_cursor_new_for_name(gtk_widget_get_display(widget), cursor_name);
 
+  dt_control_cursor_debug(owner,
+                          !is_temp && _prev_cursor ? "change-deferred" : "set",
+                          widget,
+                          cursor_name);
   if(!is_temp && _prev_cursor)
   {
-    // cursor change request via dt_control_change_cursor() is overriden
-    // by temp cursor, save new cursor to use when clear temp cursor
+    // A cursor change request is overridden by the temporary cursor; save
+    // the new cursor to use when the temporary cursor is cleared.
     g_object_unref(_prev_cursor);
     _prev_cursor = g_object_ref(cursor);
   }
   else if(!darktable.control->lock_cursor_shape)
   {
-    gdk_window_set_cursor(window, cursor);
+    dt_gui_cursor_apply(widget, cursor);
+    g_object_unref(cursor);
+  }
+  else
+  {
     g_object_unref(cursor);
   }
 }
 
 void dt_control_set_temp_cursor(const char *cursor_name)
 {
-  GdkWindow *window = gtk_widget_get_window(dt_ui_main_window(darktable.gui->ui));
-  if(!window) return;
-  // store cursor to return to once clear temp cursor if this is the
-  // initial setup of this temp cursor (as can call this multiple
-  // times to vary a temp cursor)
+  GtkWidget *widget = dt_ui_main_window(darktable.gui->ui);
+  dt_control_cursor_debug("control/temp", "request", widget, cursor_name);
+  if(!widget) return;
+  // Store the cursor to restore when this is the initial setup of this
+  // temporary cursor. Subsequent calls may vary the temporary cursor.
   if(!_prev_cursor)
   {
-    _prev_cursor = gdk_window_get_cursor(window);
+    _prev_cursor = dt_gui_cursor_get(widget);
     if(_prev_cursor)
       g_object_ref(_prev_cursor);
   }
-  _change_cursor_with_fallback(cursor_name, TRUE);
+  _change_cursor_with_fallback(cursor_name, TRUE, "control/temp", widget);
 }
 
 void dt_control_clear_temp_cursor()
 {
-  GdkWindow *window = gtk_widget_get_window(dt_ui_main_window(darktable.gui->ui));
+  GtkWidget *widget = dt_ui_main_window(darktable.gui->ui);
+  dt_control_cursor_debug("control/temp", "clear", widget, NULL);
   if(!_prev_cursor)
   {
-    if(window)
-      gdk_window_set_cursor(window, NULL);
+    if(widget)
+    {
+      dt_control_cursor_debug("control/temp", "clear-default", widget, NULL);
+      dt_gui_cursor_apply(widget, NULL);
+    }
     return;
   }
-  if(window)
-    gdk_window_set_cursor(window, _prev_cursor);
+  if(widget)
+  {
+    dt_control_cursor_debug("control/temp", "restore", widget, "<saved>");
+    dt_gui_cursor_apply(widget, _prev_cursor);
+  }
   g_object_unref(_prev_cursor);
   _prev_cursor = NULL;
 }
 
+/* This is the shared, application-wide cursor: it has to stay on the toplevel.
+ *
+ * Its callers are of three kinds, and only the toplevel window is under the
+ * pointer for all three: whole-application states (view switching, startup,
+ * leaving shortcut-mapping mode), on-canvas interaction (crop, ashift,
+ * clipping, the darkroom view itself) and a handful of panel widgets that have
+ * not been migrated yet.
+ *
+ * Aiming it at dt_ui_center() instead splits the target in two, because the
+ * code that sets a cursor and the code that clears it then write different
+ * GdkWindows: _set_mapping_mode_cursor() and dt_control_set_temp_cursor()
+ * apply to the toplevel, so their cursor is never cleared and stays stuck.
+ * There is no rectangle where the retargeted clear is even visible in
+ * lighttable, since the thumbtable is an overlay sibling of the centre canvas
+ * rather than a child of it, so the pointer is never over dt_ui_center().
+ *
+ * A widget that owns its own interaction should call dt_gui_cursor_set() with
+ * its own widget rather than come through here -- that is what the panel
+ * handles, the range selector, the timeline and the resize wrappers now do,
+ * and it is also what stops a child control from claiming the toplevel cursor.
+ */
 void dt_control_change_cursor(const char *cursor_name)
 {
-  _change_cursor_with_fallback(cursor_name, FALSE);
+  _change_cursor_with_fallback(cursor_name, FALSE, "control/change",
+                               dt_ui_main_window(darktable.gui->ui));
 }
 
 /* Some implementation and how-to use notes about control->running
@@ -402,6 +443,12 @@ void dt_control_quit()
   {
     dt_gui_gtk_quit();
   }
+}
+
+void dt_control_restart(void)
+{
+  darktable.restart = TRUE;
+  dt_control_quit();
 }
 
 void dt_control_shutdown()
@@ -486,8 +533,7 @@ void dt_control_draw_busy_msg(cairo_t *cr, int width, int height)
 {
   PangoRectangle ink;
   PangoLayout *layout;
-  PangoFontDescription *desc =
-    pango_font_description_copy_static(darktable.bauhaus->pango_font_desc);
+  PangoFontDescription *desc = dt_gui_get_font();
   const float fontsize = DT_PIXEL_APPLY_DPI(14);
   pango_font_description_set_absolute_size(desc, fontsize * PANGO_SCALE);
   pango_font_description_set_weight(desc, PANGO_WEIGHT_BOLD);
@@ -608,6 +654,48 @@ static gboolean _dt_ctl_switch_mode_to_by_view(gpointer user_data)
   return G_SOURCE_REMOVE;
 }
 
+static gboolean _dt_ctl_reload_view(gpointer user_data)
+{
+  const dt_view_t *view = (const dt_view_t*)user_data;
+  dt_view_manager_switch_by_view(darktable.view_manager, view);
+  return G_SOURCE_REMOVE;
+}
+
+/* Run a view switch now when it is safe, but never while GTK is propagating an
+ * event.  A view switch removes the old view's widgets from their containers
+ * and can therefore unrealize a widget which GTK still has to visit for the
+ * current event.  g_main_context_invoke() is not enough here: when called by
+ * the GUI thread that owns the default context it invokes the callback
+ * synchronously.  A high-priority idle is genuinely deferred until the
+ * current event has returned to GTK, while still running before the next
+ * normal-priority input source. */
+static void _dt_ctl_switch_mode_invoke(GSourceFunc callback,
+                                       gpointer data,
+                                       GDestroyNotify notify)
+{
+  GMainContext *context = g_main_context_default();
+
+#if GTK_CHECK_VERSION(4, 0, 0)
+  /* GTK4 has no process-wide current event.  Keep the invariant unconditional
+   * rather than trying to infer event delivery from the main-context owner. */
+  g_idle_add_full(G_PRIORITY_HIGH, callback, data, notify);
+  return;
+#else
+  if(g_main_context_is_owner(context))
+  {
+    GdkEvent *event = gtk_get_current_event();
+    if(event)
+    {
+      gdk_event_free(event);
+      g_idle_add_full(G_PRIORITY_HIGH, callback, data, notify);
+      return;
+    }
+  }
+
+  g_main_context_invoke_full(context, G_PRIORITY_DEFAULT, callback, data, notify);
+#endif
+}
+
 void dt_ctl_switch_mode_to(const char *mode)
 {
   const dt_view_t *cv = dt_view_manager_get_current_view(darktable.view_manager);
@@ -619,14 +707,21 @@ void dt_ctl_switch_mode_to(const char *mode)
     return;
   }
 
-  g_main_context_invoke(NULL, _dt_ctl_switch_mode_to, (gpointer)mode);
+  // Own the string: a genuinely deferred callback cannot borrow a caller's
+  // stack or temporary storage.
+  _dt_ctl_switch_mode_invoke(_dt_ctl_switch_mode_to, g_strdup(mode), g_free);
 }
 
 void dt_ctl_switch_mode_to_by_view(const dt_view_t *view)
 {
   if(view == dt_view_manager_get_current_view(darktable.view_manager))
     return;
-  g_main_context_invoke(NULL, _dt_ctl_switch_mode_to_by_view, (gpointer)view);
+  _dt_ctl_switch_mode_invoke(_dt_ctl_switch_mode_to_by_view, (gpointer)view, NULL);
+}
+
+void dt_ctl_reload_view(const dt_view_t *view)
+{
+  _dt_ctl_switch_mode_invoke(_dt_ctl_reload_view, (gpointer)view, NULL);
 }
 
 void dt_ctl_switch_mode()
@@ -810,6 +905,7 @@ void dt_control_log(const char *msg, ...)
   g_free(timestamp);
 
   dc->log_history = g_list_append(dc->log_history, entry);
+  dc->unread_messages = TRUE;
 
   // remove oldest entry if over limit
   if(g_list_length(dc->log_history) > DT_CTL_LOG_HISTORY_SIZE)
@@ -843,6 +939,28 @@ GList *dt_control_log_history_get_entries(void)
 
   dt_pthread_mutex_unlock(&dc->log_history_mutex);
   return result;
+}
+
+gboolean dt_control_log_history_has_unread_messages(void)
+{
+  dt_control_t *dc = darktable.control;
+  if(!dc) return FALSE;
+
+  dt_pthread_mutex_lock(&dc->log_history_mutex);
+  const gboolean has_unread = dc->unread_messages;
+  dt_pthread_mutex_unlock(&dc->log_history_mutex);
+
+  return has_unread;
+}
+
+void dt_control_log_history_clear_unread_messages(void)
+{
+  dt_control_t *dc = darktable.control;
+  if(!dc) return;
+
+  dt_pthread_mutex_lock(&dc->log_history_mutex);
+  dc->unread_messages = FALSE;
+  dt_pthread_mutex_unlock(&dc->log_history_mutex);
 }
 
 static void _toast_log(const gboolean markup, const char *msg, va_list ap)

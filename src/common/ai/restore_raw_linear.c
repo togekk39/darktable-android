@@ -483,7 +483,8 @@ int dt_restore_raw_linear(dt_restore_context_t *ctx,
   // tile setup
   const int O = OVERLAP_LINEAR;
   const int T = dt_restore_get_tile_size(ctx);
-  if(T <= 2 * O)
+  // see restore_raw_bayer.c
+  if(T < 4 * O)
   {
     dt_free_align(rgb_src);
     dt_free_align(rgb_out);
@@ -631,10 +632,12 @@ int dt_restore_raw_linear(dt_restore_context_t *ctx,
         }
       }
 
-      const int ext_y0 = has_top  ? sensor_py_base - sensor_O : sensor_py_base;
-      const int ext_y1 = has_bot  ? sensor_py_end + sensor_O  : sensor_py_end;
-      const int ext_x0 = has_left ? sensor_px_base - sensor_O : sensor_px_base;
-      const int ext_x1 = has_right? sensor_px_end + sensor_O  : sensor_px_end;
+      // the seam reaches sensor_O past the tile edge, outside the buffer at
+      // the image border
+      const int ext_y0 = MAX(0, has_top  ? sensor_py_base - sensor_O : sensor_py_base);
+      const int ext_y1 = MIN(h, has_bot  ? sensor_py_end + sensor_O  : sensor_py_end);
+      const int ext_x0 = MAX(0, has_left ? sensor_px_base - sensor_O : sensor_px_base);
+      const int ext_x1 = MIN(w, has_right? sensor_px_end + sensor_O  : sensor_px_end);
 
       for(int sr = ext_y0; sr < ext_y1; sr++)
       {
@@ -733,11 +736,12 @@ int dt_restore_raw_linear(dt_restore_context_t *ctx,
       if(v_strip_left)
       {
         const size_t vchan = (size_t)(2 * sensor_O) * v_strip_left_h;
-        for(int sr = v_strip_left_sy0;
-            sr < v_strip_left_sy0 + v_strip_left_h; sr++)
+        const int v_sr_end = MIN(v_strip_left_sy0 + v_strip_left_h, h);
+        const int v_dxs_end = MIN(2 * sensor_O, w - v_strip_left_sx0);
+        for(int sr = v_strip_left_sy0; sr < v_sr_end; sr++)
         {
           const size_t vrow = (size_t)(sr - v_strip_left_sy0) * (2 * sensor_O);
-          for(int dxs = 0; dxs < 2 * sensor_O; dxs++)
+          for(int dxs = 0; dxs < v_dxs_end; dxs++)
           {
             const int sc = v_strip_left_sx0 + dxs;
             const size_t dst = (size_t)sr * w + sc;
@@ -762,10 +766,12 @@ int dt_restore_raw_linear(dt_restore_context_t *ctx,
     g_free(v_strip_left);
     v_strip_left = NULL;
 
-    // ramps sum to 1, flush. no column clamp needed (no working-region offset)
+    // ramps sum to 1, flush. columns need no clamp (the loop runs to w); the
+    // last strip's rows reach past the image
     if(h_strip_top)
     {
-      for(int sr = h_strip_top_sy0; sr < h_strip_top_sy0 + hstrip_h; sr++)
+      const int h_sr_end = MIN(h_strip_top_sy0 + hstrip_h, h);
+      for(int sr = h_strip_top_sy0; sr < h_sr_end; sr++)
       {
         const size_t hrow = (size_t)(sr - h_strip_top_sy0) * w;
         for(int sc = 0; sc < w; sc++)
@@ -1160,20 +1166,26 @@ int dt_restore_raw_linear_preview_piped(dt_restore_context_t *ctx,
 
   g_free(tile_out);
 
-  // run pipe twice on raw-sensor-sized buffers
-  // ROI is in sensor coords (matching the patched region we built
-  // above); dt_restore_run_user_pipe_roi forward-transforms it
-  // through the user's geometry chain before handing to the pipe
+  // run pipe twice on raw-sensor-sized buffers. the ROI must be in
+  // sensor coords, matching the region patched above, so that
+  // dt_restore_run_user_pipe_roi's forward transform lands on it —
+  // but crop_x / crop_y arrive in prepared-buffer coords (the
+  // post-rawprepare visible area returned by
+  // dt_restore_raw_linear_prepare). shift by the same raw_off_* the
+  // patch loop uses, or the render drifts by the rawprepare border
+  const int roi_x = crop_x + raw_off_x;
+  const int roi_y = crop_y + raw_off_y;
+
   int dw = 0, dh = 0, bw = 0, bh = 0;
   int err = dt_restore_run_user_pipe_roi(imgid, patched, raw_w, raw_h,
-                                 crop_x, crop_y, crop_w, crop_h,
+                                 roi_x, roi_y, crop_w, crop_h,
                                  &dw, &dh, out_denoised_rgb);
   g_free(patched);
 
   if(err == 0)
   {
     err = dt_restore_run_user_pipe_roi(imgid, (void *)mbuf.buf, raw_w, raw_h,
-                               crop_x, crop_y, crop_w, crop_h,
+                               roi_x, roi_y, crop_w, crop_h,
                                &bw, &bh, out_before_rgb);
   }
   dt_mipmap_cache_release(&mbuf);

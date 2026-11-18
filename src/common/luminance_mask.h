@@ -1,7 +1,7 @@
 
 /*
     This file is part of darktable,
-    Copyright (C) 2019-2023 darktable developers.
+    Copyright (C) 2019-2026 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -17,7 +17,6 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <assert.h>
 #include <math.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -222,7 +221,7 @@ static void pixel_rgb_geomean(const float *const restrict image,
     {                                                                     \
       _Pragma ("omp parallel for simd default(none) schedule(static)      \
       dt_omp_firstprivate(num_elem, in, out, exposure_boost, fulcrum, contrast_boost)\
-      aligned(in, out:64)" )                                              \
+      aligned(in, out:64) num_threads(darktable.num_openmp_threads)" )    \
       for(size_t k = 0; k < num_elem; k += 4)                             \
       {                                                                   \
         fn(in, out, k, exposure_boost, fulcrum, contrast_boost);          \

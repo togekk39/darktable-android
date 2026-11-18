@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2014-2023 darktable developers.
+    Copyright (C) 2014-2026 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -123,15 +123,9 @@ static gchar *_import_session_path_pattern()
     goto bail_out;
   }
 
-#ifdef WIN32
-  gchar *s1 = dt_str_replace(base, "/", "\\\\");
-  gchar *s2 = dt_str_replace(sub, "/", "\\\\");
-  res = g_build_path("\\\\", s1, s2, (char *)NULL);
-  g_free(s1);
-  g_free(s2);
-#else
+  // _import_session_path() expands this with dt_variables_expand_path(),
+  // which normalizes separators, so Windows needs no escaping workaround
   res = g_build_path(G_DIR_SEPARATOR_S, base, sub, (char *)NULL);
-#endif
 
 bail_out:
   return res;
@@ -276,12 +270,13 @@ const char *dt_import_session_filename(dt_import_session_t *self, const gboolean
 
   char *fname = g_build_path(G_DIR_SEPARATOR_S, path, result_fname, (char *)NULL);
   char *previous_fname = fname;
-  if(g_file_test(fname, G_FILE_TEST_EXISTS) == TRUE)
+  if(g_file_test(fname, G_FILE_TEST_EXISTS))
   {
     dt_print(DT_DEBUG_ALWAYS, "[import_session] File %s exists", fname);
     do
     {
       /* file exists, yield a new filename */
+      self->vp->conflict++;
       g_free(result_fname);
       result_fname = _import_session_filename_from_pattern(self, pattern);
       fname = g_build_path(G_DIR_SEPARATOR_S, path, result_fname, (char *)NULL);
@@ -290,6 +285,7 @@ const char *dt_import_session_filename(dt_import_session_t *self, const gboolean
       /* check if same filename was yielded as before */
       if(strcmp(previous_fname, fname) == 0)
       {
+        self->vp->conflict = 0;
         g_free(previous_fname);
         g_free(fname);
         dt_control_log(_(
@@ -300,9 +296,10 @@ const char *dt_import_session_filename(dt_import_session_t *self, const gboolean
       g_free(previous_fname);
       previous_fname = fname;
 
-    } while(g_file_test(fname, G_FILE_TEST_EXISTS) == TRUE);
+    } while(g_file_test(fname, G_FILE_TEST_EXISTS));
   }
 
+  self->vp->conflict = 0;
   g_free(previous_fname);
   g_free(pattern);
 
@@ -333,21 +330,24 @@ static const char *_import_session_path(dt_import_session_t *self, const gboolea
     return NULL;
   }
 
-  gchar *new_path = dt_variables_expand(self->vp, pattern, FALSE);
+  gchar *new_path = dt_variables_expand_path(self->vp, pattern, FALSE);
   g_free(pattern);
 
 #ifdef WIN32
   if(new_path && (strlen(new_path) > 1))
   {
     const char first = g_ascii_toupper(new_path[0]);
-    if(first >= 'A' && first <= 'Z' && new_path[1] == ':') // path format is <drive letter>:\path\to\file
+    if(first >= 'A' && first <= 'Z' && new_path[1] == ':') // path format is <drive letter>:/path/to/file
       new_path[0] = first;                                 // drive letter in uppercase looks nicer
   }
-  /* Remove trailing spaces from each element in the the path separated by directory separator.
+  /* Remove trailing spaces from each element in the path separated by directory separator.
      So follow the usage in Windows. */
   if(new_path && (strlen(new_path) >= 1))
   {
-    char **directories = g_strsplit(new_path, G_DIR_SEPARATOR_S, -1);
+    // split on both separators: the pattern's own are normalized to '/' by
+    // dt_variables_expand_path(), but variables expand afterwards and their
+    // values still carry native '\', so a path can hold a mix of the two
+    char **directories = g_strsplit_set(new_path, "/\\", -1);
     for(int i=0; directories[i] != NULL; i++)
     {
       g_strchomp(directories[i]);

@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2010-2024 darktable developers.
+    Copyright (C) 2010-2026 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -16,7 +16,8 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <assert.h>
+#include <gtk/gtk.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -26,11 +27,11 @@
 #include "develop/develop.h"
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
+#include "develop/tiling.h"
 #include "gui/accelerators.h"
 #include "gui/gtk.h"
 #include "iop/iop_api.h"
-#include <gtk/gtk.h>
-#include <inttypes.h>
+#include "common/opencl.h"
 
 #define GRAIN_LIGHTNESS_STRENGTH_SCALE 0.15f
 
@@ -74,6 +75,11 @@ typedef struct dt_iop_grain_gui_data_t
 {
   GtkWidget *scale, *strength, *midtones_bias; // scale, strength, midtones_bias
 } dt_iop_grain_gui_data_t;
+
+typedef struct dt_iop_grain_global_data_t
+{
+  int kernel_grain;
+} dt_iop_grain_global_data_t;
 
 typedef struct dt_iop_grain_data_t
 {
@@ -173,7 +179,9 @@ static double dot(const double g[], const double x, const double y, const double
 
 #define FASTFLOOR(x) (x > 0 ? (int)(x) : (int)(x)-1)
 
-static double _simplex_noise(double xin, double yin, double zin)
+static double _simplex_noise(const double xin,
+                             const double yin,
+                             const double zin)
 {
   double n0, n1, n2, n3; // Noise contributions from the four corners
                          // Skew the input space to determine which simplex cell we're in
@@ -313,12 +321,17 @@ static double _simplex_noise(double xin, double yin, double zin)
   return 32.0 * (n0 + n1 + n2 + n3);
 }
 
-static double _simplex_2d_noise(double x, double y, double z)
+// octave frequencies of _simplex_2d_noise(), shared with process_cl()
+static const double _octave_f[] = {0.4910, 0.9441, 1.7280};
+
+static double _simplex_2d_noise(const double x,
+                                const double y,
+                                const double z)
 {
   double total = 0;
 
   // parametrization of octaves to match power spectrum of real grain scans
-  static const double f[] = {0.4910, 0.9441, 1.7280};
+  const double *const f = _octave_f;
   static const double a[] = {0.2340, 0.7850, 1.2150};
 
   for(uint32_t octave = 0; octave < 3; octave++)
@@ -328,21 +341,26 @@ static double _simplex_2d_noise(double x, double y, double z)
   return total;
 }
 
-static float paper_resp(float exposure, float mb, float gp)
+static float paper_resp(const float exposure,
+                        const float mb,
+                        const float gp)
 {
   const float delta = GRAIN_LUT_DELTA_MAX * expf((mb / 100.0f) * logf(GRAIN_LUT_DELTA_MIN));
   const float density = (1.0f + 2.0f * delta) / (1.0f + expf( (4.0f * gp * (0.5f - exposure)) / (1.0f + 2.0f * delta) )) - delta;
   return density;
 }
 
-static float paper_resp_inverse(float density, float mb, float gp)
+static float paper_resp_inverse(const float density,
+                                const float mb,
+                                const float gp)
 {
   const float delta = GRAIN_LUT_DELTA_MAX * expf((mb / 100.0f) * logf(GRAIN_LUT_DELTA_MIN));
   const float exposure = -logf((1.0f + 2.0f * delta) / (density + delta) - 1.0f) * (1.0f + 2.0f * delta) / (4.0f * gp) + 0.5f;
   return exposure;
 }
 
-static void evaluate_grain_lut(float *grain_lut, const float mb)
+static void evaluate_grain_lut(float *grain_lut,
+                               const float mb)
 {
   for(int i = 0; i < GRAIN_LUT_SIZE; i++)
   {
@@ -355,7 +373,9 @@ static void evaluate_grain_lut(float *grain_lut, const float mb)
   }
 }
 
-static float dt_lut_lookup_2d_1c(const float *grain_lut, const float x, const float y)
+static float dt_lut_lookup_2d_1c(const float *grain_lut,
+                                 const float x,
+                                 const float y)
 {
   const float _x = CLAMPS((x + 0.5f) * (GRAIN_LUT_SIZE - 1), 0, GRAIN_LUT_SIZE - 1);
   const float _y = CLAMPS(y * (GRAIN_LUT_SIZE - 1), 0, GRAIN_LUT_SIZE - 1);
@@ -434,13 +454,15 @@ void process(dt_iop_module_t *self,
              const dt_iop_roi_t *const roi_in,
              const dt_iop_roi_t *const roi_out)
 {
-  if(!dt_iop_have_required_input_format(4 /*we need full-color pixels*/, self, piece->colors,
+  if(!dt_iop_have_required_input_format(4 /*we need full-color pixels*/,
+                                        self, piece->colors,
                                         ivoid, ovoid, roi_in, roi_out))
     return;
 
   dt_iop_grain_data_t *data = piece->data;
 
-  unsigned int hash = _hash_string(piece->pipe->image.filename) % (int)fmax(roi_out->width * 0.3, 1.0);
+  const unsigned int hash =
+    _hash_string(piece->pipe->image.filename) % (int)fmax(roi_out->width * 0.3, 1.0);
 
   const gboolean fastmode = dt_pipe_is_fast(piece->pipe);
   // Apply grain to image
@@ -450,8 +472,8 @@ void process(dt_iop_module_t *self,
   const double zoom = (1.0 + 8 * data->scale / 100) / 800.0;
   // in fastpipe mode, skip the downsampling for zoomed-out views
   const int filter = !fastmode && fabsf(roi_out->scale - 1.0f) > 0.01f;
-  // filter width depends on world space (i.e. reverse wd norm and roi->scale, as well as buffer input to
-  // pixelpipe iscale)
+  // filter width depends on world space (i.e. reverse wd norm and
+  // roi->scale, as well as buffer input to pixelpipe iscale)
   const double filtermul = piece->iscale / (roi_out->scale * wd);
   const float fib1 = 34.0f, fib2 = 21.0f;
   const float fib1div2 = fib1 / fib2;
@@ -491,7 +513,9 @@ void process(dt_iop_module_t *self,
         noise = _simplex_2d_noise(x + hash, y, zoom);
       }
 
-      out[0] = in[0] + dt_lut_lookup_2d_1c(data->grain_lut, (noise * strength) * GRAIN_LIGHTNESS_STRENGTH_SCALE, in[0] / 100.0f);
+      out[0] = in[0] + dt_lut_lookup_2d_1c(data->grain_lut,
+                                           (noise * strength) * GRAIN_LIGHTNESS_STRENGTH_SCALE,
+                                           in[0] / 100.0f);
       out[1] = in[1];
       out[2] = in[2];
 
@@ -501,7 +525,145 @@ void process(dt_iop_module_t *self,
   }
 }
 
-void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,
+#ifdef HAVE_OPENCL
+// v mod 768 as (integer part, fraction): the simplex noise repeats every
+// 768 units along x and along y, so this is all a GPU kernel needs of v
+static void _reduce_coord(const double v, float c[2])
+{
+  const double r = fmod(v, 768.0);
+  const double n = floor(r);
+  c[0] = n;
+  c[1] = MIN((float)(r - n), 0x1.fffffep-1f);
+}
+
+// the noise coordinates of process() for a GPU kernel, reduced: for each
+// octave, those of the columns, the rows and the filter samples (hash
+// included). Returns the number of samples, or 0 when out of memory.
+static int _noise_coords(const dt_dev_pixelpipe_iop_t *piece,
+                         const dt_iop_roi_t *const roi_out,
+                         float **cols,
+                         float **rows,
+                         float **xoffs,
+                         float **yoffs)
+{
+  const dt_iop_grain_data_t *data = piece->data;
+  const int width = roi_out->width;
+  const int height = roi_out->height;
+
+  // the same world space coordinates as process(), see there
+  const unsigned int hash =
+    _hash_string(piece->pipe->image.filename) % (int)fmax(roi_out->width * 0.3, 1.0);
+  const gboolean fastmode = dt_pipe_is_fast(piece->pipe);
+  const double wd = fminf(piece->buf_in.width, piece->buf_in.height);
+  const double zoom = (1.0 + 8 * data->scale / 100) / 800.0;
+  const int filter = !fastmode && fabsf(roi_out->scale - 1.0f) > 0.01f;
+  const double filtermul = piece->iscale / (roi_out->scale * wd);
+  const float fib1 = 34.0f, fib2 = 21.0f;
+  const float fib1div2 = fib1 / fib2;
+  const double scale = roi_out->scale;
+  const int samples = filter ? fib2 : 1;
+
+  *cols = dt_alloc_align_float((size_t)6 * width);
+  *rows = dt_alloc_align_float((size_t)6 * height);
+  *xoffs = dt_alloc_align_float((size_t)6 * samples);
+  *yoffs = dt_alloc_align_float((size_t)6 * samples);
+  if(!*cols || !*rows || !*xoffs || !*yoffs) return 0;
+
+  for(int o = 0; o < 3; o++)
+  {
+    for(int i = 0; i < width; i++)
+      _reduce_coord(((roi_out->x + i) / scale / wd) * _octave_f[o] / zoom, *cols + 6 * i + 2 * o);
+    for(int j = 0; j < height; j++)
+      _reduce_coord(((roi_out->y + j) / scale / wd) * _octave_f[o] / zoom, *rows + 6 * j + 2 * o);
+    for(int l = 0; l < samples; l++)
+    {
+      float dx = 0.0f, dy = 0.0f;
+      if(filter)
+      {
+        float px = l / fib2, py = l * fib1div2;
+        py -= (int)py;
+        dx = px * filtermul;
+        dy = py * filtermul;
+      }
+      _reduce_coord(((double)dx + hash) * _octave_f[o] / zoom, *xoffs + 6 * l + 2 * o);
+      _reduce_coord((double)dy * _octave_f[o] / zoom, *yoffs + 6 * l + 2 * o);
+    }
+  }
+  return samples;
+}
+
+int process_cl(dt_iop_module_t *self,
+               dt_dev_pixelpipe_iop_t *piece,
+               cl_mem dev_in,
+               cl_mem dev_out,
+               const dt_iop_roi_t *const roi_in,
+               const dt_iop_roi_t *const roi_out)
+{
+  dt_iop_grain_data_t *data = piece->data;
+  dt_iop_grain_global_data_t *gd = self->global_data;
+
+  const int devid = piece->pipe->devid;
+  const int width = roi_out->width;
+  const int height = roi_out->height;
+  const float strength = (data->strength / 100.0f);
+
+  cl_int err = DT_OPENCL_SYSMEM_ALLOCATION;
+  cl_mem dev_cols = NULL, dev_rows = NULL, dev_xoffs = NULL, dev_yoffs = NULL, dev_lut = NULL;
+
+  float *cols = NULL, *rows = NULL, *xoffs = NULL, *yoffs = NULL;
+  const int samples = _noise_coords(piece, roi_out, &cols, &rows, &xoffs, &yoffs);
+  if(!samples) goto cleanup;
+
+  err = DT_OPENCL_DEFAULT_ERROR;
+  dev_cols = dt_opencl_copy_host_to_device_constant(devid, sizeof(float) * 6 * width, cols);
+  dev_rows = dt_opencl_copy_host_to_device_constant(devid, sizeof(float) * 6 * height, rows);
+  dev_xoffs = dt_opencl_copy_host_to_device_constant(devid, sizeof(float) * 6 * samples, xoffs);
+  dev_yoffs = dt_opencl_copy_host_to_device_constant(devid, sizeof(float) * 6 * samples, yoffs);
+  dev_lut = dt_opencl_copy_host_to_device_constant(devid, sizeof(data->grain_lut), data->grain_lut);
+  if(!dev_cols || !dev_rows || !dev_xoffs || !dev_yoffs || !dev_lut) goto cleanup;
+
+  err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_grain, width, height,
+          CLARG(dev_in), CLARG(dev_out), CLARG(width), CLARG(height),
+          CLARG(dev_cols), CLARG(dev_rows), CLARG(dev_xoffs), CLARG(dev_yoffs),
+          CLARG(samples), CLARG(strength), CLARG(dev_lut));
+
+cleanup:
+  dt_opencl_release_mem_object(dev_cols);
+  dt_opencl_release_mem_object(dev_rows);
+  dt_opencl_release_mem_object(dev_xoffs);
+  dt_opencl_release_mem_object(dev_yoffs);
+  dt_opencl_release_mem_object(dev_lut);
+  dt_free_align(cols);
+  dt_free_align(rows);
+  dt_free_align(xoffs);
+  dt_free_align(yoffs);
+  return err;
+}
+#endif
+
+void tiling_callback(dt_iop_module_t *self,
+                     dt_dev_pixelpipe_iop_t *piece,
+                     const dt_iop_roi_t *roi_in,
+                     const dt_iop_roi_t *roi_out,
+                     struct dt_develop_tiling_t *tiling)
+{
+  // grain does not allow tiling: process() offsets the noise by a hash
+  // modulo the roi width, so tiles would not line up. This only decides
+  // whether the OpenCL path fits: input and output, plus the noise
+  // coordinates of _noise_coords() (up to 21 samples) and the LUT
+  tiling->factor = 2.0f;
+  tiling->factor_cl = 2.0f;
+  tiling->maxbuf = 1.0f;
+  tiling->maxbuf_cl = 1.0f;
+  tiling->overhead = sizeof(float) * 6 * (roi_out->width + roi_out->height + 2 * 21)
+                     + sizeof(float) * GRAIN_LUT_SIZE * GRAIN_LUT_SIZE;
+  tiling->overlap = 0;
+  tiling->align = 1;
+}
+
+void commit_params(dt_iop_module_t *self,
+                   dt_iop_params_t *p1,
+                   dt_dev_pixelpipe_t *pipe,
                    dt_dev_pixelpipe_iop_t *piece)
 {
   dt_iop_grain_params_t *p = (dt_iop_grain_params_t *)p1;
@@ -515,12 +677,16 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
   evaluate_grain_lut(d->grain_lut, d->midtones_bias);
 }
 
-void init_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
+void init_pipe(dt_iop_module_t *self,
+               dt_dev_pixelpipe_t *pipe,
+               dt_dev_pixelpipe_iop_t *piece)
 {
   piece->data = calloc(1, sizeof(dt_iop_grain_data_t));
 }
 
-void cleanup_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
+void cleanup_pipe(dt_iop_module_t *self,
+                  dt_dev_pixelpipe_t *pipe,
+                  dt_dev_pixelpipe_iop_t *piece)
 {
   free(piece->data);
   piece->data = NULL;
@@ -529,6 +695,19 @@ void cleanup_pipe(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelp
 void init_global(dt_iop_module_so_t *self)
 {
   _simplex_noise_init();
+
+  const int program = 48; // grain.cl, from programs.conf
+  dt_iop_grain_global_data_t *gd = malloc(sizeof(dt_iop_grain_global_data_t));
+  self->data = gd;
+  gd->kernel_grain = dt_opencl_create_kernel(program, "grain");
+}
+
+void cleanup_global(dt_iop_module_so_t *self)
+{
+  dt_iop_grain_global_data_t *gd = self->data;
+  dt_opencl_free_kernel(gd->kernel_grain);
+  free(self->data);
+  self->data = NULL;
 }
 
 void gui_init(dt_iop_module_t *self)
@@ -548,7 +727,9 @@ void gui_init(dt_iop_module_t *self)
 
   g->midtones_bias = dt_bauhaus_slider_from_params(self, "midtones_bias");
   dt_bauhaus_slider_set_format(g->midtones_bias, "%");
-  gtk_widget_set_tooltip_text(g->midtones_bias, _("amount of mid-tones bias from the photographic paper response modeling. the greater the bias, the more pronounced the fall off of the grain in shadows and highlights"));
+  gtk_widget_set_tooltip_text
+    (g->midtones_bias,
+     _("amount of mid-tones bias from the photographic paper response modeling. the greater the bias, the more pronounced the fall off of the grain in shadows and highlights"));
 }
 
 // clang-format off

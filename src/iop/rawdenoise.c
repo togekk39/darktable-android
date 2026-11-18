@@ -25,11 +25,13 @@
 #include "develop/imageop.h"
 #include "develop/imageop_math.h"
 #include "develop/imageop_gui.h"
+#include "develop/tiling.h"
 #include "develop/openmp_maths.h"
 #include "dtgtk/drawingarea.h"
 #include "gui/accelerators.h"
 #include "gui/gtk.h"
 #include "iop/iop_api.h"
+#include "common/opencl.h"
 
 #include <gtk/gtk.h>
 #include <stdlib.h>
@@ -85,6 +87,11 @@ typedef struct dt_iop_rawdenoise_data_t
 
 typedef struct dt_iop_rawdenoise_global_data_t
 {
+  int kernel_rawdenoise_extract;
+  int kernel_rawdenoise_scatter;
+  int kernel_rawdenoise_clear;
+  int kernel_rawdenoise_dwt_vert;
+  int kernel_rawdenoise_dwt_horiz;
 } dt_iop_rawdenoise_global_data_t;
 
 int legacy_params(dt_iop_module_t *self,
@@ -311,6 +318,12 @@ static void wavelet_denoise_xtrans(const float *const restrict in,
   const int width = roi->width;
   const int height = roi->height;
   const size_t size = (size_t)width * height;
+  // regions smaller than a CFA period may lack matching sensels for the border interpolation
+  if(width < 6 || height < 6)
+  {
+    memcpy(out, in, sizeof(float) * size);
+    return;
+  }
   // allocate a buffer for the particular color channel to be denoise; we add two rows to simplify the
   // channel-extraction code (no special case for top/bottom row)
   float *const img = dt_alloc_align_float((size_t)width * (height+2));
@@ -327,124 +340,100 @@ static void wavelet_denoise_xtrans(const float *const restrict in,
     float noise[DT_IOP_RAWDENOISE_BANDS];
     compute_channel_noise(noise, c, data);
 
-    // ensure a defined value for every pixel in the top and bottom rows, even if they are more than
-    // one pixel away from the nearest neighbor of the same color and thus the simple interpolation
-    // used in the following loop does not set them
+    // negative values mark border positions that no matching sensel fills; vstransform() is nonnegative
+    // so these positions can be filled from the completed plane before wavelet filtering
     for(size_t col = 0; col < width; col++)
     {
-      fimg[col] = 0.5f;
-      fimg[(size_t)(height-1)*width + col] = 0.5f;
+      fimg[col] = -1.0f;
+      fimg[(size_t)(height-1)*width + col] = -1.0f;
     }
-    const size_t nthreads = dt_get_num_threads();
-    const size_t chunksize = (height + nthreads - 1) / nthreads;
-    DT_OMP_FOR(num_threads(nthreads))
-    for(size_t chunk = 0; chunk < nthreads; chunk++)
+    // build the plane in one pass, top to bottom: sensels are also copied into the neighboring rows, so
+    // the order of the writes decides which value a position keeps; splitting the rows among threads
+    // would make the result depend on the thread count
+    for(size_t row = 0; row < height; row++)
     {
-      const size_t start = chunk * chunksize;
-      const size_t pastend = MIN(start + chunksize,height);
-      for(size_t row = start; row < pastend; row++)
+      const float *const restrict inp = in + row * width;
+      float *const restrict fimgp = fimg + row * width;
+      // handle red/blue pixel in first column
+      if(c != 1 && FCNxtrans(row, 0, xtrans) == c)
       {
-        const float *const restrict inp = in + row * width;
-        float *const restrict fimgp = fimg + row * width;
-        // handle red/blue pixel in first column
-        if(c != 1 && FCNxtrans(row, 0, xtrans) == c)
-        {
-          // copy to neighbors above and right
-          const float d = vstransform(inp[0]);
-          fimgp[0] = fimgp[-width] = fimgp[-width+1] = d;
-        }
-        for(size_t col = (c != 1); col < width-1; col++)
-        {
-          if(FCNxtrans(row, col, xtrans) == c)
-          {
-            // the pixel at the current location has the desired color, so apply sqrt() as a variance-stablizing
-            // transform, and then do cheap nearest-neighbor interpolation by copying it to appropriate neighbors
-            const float d = vstransform(inp[col]);
-            fimgp[col] = d;
-            if(c == 1) // green pixel
-            {
-              // Copy to the right and down.  The X-Trans color layout is such that copying to those two neighbors
-              // results in all positions being filled except in the left-most and right-most columns and sometimes
-              // the topmost and bottom-most rows (depending on how the ROI aligns with the CFA).
-              fimgp[col+1] = fimgp[col+width] = d;
-            }
-            else // red or blue pixel
-            {
-              // Copy value to all eight neighbors; it's OK to copy to the row above even when we're in row 0 (or
-              // the row below when in the last row) because the destination is sandwiched between other buffers
-              // that will be overwritten afterwards anyway.  We need to copy to all adjacent positions because
-              // there may be two green pixels between nearest red/red or blue/blue, so each will cover one of the
-              // greens.
-              fimgp[col-width-1] = fimgp[col-width] = fimgp[col-width+1] = d; // row above
-              fimgp[col-1] = fimgp[col+1] = d;                                // left and right
-              if(row < pastend-1)
-                fimgp[col+width-1] = fimgp[col+width] = fimgp[col+width+1] = d; // row below
-            }
-          }
-        }
-        // leftmost and rightmost pixel in the row may still need to be filled in from a neighbor
-        if(FCNxtrans(row, 0, xtrans) != c)
-        {
-          int src = 0;	// fallback is current sensel even if it has the wrong color
-          if(row > 1 && FCNxtrans(row-1, 0, xtrans) == c)
-            src = -width;
-          else if(FCNxtrans(row, 1, xtrans) == c)
-            src = 1;
-          else if(row > 1 && FCNxtrans(row-1, 1, xtrans) == c)
-            src = -width + 1;
-          fimgp[0] = vstransform(inp[src]);
-        }
-        // check the right-most pixel; if it's the desired color and not green, copy it to the neighbors
-        if(c != 1 && FCNxtrans(row, width-1, xtrans) == c)
-        {
-          // copy to neighbors above and left
-          const float d = vstransform(inp[width-1]);
-          fimgp[width-2] = fimgp[width-1] = fimgp[-1] = d;
-        }
-        else if(FCNxtrans(row, width-1, xtrans) != c)
-        {
-          int src = width-1;	// fallback is current sensel even if it has the wrong color
-          if(FCNxtrans(row, width-2, xtrans) == c)
-            src = width-2;
-          else if(row > 1 && FCNxtrans(row-1, width-1, xtrans) == c)
-            src = -1;
-          else if(row > 1 && FCNxtrans(row-1, width-2, xtrans) == c)
-            src = -2;
-          fimgp[width-1] = vstransform(inp[src]);
-        }
+        // copy to neighbors above and right
+        const float d = vstransform(inp[0]);
+        fimgp[0] = fimgp[-width] = fimgp[-width+1] = d;
       }
-      if(pastend < height)
+      for(size_t col = (c != 1); col < width-1; col++)
       {
-        // Another slice follows us, and by updating the last row of our slice, we've clobbered values that
-        // were previously written by the other thread.  Restore them.
-        const float *const restrict inp = in + pastend * width;
-        float *const restrict fimgp = fimg + pastend * width;
-        for(size_t col = 0; col < width-1; col++)
+        if(FCNxtrans(row, col, xtrans) == c)
         {
-          if(FCNxtrans(pastend, col, xtrans) == c)
+          // the pixel at the current location has the desired color, so apply sqrt() as a variance-stablizing
+          // transform, and then do cheap nearest-neighbor interpolation by copying it to appropriate neighbors
+          const float d = vstransform(inp[col]);
+          fimgp[col] = d;
+          if(c == 1) // green pixel
           {
-            const float d = vstransform(inp[col]);
-            if(c == 1) // green pixel
-            {
-              if(FCNxtrans(pastend, col+1, xtrans) != c)
-                fimgp[col] = fimgp[col+1] = d;  // copy to the right
-            }
-            else // red/blue pixel
-            {
-              // copy the pixel's adjusted value to the prior row and left and right (if not at edge)
-              fimgp[col-width] = fimgp[col-width+1] = d;
-              if(col > 0) fimgp[col-width-1] = d;
-            }
+            // Copy to the right and down.  The X-Trans color layout is such that copying to those two neighbors
+            // results in all positions being filled except in the left-most and right-most columns and sometimes
+            // the topmost and bottom-most rows (depending on how the ROI aligns with the CFA).
+            fimgp[col+1] = fimgp[col+width] = d;
           }
-          // some red and blue values may need to be restored from the row TWO past the end of our slice
-          if(c != 1 && pastend+1 < height && FCNxtrans(pastend+1, col, xtrans) == c)
+          else // red or blue pixel
           {
-            const float d = vstransform(inp[col+width]);
-            fimgp[col] = fimgp[col+1] = d;
-            if(col > 0) fimgp[col-1] = d;
+            // Copy value to all eight neighbors; it's OK to copy to the row above even when we're in row 0 (or
+            // the row below when in the last row) because the destination is then one of the two extra rows of
+            // the buffer, which dwt_denoise() never reads.  We need to copy to all adjacent positions because
+            // there may be two green pixels between nearest red/red or blue/blue, so each will cover one of the
+            // greens.
+            fimgp[col-width-1] = fimgp[col-width] = fimgp[col-width+1] = d; // row above
+            fimgp[col-1] = fimgp[col+1] = d;                                // left and right
+            fimgp[col+width-1] = fimgp[col+width] = fimgp[col+width+1] = d; // row below
           }
         }
       }
+      // leftmost and rightmost pixel in the row may still need to be filled in from a neighbor
+      if(FCNxtrans(row, 0, xtrans) != c)
+      {
+        int src = 0;	// fallback is current sensel even if it has the wrong color
+        if(row > 0 && FCNxtrans(row-1, 0, xtrans) == c)
+          src = -width;
+        else if(FCNxtrans(row, 1, xtrans) == c)
+          src = 1;
+        else if(row > 0 && FCNxtrans(row-1, 1, xtrans) == c)
+          src = -width + 1;
+        fimgp[0] = (src == 0 && (row == 0 || row == height-1)) ? -1.0f : vstransform(inp[src]);
+      }
+      // check the right-most pixel; if it's the desired color and not green, copy it to the neighbors
+      if(c != 1 && FCNxtrans(row, width-1, xtrans) == c)
+      {
+        // copy to neighbors above and left
+        const float d = vstransform(inp[width-1]);
+        fimgp[width-2] = fimgp[width-1] = fimgp[-1] = d;
+      }
+      else if(FCNxtrans(row, width-1, xtrans) != c)
+      {
+        int src = width-1;	// fallback is current sensel even if it has the wrong color
+        if(FCNxtrans(row, width-2, xtrans) == c)
+          src = width-2;
+        else if(row > 0 && FCNxtrans(row-1, width-1, xtrans) == c)
+          src = -1;
+        else if(row > 0 && FCNxtrans(row-1, width-2, xtrans) == c)
+          src = -2;
+        fimgp[width-1] = (src == width-1 && (row == 0 || row == height-1)) ? -1.0f : vstransform(inp[src]);
+      }
+      else // green right-most pixel in the green plane
+      {
+        // the loop above stops one column short, so it never writes this sensel into the plane. If the left
+        // neighbor is green, the position would keep that neighbor's value. Otherwise it would keep the value
+        // the red pass left there, or an unset position in the top and bottom rows
+        fimgp[width-1] = vstransform(inp[width-1]);
+      }
+    }
+
+    // missing neighbors beyond the border leave holes; extend the completed plane one row outward
+    float *const last = fimg + (size_t)(height-1)*width;
+    for(size_t col = 0; col < width; col++)
+    {
+      if(fimg[col] < 0.0f) fimg[col] = fimg[width + col];
+      if(last[col] < 0.0f) last[col] = fimg[(size_t)(height-2)*width + col];
     }
 
     // perform the wavelet decomposition and denoising
@@ -487,6 +476,122 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     else
       wavelet_denoise_xtrans(ivoid, ovoid, roi_in, d, xtrans);
   }
+}
+
+#ifdef HAVE_OPENCL
+void tiling_callback(dt_iop_module_t *self,
+                     dt_dev_pixelpipe_iop_t *piece,
+                     const dt_iop_roi_t *roi_in,
+                     const dt_iop_roi_t *roi_out,
+                     dt_develop_tiling_t *tiling)
+{
+  default_tiling_callback(self, piece, roi_in, roi_out, tiling);
+  // process_cl() adds three quarter-size planes for the Bayer wavelets
+  tiling->factor_cl += 0.75f;
+}
+
+int process_cl(dt_iop_module_t *self,
+               dt_dev_pixelpipe_iop_t *piece,
+               cl_mem dev_in,
+               cl_mem dev_out,
+               const dt_iop_roi_t *const roi_in,
+               const dt_iop_roi_t *const roi_out)
+{
+  const dt_iop_rawdenoise_data_t *const d = piece->data;
+  const dt_iop_rawdenoise_global_data_t *const gd = self->global_data;
+  const int devid = piece->pipe->devid;
+  const int width = roi_in->width;
+  const int height = roi_in->height;
+
+  if(!(d->threshold > 0.0f))
+  {
+    const size_t region[2] = { width, height };
+    return dt_opencl_enqueue_copy_image(devid, dev_in, dev_out, CLIMG_ORIGIN, CLIMG_ORIGIN, region);
+  }
+
+  // the X-Trans planes are built sequentially, see wavelet_denoise_xtrans()
+  const uint32_t filters = piece->filters;
+  if(filters == 9u) return DT_OPENCL_PROCESS_CL;
+
+  const int maxhalfwidth = width / 2 + (width & 1);
+  const int maxhalfheight = height / 2 + (height & 1);
+  const size_t size = (size_t)maxhalfwidth * maxhalfheight * sizeof(float);
+
+  cl_int err = CL_MEM_OBJECT_ALLOCATION_FAILURE;
+  cl_mem dev_fimg = dt_opencl_alloc_device_buffer(devid, size);
+  cl_mem dev_interm = dt_opencl_alloc_device_buffer(devid, size);
+  cl_mem dev_accum = dt_opencl_alloc_device_buffer(devid, size);
+  if(!dev_fimg || !dev_interm || !dev_accum) goto error;
+
+  for(int c = 0; c < 4; c++) /* denoise R,G1,B,G3 individually */
+  {
+    const int color = FC(c % 2, c / 2, filters);
+    float noise[DT_IOP_RAWDENOISE_BANDS];
+    compute_channel_noise(noise, color, d);
+
+    // as in wavelet_denoise()
+    const int halfwidth = width / 2 + (width & (~(c >> 1)) & 1);
+    const int halfheight = height / 2 + (height & (~c) & 1);
+
+    err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_rawdenoise_extract, halfwidth, halfheight,
+            CLARG(dev_in), CLARG(dev_fimg), CLARG(c), CLARG(halfwidth), CLARG(halfheight));
+    if(err != CL_SUCCESS) goto error;
+    err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_rawdenoise_clear, halfwidth, halfheight,
+            CLARG(dev_accum), CLARG(halfwidth), CLARG(halfheight));
+    if(err != CL_SUCCESS) goto error;
+
+    for(int lev = 0; lev < DT_IOP_RAWDENOISE_BANDS; lev++)
+    {
+      const int last = lev + 1 == DT_IOP_RAWDENOISE_BANDS;
+      const int vscale = MIN(1 << lev, halfheight - 1);
+      const int hscale = MIN(1 << lev, halfwidth - 1);
+      err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_rawdenoise_dwt_vert, halfwidth, halfheight,
+              CLARG(dev_fimg), CLARG(dev_interm), CLARG(halfwidth), CLARG(halfheight), CLARG(vscale));
+      if(err != CL_SUCCESS) goto error;
+      err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_rawdenoise_dwt_horiz, halfwidth, halfheight,
+              CLARG(dev_interm), CLARG(dev_fimg), CLARG(dev_accum),
+              CLARG(halfwidth), CLARG(halfheight), CLARG(hscale), CLARG(noise[lev]), CLARG(last));
+      if(err != CL_SUCCESS) goto error;
+    }
+
+    err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_rawdenoise_scatter, halfwidth, halfheight,
+            CLARG(dev_fimg), CLARG(dev_out), CLARG(c), CLARG(halfwidth), CLARG(halfheight));
+    if(err != CL_SUCCESS) goto error;
+  }
+
+error:
+  dt_opencl_release_mem_object(dev_fimg);
+  dt_opencl_release_mem_object(dev_interm);
+  dt_opencl_release_mem_object(dev_accum);
+  return err;
+}
+#endif
+
+void init_global(dt_iop_module_so_t *self)
+{
+  const int program = 20; // dwt.cl, from programs.conf
+  dt_iop_rawdenoise_global_data_t *gd = malloc(sizeof(dt_iop_rawdenoise_global_data_t));
+  self->data = gd;
+  gd->kernel_rawdenoise_extract = dt_opencl_create_kernel(program, "rawdenoise_extract");
+  gd->kernel_rawdenoise_scatter = dt_opencl_create_kernel(program, "rawdenoise_scatter");
+  gd->kernel_rawdenoise_clear = dt_opencl_create_kernel(program, "rawdenoise_clear");
+  gd->kernel_rawdenoise_dwt_vert = dt_opencl_create_kernel(program, "rawdenoise_dwt_vert");
+  gd->kernel_rawdenoise_dwt_horiz = dt_opencl_create_kernel(program, "rawdenoise_dwt_horiz");
+}
+
+void cleanup_global(dt_iop_module_so_t *self)
+{
+  dt_iop_rawdenoise_global_data_t *gd = self->data;
+  if(gd)
+  {
+    dt_opencl_free_kernel(gd->kernel_rawdenoise_extract);
+    dt_opencl_free_kernel(gd->kernel_rawdenoise_scatter);
+    dt_opencl_free_kernel(gd->kernel_rawdenoise_clear);
+    dt_opencl_free_kernel(gd->kernel_rawdenoise_dwt_vert);
+    dt_opencl_free_kernel(gd->kernel_rawdenoise_dwt_horiz);
+  }
+  free(self->data);
+  self->data = NULL;
 }
 
 void init(dt_iop_module_t *self)
@@ -723,7 +828,7 @@ static gboolean rawdenoise_draw(GtkWidget *widget, cairo_t *crf, dt_iop_module_t
   // draw labels:
   PangoLayout *layout;
   PangoRectangle ink;
-  PangoFontDescription *desc = pango_font_description_copy_static(darktable.bauhaus->pango_font_desc);
+  PangoFontDescription *desc = dt_gui_get_font();
   pango_font_description_set_weight(desc, PANGO_WEIGHT_BOLD);
   pango_font_description_set_absolute_size(desc, (.08 * height) * PANGO_SCALE);
   layout = pango_cairo_create_layout(cr);
@@ -849,6 +954,13 @@ static void rawdenoise_leave_notify(GtkEventControllerMotion *controller, dt_iop
 static void rawdenoise_scrolled(GtkEventControllerScroll *controller, gdouble dx, gdouble dy, dt_iop_module_t *self)
 {
   dt_iop_rawdenoise_gui_data_t *g = self->gui_data;
+
+  if(dt_modifier_eq(controller, GDK_MOD1_MASK))
+  {
+    // alt+scroll switches the channel tab (as before the controller conversion)
+    dt_gui_forward_scroll(controller, GTK_WIDGET(g->channel_tabs));
+    return;
+  }
 
   if(dy != 0.0)
   {

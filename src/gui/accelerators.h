@@ -46,6 +46,11 @@ gboolean dt_shortcut_dispatcher(GtkWidget *w, GdkEvent *event, gpointer user_dat
 gboolean dt_shortcut_tooltip_callback(GtkWidget *widget, gint x, gint y, gboolean keyboard_mode,
                                       GtkTooltip *tooltip, GtkWidget *vbox);
 void dt_shortcut_copy_lua(dt_action_t *action, gchar *preset_name);
+// the shortcuts of `action` active in any of `views`, as tooltips show them
+// and separated by `separator`; NULL when it has none. Free with g_free()
+gchar *dt_shortcut_action_keys(dt_action_t *action,
+                               const dt_view_type_flags_t views,
+                               const gchar *separator);
 
 float dt_action_process(const gchar *action, int instance, const gchar *element, const gchar *effect, float size);
 
@@ -224,6 +229,20 @@ void dt_action_cleanup_instance_iop(dt_iop_module_t *module);
 
 // UX miscellaneous functions
 void dt_action_widget_toast(dt_action_t *action, GtkWidget *widget, const gchar *msg, ...);
+
+/* Widgets whose activation lives in a gesture controller (a GtkGesture*
+ * "pressed"/"released" handler instead of widget class vfuncs or "clicked"/
+ * "toggled" signals) register their gesture here so the shortcut machinery
+ * can invoke the same code path as a real click: synthetic GdkEvents never
+ * reach gesture controllers, so without this a shortcut would flip the
+ * widget's visual state without activating it.  See _action_process_toggle
+ * and _action_process_button in accelerators.c.
+ *
+ * GTK4: this stored-gesture path survives the switch -- "button-press-event"
+ * does not exist in GTK4 and GdkEvent is opaque
+ * (https://docs.gtk.org/gtk4/migrating-3to4.html, "Event controllers and
+ * gestures replace event signals"). */
+#define DT_ACTION_GESTURE_KEY "_dt_action_gesture"
 
 // check if widget intentionally hidden (to disable it)
 gboolean dt_action_widget_invisible(GtkWidget *w);

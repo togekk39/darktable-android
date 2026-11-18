@@ -183,9 +183,8 @@ static int mobile_mask_photo_checks(dt_mobile_session *session)
   dt_mobile_free_buffer(points); points = NULL;
   for(int index = 0; index < 4; index++) { ENGINE_OK(dt_mobile_undo(session)); edits--; }
 
-  /* The other aspect axis has a fractional output size before native ROI
-   * rounding. Its callbacks must use those committed dimensions, just like
-   * native pixel processing, rather than resampling-buffer scale factors. */
+  /* native distortion callbacks use the exact pixel aspect ratio, while the
+   * output ROI rounds its dimensions independently. Keep both contracts */
   ENGINE_OK(dt_mobile_set_parameter(session, "scalepixels", "pixel_aspect_ratio", .625)); edits++;
   ENGINE_OK(dt_mobile_render_preview(session, 95, 73, &restored, &other_width, &other_height));
   dt_mobile_free_buffer(restored); restored = NULL;
@@ -198,7 +197,7 @@ static int mobile_mask_photo_checks(dt_mobile_session *session)
   CHECK(fabs(mobile_mask_photo_test_value(metadata, "exposure", center_x)
     - .3 * other_width / fractional_scale / fractional_width) < 1e-6);
   CHECK(fabs(mobile_mask_photo_test_value(metadata, "exposure", center_y)
-    - .7 * other_height / fractional_scale / fractional_height) < 1e-6);
+    - .7 * other_height / fractional_scale * .625 / original_height) < 1e-6);
   dt_mobile_free_buffer(metadata); metadata = NULL;
   ENGINE_OK(dt_mobile_mask_photo_points(session, "exposure", &points));
   CHECK(mobile_mask_photo_test_handle(points, id, 0, &px, &py, &visible));

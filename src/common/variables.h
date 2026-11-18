@@ -38,6 +38,9 @@ typedef struct dt_variables_params_t
   /** used as thread-safe sequence number. only used if >= 0. */
   int sequence;
 
+  /** number of the filename collision being resolved during import */
+  int conflict;
+
   /** internal variables data */
   struct dt_variables_data_t *data;
 
@@ -77,6 +80,22 @@ void dt_variables_set_tags_flags(dt_variables_params_t *params,
 char *dt_variables_expand(dt_variables_params_t *params,
                           gchar *source,
                           const gboolean iterate);
+/** expands variables in a string naming a filesystem path. on Windows '\\' is
+    taken as a separator rather than an escape, so "D:\\photos\\$(YEAR)" keeps
+    both; "\\/" still escapes a '/' inside $(VAR/pattern/replacement). use
+    dt_variables_expand() for patterns that are not paths. the result should
+    be freed with g_free(). */
+char *dt_variables_expand_path(dt_variables_params_t *params,
+                               gchar *source,
+                               const gboolean iterate);
+/** expands variables in a filesystem path pattern, allowing list-valued
+    variables (e.g. $(CATEGORY_EACH[n,category])) to yield one path per value.
+    returns a GList of gchar*, or NULL when the expansion failed, for instance
+    when the cartesian product of the list values is too large. the result
+    should be freed with g_list_free_full(list, g_free). */
+GList *dt_variables_expand_path_multi(dt_variables_params_t *params,
+                                      gchar *source,
+                                      const gboolean iterate);
 /** reset sequence number */
 void dt_variables_reset_sequence(dt_variables_params_t *params);
 

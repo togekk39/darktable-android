@@ -11,6 +11,7 @@
 #include "develop/develop.h"
 #include "develop/imageop.h"
 #include "develop/masks.h"
+#include "develop/mask_context.h"
 #include "dt_mobile_parameter_policy.h"
 #include "dt_mobile_crop_validation.h"
 #include "dt_mobile_export.h"
@@ -374,7 +375,9 @@ dt_mobile_status dt_mobile_engine_open(const char *path, dt_mobile_engine **out,
   pthread_mutex_lock(&engine_work_lock);
   gchar *directory = g_path_get_dirname(path);
   dt_film_t film;
+  dt_film_init(&film);
   const dt_filmid_t film_id = dt_film_new(&film, directory);
+  dt_film_cleanup(&film);
   g_free(directory);
   const dt_imgid_t image_id = dt_is_valid_filmid(film_id)
     ? dt_image_import(film_id, path, TRUE, FALSE) : NO_IMGID;
@@ -396,7 +399,9 @@ dt_mobile_status dt_mobile_engine_open(const char *path, dt_mobile_engine **out,
   engine->preview_cancel = dt_imageio_preview_cancel_new();
   pthread_mutex_lock(&engine_work_lock);
   dt_dev_init(&engine->develop, FALSE);
+  const dt_develop_t *previous_mask_edit = dt_mobile_mask_edit_begin(&engine->develop);
   dt_dev_load_image(&engine->develop, image_id);
+  dt_mobile_mask_edit_end(previous_mask_edit);
   /* Loading history constructs its items. Apply the current history end to
    * module params before exposing controls or editing a single field, so all
    * other values from imported history and auto presets are preserved. */
@@ -1200,7 +1205,7 @@ static void append_crop(dt_mobile_engine *engine, dt_iop_module_t *module, GStri
 
 typedef struct mobile_whitebalance_layout
 {
-  size_t gains[4], preset;
+  size_t gains[4], preset, late_correction;
   int channels;
 } mobile_whitebalance_layout;
 
@@ -1209,9 +1214,9 @@ static gboolean whitebalance_layout(dt_iop_module_t *module, mobile_whitebalance
   if(!module || strcmp(module->op, "temperature") || !module->dev || !module->params
      || module->params_size <= 0 || !module->have_introspection
      || !module->get_introspection || !module->get_introspection() || !module->get_f) return FALSE;
-  const char *names[] = { "red", "green", "blue", "various", "preset" };
-  const dt_introspection_field_t *fields[5];
-  for(size_t k = 0; k < 5; k++)
+  const char *names[] = { "red", "green", "blue", "various", "preset", "late_correction" };
+  const dt_introspection_field_t *fields[6];
+  for(size_t k = 0; k < 6; k++)
   {
     fields[k] = module->get_f(names[k]);
     if(!curve_field_fits(module, fields[k]) || !fields[k]->header.field_name
@@ -1223,11 +1228,17 @@ static gboolean whitebalance_layout(dt_iop_module_t *module, mobile_whitebalance
          || fields[k]->Float.Min != 0.0f || fields[k]->Float.Max != 8.0f) return FALSE;
       layout->gains[k] = fields[k]->header.offset;
     }
-    else
+    else if(k == 4)
     {
       if(fields[k]->header.type != DT_INTROSPECTION_TYPE_INT
          || fields[k]->header.size != sizeof(int)) return FALSE;
       layout->preset = fields[k]->header.offset;
+    }
+    else
+    {
+      if(fields[k]->header.type != DT_INTROSPECTION_TYPE_BOOL
+         || fields[k]->header.size != sizeof(gboolean)) return FALSE;
+      layout->late_correction = fields[k]->header.offset;
     }
     for(size_t previous = 0; previous < k; previous++)
       if(fields[k]->header.offset < fields[previous]->header.offset + fields[previous]->header.size
@@ -1245,8 +1256,8 @@ static gboolean whitebalance_available(const dt_iop_module_t *module)
 
 static const char *whitebalance_setting_label(int setting)
 {
-  /* Stable built-in setting IDs match temperature.c. USER and SPOT describe
-   * existing state but are not client-selectable named coefficient sources. */
+  /* the public setting 4 maps to upstream as-shot plus late_correction;
+   * USER and SPOT are readable states, not selectable named coefficient sources */
   switch(setting)
   {
     case 0: return "as shot";
@@ -1264,7 +1275,7 @@ static gboolean whitebalance_basis(const dt_iop_module_t *module,
 {
   if(setting != 0 && setting != 3 && setting != 4) return FALSE;
   const dt_dev_chroma_t *chroma = &module->dev->chroma;
-  const double *basis = setting == 3 ? chroma->D65coeffs : chroma->as_shot;
+  const double *basis = setting == 3 ? chroma->wb.D65coeffs : chroma->as_shot;
   for(int channel = 0; channel < layout->channels; channel++)
   {
     /* Original named coefficients are not the manual slider range. Preserve
@@ -1338,14 +1349,20 @@ static void append_whitebalance(dt_iop_module_t *module, GString *json)
 {
   mobile_whitebalance_layout layout;
   if(!whitebalance_layout(module, &layout) || !whitebalance_available(module)) return;
+  typedef int (*setting_function)(dt_iop_module_t *);
+  setting_function effective_setting = NULL;
+  if(!g_module_symbol(module->module, "dt_iop_mobile_temperature_setting", (gpointer *)&effective_setting)
+     || !effective_setting) return;
+  const int setting = effective_setting(module);
   float gains[4];
   for(int channel = 0; channel < 4; channel++)
-  {
     memcpy(&gains[channel], (const char *)module->params + layout.gains[channel], sizeof(float));
-    if(channel < layout.channels && !isfinite(gains[channel])) return; /* Manual batch can repair this state. */
+  if(setting == 0 || setting == 3 || setting == 4)
+  {
+    if(!whitebalance_basis(module, &layout, setting, gains)) return;
   }
-  int setting;
-  memcpy(&setting, (const char *)module->params + layout.preset, sizeof(setting));
+  for(int channel = 0; channel < layout.channels; channel++)
+    if(!isfinite(gains[channel])) return;
   g_string_append(json, ",\"whiteBalance\":{\"channels\":[");
   const gboolean cygm = layout.channels == 4 && FILTERS_ARE_CYGM(module->dev->image_storage.buf_dsc.filters);
   const int cygm_order[] = { 2, 3, 1, 0 };
@@ -1385,30 +1402,16 @@ static void append_whitebalance(dt_iop_module_t *module, GString *json)
 
 static void sync_temperature_chroma(dt_develop_t *dev)
 {
-  /* A headless develop has no persistent pixelpipe commit. Derive the same
-   * temperature-owned state as temperature.c commit_params after restoring or
-   * editing params. Keep original as-shot/D65 bases and adaptation ownership. */
+  /* ask the current upstream module to resolve its own coefficients and mode;
+   * history may store another image's values in an as-shot/reference preset */
   for(GList *item = dev->iop; item; item = item->next)
   {
     dt_iop_module_t *module = item->data;
     if(strcmp(module->op, "temperature")) continue;
-    if(!whitebalance_available(module) || module->hide_enable_button)
-    {
-      for(int channel = 0; channel < 4; channel++) dev->chroma.wb_coeffs[channel] = 1.0f;
-      return; /* The original true-monochrome commit also returns here. */
-    }
-    mobile_whitebalance_layout layout;
-    if(!whitebalance_layout(module, &layout)) return;
-    for(int channel = 0; channel < 4; channel++)
-    {
-      float gain;
-      memcpy(&gain, (const char *)module->params + layout.gains[channel], sizeof(gain));
-      dev->chroma.wb_coeffs[channel] = module->enabled ? gain : 1.0f;
-    }
-    int setting;
-    memcpy(&setting, (const char *)module->params + layout.preset, sizeof(setting));
-    dev->chroma.late_correction = setting == 4;
-    dev->chroma.temperature = module->enabled ? module : NULL;
+    typedef void (*sync_function)(dt_iop_module_t *);
+    sync_function sync = NULL;
+    if(g_module_symbol(module->module, "dt_iop_mobile_temperature_sync", (gpointer *)&sync) && sync)
+      sync(module);
     return;
   }
 }
@@ -1819,8 +1822,9 @@ dt_mobile_status dt_mobile_engine_set_whitebalance_gains(dt_mobile_engine *engin
         memcpy((char *)module->params + layout.gains[channel], &gains[channel], sizeof(float));
       const int user_setting = 2;
       memcpy((char *)module->params + layout.preset, &user_setting, sizeof(user_setting));
-      /* save_module also derives late_correction=FALSE and the enabled
-       * temperature coefficients before capturing this single undo step. */
+      const gboolean late_correction = FALSE;
+      memcpy((char *)module->params + layout.late_correction, &late_correction, sizeof(late_correction));
+      /* resolve the enabled coefficients before capturing this single undo step */
       save_module(engine, module, TRUE);
     }
   }
@@ -1875,6 +1879,8 @@ dt_mobile_status dt_mobile_engine_set_whitebalance_temperature(dt_mobile_engine 
         memcpy((char *)module->params + layout.gains[channel], &gains[channel], sizeof(float));
       const int user_setting = 2;
       memcpy((char *)module->params + layout.preset, &user_setting, sizeof(user_setting));
+      const gboolean late_correction = FALSE;
+      memcpy((char *)module->params + layout.late_correction, &late_correction, sizeof(late_correction));
       save_module(engine, module, TRUE);
     }
   }
@@ -1904,7 +1910,10 @@ dt_mobile_status dt_mobile_engine_set_whitebalance_setting(dt_mobile_engine *eng
   {
     for(int channel = 0; channel < layout.channels; channel++)
       memcpy((char *)module->params + layout.gains[channel], &gains[channel], sizeof(float));
-    memcpy((char *)module->params + layout.preset, &setting, sizeof(setting));
+    const int preset = setting == 4 ? 0 : setting;
+    const gboolean late_correction = setting == 4;
+    memcpy((char *)module->params + layout.preset, &preset, sizeof(preset));
+    memcpy((char *)module->params + layout.late_correction, &late_correction, sizeof(late_correction));
     save_module(engine, module, TRUE);
   }
   end_operation(engine);

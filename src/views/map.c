@@ -15,6 +15,7 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
+
 #include "common/gdk_event_utils.h"
 
 #include "common/collection.h"
@@ -35,6 +36,7 @@
 #include "libs/lib.h"
 #include "views/view.h"
 #include "views/view_api.h"
+
 #include <gdk/gdkkeysyms.h>
 
 #include <osm-gps-map.h>
@@ -773,10 +775,12 @@ void init(dt_view_t *self)
 
     gtk_drag_dest_set(GTK_WIDGET(lib->map), GTK_DEST_DEFAULT_ALL,
                       target_list_internal, n_targets_internal, GDK_ACTION_MOVE);
-    dt_gui_connect_scroll(GTK_WIDGET(lib->map),
-                          GTK_EVENT_CONTROLLER_SCROLL_VERTICAL
-                          | GTK_EVENT_CONTROLLER_SCROLL_DISCRETE,
-                          _view_map_scroll_cb, self);
+    GtkEventController *scroll_controller =
+      dt_gui_connect_scroll(GTK_WIDGET(lib->map),
+                            GTK_EVENT_CONTROLLER_SCROLL_VERTICAL
+                            | GTK_EVENT_CONTROLLER_SCROLL_DISCRETE,
+                            _view_map_scroll_cb, self);
+    gtk_event_controller_set_propagation_phase(scroll_controller, GTK_PHASE_CAPTURE);
     g_signal_connect(GTK_WIDGET(lib->map), "drag-data-received",
                      G_CALLBACK(_drag_and_drop_received), self);
     g_signal_connect(GTK_WIDGET(lib->map), "drag-data-get",
@@ -1161,7 +1165,7 @@ static void _view_map_draw_main_location(dt_map_t *lib,
     dt_location_draw_t *d = _others_location_draw(lib, lib->loc.main.id);
     if(!d)
     {
-      d = g_malloc0(sizeof(dt_location_draw_t));
+      d = g_try_malloc0(sizeof(dt_location_draw_t));
       if(d)
         lib->loc.others = g_list_append(lib->loc.others, d);
     }
@@ -1879,7 +1883,7 @@ static void _view_map_motion_cb(GtkEventControllerMotion *controller,
                                 dt_view_t *self)
 {
   dt_map_t *lib = self->data;
-  GdkEvent *event = gtk_get_current_event();
+  GdkEvent *event = dt_gui_get_current_event(GTK_EVENT_CONTROLLER(controller));
 
   if(event)
   {
@@ -1895,12 +1899,13 @@ static void _view_map_motion_cb(GtkEventControllerMotion *controller,
      && lib->loc.main.id > 0)
   {
     gdouble root_x, root_y;
-    gdk_event_get_root_coords(event, &root_x, &root_y);
+    dt_gui_get_event_coords(event, &root_x, &root_y);
     if((abs(lib->start_drag_x - (int)ceil(root_x)) +
         abs(lib->start_drag_y - (int)ceil(root_y))) > DT_PIXEL_APPLY_DPI(8))
     {
       lib->loc.drag = FALSE;
       osm_gps_map_image_remove(lib->map, lib->loc.main.location);
+#if !GTK_CHECK_VERSION(4, 0, 0)
       GtkTargetList *targets = gtk_target_list_new(target_list_internal, n_targets_internal);
 
       GdkDragContext *context =
@@ -1923,7 +1928,14 @@ static void _view_map_motion_cb(GtkEventControllerMotion *controller,
         g_object_unref(location);
       }
       gtk_target_list_unref(targets);
+#else
+      /* GTK4 TODO: map-view drag-and-drop needs a GdkContentProvider
+       * rewrite; gtk_drag_begin_with_coordinates() takes different
+       * arguments and GtkTargetList is gone. */
+#endif
+#if !GTK_CHECK_VERSION(4, 0, 0)
       gdk_event_free(event);
+#endif
       return;
     }
   }
@@ -1932,7 +1944,7 @@ static void _view_map_motion_cb(GtkEventControllerMotion *controller,
      && lib->selected_images)
   {
     gdouble root_x, root_y;
-    gdk_event_get_root_coords(event, &root_x, &root_y);
+    dt_gui_get_event_coords(event, &root_x, &root_y);
     if((abs(lib->start_drag_x - (int)ceil(root_x)) +
         abs(lib->start_drag_y - (int)ceil(root_y))) > DT_PIXEL_APPLY_DPI(8))
     {
@@ -1962,6 +1974,7 @@ static void _view_map_motion_cb(GtkEventControllerMotion *controller,
       const int group_count = g_list_length(lib->selected_images);
 
       lib->start_drag = FALSE;
+#if !GTK_CHECK_VERSION(4, 0, 0)
       GtkTargetList *targets = gtk_target_list_new(target_list_all, n_targets_all);
       GdkDragContext *context = gtk_drag_begin_with_coordinates(GTK_WIDGET(lib->map), targets,
                                                                 GDK_ACTION_MOVE, 1,
@@ -1970,11 +1983,17 @@ static void _view_map_motion_cb(GtkEventControllerMotion *controller,
                               group_count);
       gtk_target_list_unref(targets);
       gdk_event_free(event);
+#else
+      /* GTK4 TODO: map-view drag-and-drop needs a GdkContentProvider
+       * rewrite (see above). */
+#endif
       return;
     }
   }
 
+#if !GTK_CHECK_VERSION(4, 0, 0)
   if(event) gdk_event_free(event);
+#endif
 
   dt_map_image_t *entry = _view_map_get_entry_at_pos(self, x, y);
   if(entry)
@@ -2052,13 +2071,20 @@ static void _view_map_scroll_cb(GtkEventControllerScroll *controller,
   dt_map_t *lib = self->data;
 
   // get the current event for position and modifier state
-  GdkEvent *event = gtk_get_current_event();
+  GdkEvent *event = dt_gui_get_current_event(GTK_EVENT_CONTROLLER(controller));
   if(!event) return;
   gdouble x, y;
   GdkModifierType state;
+#if GTK_CHECK_VERSION(4, 0, 0)
+  gdk_event_get_position(event, &x, &y);
+  state = gdk_event_get_modifier_state(event);
+#else
   gdk_event_get_coords(event, &x, &y);
   gdk_event_get_state(event, &state);
+  // the GTK3 current event is an owned copy; free it once x/y/state are
+  // extracted -- the rest of the callback only uses dx/dy
   gdk_event_free(event);
+#endif
 
   // determine scroll direction from dy
   const gboolean scroll_down = dy > 0;
@@ -2137,8 +2163,8 @@ static void _view_map_click_pressed_cb(GtkGestureSingle *gesture,
                                         dt_view_t *self)
 {
   dt_map_t *lib = self->data;
-  GdkModifierType state;
-  gtk_get_current_event_state(&state);
+  const GdkModifierType state =
+    dt_gui_get_current_event_state(GTK_EVENT_CONTROLLER(gesture));
 
   if(lib->selected_images)
   {
@@ -2191,6 +2217,10 @@ static void _view_map_click_pressed_cb(GtkGestureSingle *gesture,
           lib->start_drag_x = root_x;
           lib->start_drag_y = root_y;
           lib->loc.drag = TRUE;
+          // This press starts darktable's location DnD, not map panning.
+          // The former signal handler returned TRUE here; preserve that
+          // consumed-event invariant with the capture-phase gesture.
+          dt_gui_claim(gesture);
           return;
         }
       }
@@ -2220,6 +2250,7 @@ static void _view_map_click_pressed_cb(GtkGestureSingle *gesture,
                                             G_CALLBACK(_view_map_collection_changed), self);
           dt_control_signal_unblock_by_func(darktable.signals,
                                             G_CALLBACK(_view_map_geotag_changed), self);
+          dt_gui_claim(gesture);
           return;
         }
       }
@@ -2240,6 +2271,11 @@ static void _view_map_click_pressed_cb(GtkGestureSingle *gesture,
         lib->start_drag_x = root_x;
         lib->start_drag_y = root_y;
         lib->start_drag = TRUE;
+        /* OsmGpsMap must not see this press and enter its own pan gesture.
+         * GTK DnD takes over after the motion threshold, so OsmGpsMap would
+         * otherwise miss the release and remain visually frozen until the
+         * next click. The pre-controller handler returned TRUE here. */
+        dt_gui_claim(gesture);
       }
     }
     else if(n_press == 2)
@@ -2247,6 +2283,7 @@ static void _view_map_click_pressed_cb(GtkGestureSingle *gesture,
       if(lib->selected_images)
       {
         // open the image in darkroom
+        dt_gui_claim(gesture);
         dt_control_set_mouse_over_id(GPOINTER_TO_INT(lib->selected_images->data));
         dt_ctl_switch_mode_to("darkroom");
       }
@@ -2262,6 +2299,7 @@ static void _view_map_click_pressed_cb(GtkGestureSingle *gesture,
         g_object_get(G_OBJECT(lib->map), "zoom", &zoom, "max-zoom", &max_zoom, NULL);
         zoom = MIN(zoom + 1, max_zoom);
         _view_map_center_on_location(self, longitude, latitude, zoom);
+        dt_gui_claim(gesture);
       }
     }
   }

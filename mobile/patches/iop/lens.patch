@@ -1,0 +1,21 @@
+--- a/src/iop/lens.cc
++++ b/src/iop/lens.cc
+@@ -2129,6 +2129,9 @@
+   lfDatabase *dt_iop_lensfun_db = (lfDatabase *)gd->db;
+   const lfCamera *camera = NULL;
+   const lfCamera **cam = NULL;
++  // A manually selected lens can be used with an unknown camera body. Keep
++  // the image/user crop factor as a fallback until a camera match overrides it.
++  d->crop = p->crop;
+   if(d->lens)
+   {
+     delete d->lens;
+@@ -3968,6 +3971,8 @@
+   self->data = NULL;
+ }
+ 
++#include "mobile/adapters/iop/lens.inc"
++
+ /* Lensfun GUI start */
+ 
+ /// ############################################################

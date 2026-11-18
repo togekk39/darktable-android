@@ -16,8 +16,6 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <assert.h>
-#include <gmodule.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -42,6 +40,7 @@
 #include "gui/color_picker_proxy.h"
 #include "iop/iop_api.h"
 
+// 'white' is the value that is mapped to 1.0 after exposure correction
 #define exposure2white(x) exp2f(-(x))
 #define white2exposure(x) -dt_log2f(fmaxf(1e-20f, x))
 
@@ -83,12 +82,9 @@ typedef struct dt_iop_exposure_gui_data_t
   GtkWidget *exposure;
   GtkWidget *deflicker_percentile;
   GtkWidget *deflicker_target_level;
-  uint32_t *deflicker_histogram; // used to cache histogram of source file
-  dt_dev_histogram_stats_t deflicker_histogram_stats;
   GtkLabel *deflicker_used_EC;
   GtkWidget *compensate_exposure_bias;
   GtkWidget *compensate_hilite_preserv;
-  float effective_exposure; // used to cache the final computed exposure
   float deflicker_computed_exposure;
 
   GtkWidget *spot_mode;
@@ -105,9 +101,13 @@ typedef struct dt_iop_exposure_gui_data_t
 typedef struct dt_iop_exposure_data_t
 {
   dt_iop_exposure_params_t params;
-  int deflicker;
+  gboolean deflicker;
   float black;
   float scale;
+  // cache the raw source histogram per pipe: cleanup is serialized with
+  // processing, and image changes rebuild the pipe nodes
+  uint32_t *deflicker_histogram;
+  dt_dev_histogram_stats_t deflicker_histogram_stats;
 } dt_iop_exposure_data_t;
 
 typedef struct dt_iop_exposure_global_data_t
@@ -357,7 +357,9 @@ void reload_defaults(dt_iop_module_t *self)
   if(scene_raw && self->multi_priority == 0)
   {
     const gboolean mono = dt_image_is_monochrome(&self->dev->image_storage);
-    d->exposure = mono ? 0.0f : 0.7f;
+    // DNG BaselineExposure states how much the raw data has to be pushed
+    // relative to a typical camera, so it adds to the generic boost
+    d->exposure = (mono ? 0.0f : 0.7f) + self->dev->image_storage.dng_baseline_exposure;
     d->black =    mono ? 0.0f : -0.000244140625f;
     d->compensate_exposure_bias = TRUE;
   }
@@ -439,15 +441,13 @@ static double _raw_to_ev(const uint32_t raw,
   return raw_ev;
 }
 
-static void _compute_correction(dt_iop_module_t *self,
-                                dt_iop_exposure_params_t *p,
+static void _compute_deflicker_correction(dt_iop_exposure_params_t *p,
                                 dt_dev_pixelpipe_t *pipe,
                                 const uint32_t *const histogram,
                                 const dt_dev_histogram_stats_t *const histogram_stats,
                                 float *correction)
 {
-  *correction = EXPOSURE_CORRECTION_UNDEFINED;
-
+  // preserve caller's correction if we cannot compute anything
   if(histogram == NULL) return;
 
   const double thr
@@ -484,26 +484,17 @@ static void _process_common_setup(dt_iop_module_t *self,
   dt_iop_exposure_data_t *d = piece->data;
 
   d->black = d->params.black;
+  // the default is also the fallback for _compute_deflicker_correction below
   float exposure = d->params.exposure;
 
   if(d->deflicker)
   {
-    if(g)
-    {
-      // histogram is precomputed and cached
-      _compute_correction(self, &d->params, piece->pipe,
-                          g->deflicker_histogram, &g->deflicker_histogram_stats,
-                          &exposure);
-    }
-    else
-    {
-      uint32_t *histogram = NULL;
-      dt_dev_histogram_stats_t histogram_stats;
-      _deflicker_prepare_histogram(self, &histogram, &histogram_stats);
-      _compute_correction(self, &d->params, piece->pipe, histogram,
-                          &histogram_stats, &exposure);
-      dt_free_align(histogram);
-    }
+    if(!d->deflicker_histogram)
+      _deflicker_prepare_histogram(self, &d->deflicker_histogram,
+                                   &d->deflicker_histogram_stats);
+    _compute_deflicker_correction(&d->params, piece->pipe,
+                                  d->deflicker_histogram, &d->deflicker_histogram_stats,
+                                  &exposure);
 
     // second, show computed correction in UI.
     if(g && dt_pipe_is_preview(piece->pipe))
@@ -517,7 +508,9 @@ static void _process_common_setup(dt_iop_module_t *self,
   }
 
   const float white = exposure2white(exposure);
-  d->scale = 1.0 / (white - d->black);
+  if(d->black >= white)
+    d->black = white - 0.01f;
+  d->scale = 1.0f / (white - d->black);
 }
 
 #ifdef HAVE_OPENCL
@@ -611,14 +604,44 @@ static float _get_highlight_bias(const dt_iop_module_t *self)
     return 0.0f;
 }
 
-
-static float _effective_exposure_from_params(const dt_iop_module_t *self,
-                                             const dt_iop_exposure_params_t *p)
+// The correction, in EV, that the module adds on top of the user's exposure parameter to
+// account for the two biases recorded in EXIF.
+// Both directions of the conversion (see below) go through this, so they
+// cannot drift apart.
+static inline float _exposure_compensation_ev(const dt_iop_module_t *const self,
+                                              const dt_iop_exposure_params_t *const p)
 {
-  float exposure = p->exposure;
-  if(p->compensate_exposure_bias) exposure -= _get_exposure_bias(self);
-  if(p->compensate_hilite_pres) exposure += _get_highlight_bias(self);
-  return exposure;
+  float compensation = 0.0f;
+
+  // compensate the correction the user dialed into the camera
+  if(p->compensate_exposure_bias)
+    compensation -= _get_exposure_bias(self);
+
+  // undo the underexposure the camera applied automatically
+  if(p->compensate_hilite_pres)
+    compensation += _get_highlight_bias(self);
+
+  return compensation;
+}
+
+// The total exposure adjustment the pipe applies in manual mode: the slider plus the
+// exposure compensation. commit_params() and the proxy accessor both go through this,
+// so the value other modules read cannot drift away from the one that is processed.
+static inline float _total_adjustment_ev(const dt_iop_module_t *const self,
+                                         const dt_iop_exposure_params_t *const p)
+{
+  return p->exposure + _exposure_compensation_ev(self, p);
+}
+
+// The inverse: the value to store in p->exposure (i.e. where to move the exposure slider)
+// so that the pipe ends up applying `total_adjustment_ev`. The GUI needs it because it
+// reasons in terms of the total adjustment - black has to stay below the white point
+// derived from it - but writes the user parameter (slider value).
+static inline float _required_exposure_slider_ev(const dt_iop_module_t *const self,
+                                                 const dt_iop_exposure_params_t *const p,
+                                                 const float total_adjustment_ev)
+{
+  return total_adjustment_ev - _exposure_compensation_ev(self, p);
 }
 
 void commit_params(dt_iop_module_t *self,
@@ -630,23 +653,18 @@ void commit_params(dt_iop_module_t *self,
   dt_iop_exposure_data_t *d = piece->data;
 
   d->params.black = p->black;
-  d->params.exposure = _effective_exposure_from_params(self, p);
+  d->params.exposure = _total_adjustment_ev(self, p);
   d->params.deflicker_percentile = p->deflicker_percentile;
   d->params.deflicker_target_level = p->deflicker_target_level;
 
-  d->deflicker = 0;
-
-  if (self->gui_data)
-  {
-    ((dt_iop_exposure_gui_data_t *)self->gui_data)->effective_exposure = d->params.exposure;
-  }
+  d->deflicker = FALSE;
 
   if(p->mode == EXPOSURE_MODE_DEFLICKER
      && dt_image_is_raw(&self->dev->image_storage)
      && self->dev->image_storage.buf_dsc.channels == 1
      && self->dev->image_storage.buf_dsc.datatype == TYPE_UINT16)
   {
-    d->deflicker = 1;
+    d->deflicker = TRUE;
   }
 }
 
@@ -661,6 +679,8 @@ void cleanup_pipe(dt_iop_module_t *self,
                   dt_dev_pixelpipe_t *pipe,
                   dt_dev_pixelpipe_iop_t *piece)
 {
+  dt_iop_exposure_data_t *d = piece->data;
+  dt_free_align(d->deflicker_histogram);
   free(piece->data);
   piece->data = NULL;
 }
@@ -719,9 +739,6 @@ void gui_update(dt_iop_module_t *self)
 
   dt_iop_gui_leave_critical_section(self);
 
-  dt_free_align(g->deflicker_histogram);
-  g->deflicker_histogram = NULL;
-
   gtk_label_set_text(g->deflicker_used_EC, "");
   dt_iop_gui_enter_critical_section(self);
   g->deflicker_computed_exposure = EXPOSURE_CORRECTION_UNDEFINED;
@@ -732,8 +749,6 @@ void gui_update(dt_iop_module_t *self)
     case EXPOSURE_MODE_DEFLICKER:
       _autoexp_disable(self);
       gtk_stack_set_visible_child_name(GTK_STACK(g->mode_stack), "deflicker");
-      _deflicker_prepare_histogram(self, &g->deflicker_histogram,
-                                   &g->deflicker_histogram_stats);
       break;
     case EXPOSURE_MODE_MANUAL:
     default:
@@ -762,12 +777,16 @@ void cleanup_global(dt_iop_module_so_t *self)
   self->data = NULL;
 }
 
+// Set the exposure parameter (slider value) such that 'white' is mapped to 1.0 after
+// commit_params() re-applies the compensations. Callers work in that domain
+// because p->black does too - black is never compensated - so the black clamps can
+// compare the two directly.
 static void _exposure_set_white(dt_iop_module_t *self,
                                 const float white)
 {
   dt_iop_exposure_params_t *p = self->params;
 
-  const float exposure = white2exposure(white);
+  const float exposure = _required_exposure_slider_ev(self, p, white2exposure(white));
   if(p->exposure == exposure) return;
 
   p->exposure = exposure;
@@ -803,7 +822,7 @@ static void _exposure_set_black(dt_iop_module_t *self,
   if(p->black == black) return;
 
   p->black = black;
-  if(p->black >= exposure2white(p->exposure))
+  if(p->black >= exposure2white(_total_adjustment_ev(self, p)))
   {
     _exposure_set_white(self, p->black + 0.01);
   }
@@ -821,24 +840,32 @@ static float _exposure_proxy_get_black(dt_iop_module_t *self)
   return p->black;
 }
 
+// The exposure that is actually applied, for other modules to read through
+// dev->proxy.exposure. Derived from the parameters on the caller's thread, like
+// _exposure_proxy_get_exposure() and _exposure_proxy_get_black() above: a value cached
+// by the pipe would be one commit behind whenever the caller asks right after a change.
+// Reading params this way is only safe on the GTK thread, which owns them - see the
+// thread contract on dt_dev_proxy_exposure_t in develop.h.
 static float _exposure_proxy_get_effective_exposure(dt_iop_module_t *self)
 {
-  const dt_iop_exposure_gui_data_t* const g = self->gui_data;
-  return g ? g->effective_exposure : _effective_exposure_from_params(self, self->params);
-}
+  const dt_iop_exposure_params_t *const p = self->params;
 
-/* Use the same effective-exposure proxy without creating a desktop GUI or
- * consulting the global darkroom view. The caller selects its develop's
- * enabled exposure instance. */
-G_MODULE_EXPORT int dt_iop_mobile_exposure_get_effective_exposure(dt_iop_module_t *self,
-                                                                float *exposure)
-{
-  if(!self || !self->params || self->params_size != sizeof(dt_iop_exposure_params_t)
-     || !self->dev || !self->enabled || !exposure) return 0;
-  const float effective = _exposure_proxy_get_effective_exposure(self);
-  if(!isfinite(effective)) return 0;
-  *exposure = effective;
-  return 1;
+  if(p->mode == EXPOSURE_MODE_DEFLICKER)
+  {
+    // deflicker computes its correction from the raw histogram inside the pipe, so the
+    // value it caches is the only source; it stays undefined until the preview pipe has
+    // run once, and there is no GUI to cache it in outside the darkroom
+    const dt_iop_exposure_gui_data_t *const g = self->gui_data;
+    if(!g) return 0.f;
+
+    dt_iop_gui_enter_critical_section(self);
+    const float computed = g->deflicker_computed_exposure;
+    dt_iop_gui_leave_critical_section(self);
+
+    return computed == EXPOSURE_CORRECTION_UNDEFINED ? 0.f : computed;
+  }
+
+  return _total_adjustment_ev(self, p);
 }
 
 static void _exposure_proxy_handle_event(int n_press,
@@ -900,7 +927,7 @@ static void _auto_set_exposure(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe)
   dt_aligned_pixel_t Lab;
   dot_product(RGB, input_profile->matrix_in, XYZ);
   dt_XYZ_to_Lab(XYZ, Lab);
-  Lab[1] = Lab[2] = Lab[3] = 0.f; // make color grey to get only the equivalent lighness
+  Lab[1] = Lab[2] = Lab[3] = 0.f; // make color gray to get only the equivalent lightness
   dt_Lab_to_XYZ(Lab, XYZ);
   dt_XYZ_to_sRGB(XYZ, g->spot_RGB);
 
@@ -919,28 +946,20 @@ static void _auto_set_exposure(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe)
 
   if(mode == DT_SPOT_MODE_MEASURE)
   {
-    // get the exposure setting
-    float expo = p->exposure;
+    // the exposure the pipe applies, i.e. the user setting plus the compensations
+    const float exposure_adjustment = _total_adjustment_ev(self, p);
 
-    // If the exposure bias compensation is on, we need to add it to the user param
-    if(p->compensate_exposure_bias)
-      expo -= _get_exposure_bias(self);
-
-    // If the highlight preservation mode is on, we need to add it to the user param
-    if(p->compensate_hilite_pres)
-      expo += _get_highlight_bias(self);
-
-    const float white = exposure2white(-expo);
+    const float gain = exp2f(exposure_adjustment);
 
     // apply the exposure compensation
     dt_aligned_pixel_t XYZ_out = {0.0f };
     for(int c = 0; c < 3; c++)
-      XYZ_out[c] = XYZ[c] * white;
+      XYZ_out[c] = XYZ[c] * gain;
 
     // Convert to Lab for GUI feedback
     dt_aligned_pixel_t Lab_out;
     dt_XYZ_to_Lab(XYZ_out, Lab_out);
-    Lab_out[1] = Lab_out[2] = 0.f; // make it grey
+    Lab_out[1] = Lab_out[2] = 0.f; // make it gray
 
     // Return the values in sliders
     DT_ENTER_GUI_UPDATE();
@@ -964,20 +983,9 @@ static void _auto_set_exposure(dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe)
     dt_aligned_pixel_t XYZ_target = { 0.f };
     dt_Lab_to_XYZ(Lab_target, XYZ_target);
 
-    // Get the ratio
-    float white =  XYZ[1] / XYZ_target[1];
-    float expo = -white2exposure(white);
-
-    // If the exposure bias compensation is on, we need to subtract it from the user param
-    if(p->compensate_exposure_bias)
-      expo -= _get_exposure_bias(self);
-
-    // If the highlight preservation mode is on, we need to add it to the user param
-    if(p->compensate_hilite_pres)
-      expo += _get_highlight_bias(self);
-
-    white = exposure2white(-expo);
-    _exposure_set_white(self, white);
+    // a near-black target cannot be matched, and a near-black sample explodes the ratio
+    if(XYZ[1] > 1e-5f && XYZ_target[1] > 1e-5f)
+      _exposure_set_white(self, XYZ[1] / XYZ_target[1]);
   }
 }
 
@@ -991,6 +999,19 @@ void color_picker_apply(dt_iop_module_t *self,
 }
 
 
+// keep black under the white point the pipe will map to 1.0, so that
+// white - black cannot reach zero or turn negative; the comparison is in the
+// compensated domain because that is what the pipe uses, while p->black is
+// never compensated
+static void _clamp_black_below_white(dt_iop_module_t *self)
+{
+  const dt_iop_exposure_params_t *const p = self->params;
+
+  const float white = exposure2white(_total_adjustment_ev(self, p));
+  if(p->black >= white)
+    _exposure_set_black(self, white - 0.01);
+}
+
 void gui_changed(dt_iop_module_t *self,
                  GtkWidget *w,
                  void *previous)
@@ -1000,9 +1021,6 @@ void gui_changed(dt_iop_module_t *self,
 
   if(w == g->mode)
   {
-    dt_free_align(g->deflicker_histogram);
-    g->deflicker_histogram = NULL;
-
     switch(p->mode)
     {
       case EXPOSURE_MODE_DEFLICKER:
@@ -1011,14 +1029,13 @@ void gui_changed(dt_iop_module_t *self,
            || self->dev->image_storage.buf_dsc.channels != 1
            || self->dev->image_storage.buf_dsc.datatype != TYPE_UINT16)
         {
+          // force manual for unsupported image type
           p->mode = EXPOSURE_MODE_MANUAL;
           dt_bauhaus_combobox_set(g->mode, p->mode);
           gtk_widget_set_sensitive(GTK_WIDGET(g->mode), FALSE);
           break;
         }
         gtk_stack_set_visible_child_name(GTK_STACK(g->mode_stack), "deflicker");
-        _deflicker_prepare_histogram(self, &g->deflicker_histogram,
-                                     &g->deflicker_histogram_stats);
         break;
       case EXPOSURE_MODE_MANUAL:
       default:
@@ -1026,17 +1043,30 @@ void gui_changed(dt_iop_module_t *self,
         break;
     }
   }
-  else if(w == g->exposure)
+
+  // black and the white point must not cross. to ensure that, adjust black if the user
+  // changed exposure controls, and adjust exposure if they moved black. only in manual
+  // mode: the manual white point is not applied in deflicker mode, but its hidden
+  // controls stay reachable via shortcuts, so manual white must not constrain the visible
+  // and active black
+  if(p->mode == EXPOSURE_MODE_MANUAL)
   {
-    const float white = exposure2white(p->exposure);
-    if(p->black >= white)
-      _exposure_set_black(self, white - 0.01);
-  }
-  else if(w == g->black)
-  {
-    const float white = exposure2white(p->exposure);
-    if(p->black >= white)
-      _exposure_set_white(self, p->black + 0.01);
+    if(w == g->black)
+    {
+      const float white = exposure2white(_total_adjustment_ev(self, p));
+      if(p->black >= white)
+        _exposure_set_white(self, p->black + 0.01);
+    }
+    else if(w == g->mode
+            || w == g->exposure
+            || w == g->compensate_exposure_bias
+            || w == g->compensate_hilite_preserv)
+    {
+      // the white point moved, or manual mode was just entered (normally, or
+      // forced for an unsupported image) with a black left over from deflicker
+      // mode's white point
+      _clamp_black_below_white(self);
+    }
   }
 }
 
@@ -1189,7 +1219,7 @@ static void _spot_settings_changed_callback(GtkWidget *slider,
   const dt_spot_mode_t mode = dt_bauhaus_combobox_get(g->spot_mode);
   DT_LEAVE_GUI_UPDATE();
 
-  if(mode == DT_SPOT_MODE_CORRECT)
+  if(mode == DT_SPOT_MODE_CORRECT && dt_iop_color_picker_is_active(g->exposure))
     _auto_set_exposure(self, darktable.develop->full.pipe);
   // else : just record new values and do nothing
 }
@@ -1202,8 +1232,6 @@ void gui_reset(dt_iop_module_t *self)
 void gui_init(dt_iop_module_t *self)
 {
   dt_iop_exposure_gui_data_t *g = IOP_GUI_ALLOC(exposure);
-
-  g->deflicker_histogram = NULL;
 
   g->mode_stack = GTK_STACK(gtk_stack_new());
   gtk_stack_set_homogeneous(GTK_STACK(g->mode_stack),FALSE);
@@ -1359,13 +1387,8 @@ void gui_init(dt_iop_module_t *self)
 
 void gui_cleanup(dt_iop_module_t *self)
 {
-  dt_iop_exposure_gui_data_t *g = self->gui_data;
-
   if(darktable.develop->proxy.exposure.module == self)
     darktable.develop->proxy.exposure.module = NULL;
-
-  dt_free_align(g->deflicker_histogram);
-  g->deflicker_histogram = NULL;
 
   g_idle_remove_by_data(self);
 }

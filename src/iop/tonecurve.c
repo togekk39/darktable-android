@@ -15,8 +15,9 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
+
 #include "common/gdk_event_utils.h"
-#include <assert.h>
+
 #include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -412,7 +413,7 @@ void process(dt_iop_module_t *self,
   float *const restrict out = (float*)o;
 
   DT_OMP_FOR()
-  for(int k = 0; k < 4*npixels; k += 4)
+  for(size_t k = 0; k < 4*npixels; k += 4)
   {
     const float L_in = in[k] / 100.0f;
 
@@ -723,6 +724,12 @@ void init_presets(dt_iop_module_so_t *self)
   }
 }
 
+static inline int _tonecurve_nodes(const int nodes)
+{
+  // stored counts index the fixed node arrays, and the last node at nodes - 1
+  return CLAMP(nodes, 1, DT_IOP_TONECURVE_MAXNODES);
+}
+
 void commit_params(dt_iop_module_t *self,
                    dt_iop_params_t *p1,
                    dt_dev_pixelpipe_t *pipe,
@@ -747,13 +754,13 @@ void commit_params(dt_iop_module_t *self,
       d->curve[ch] = dt_draw_curve_new(0.0, 1.0, p->tonecurve_type[ch]);
       d->curve_nodes[ch] = p->tonecurve_nodes[ch];
       d->curve_type[ch] = p->tonecurve_type[ch];
-      for(int k = 0; k < p->tonecurve_nodes[ch]; k++)
+      for(int k = 0; k < _tonecurve_nodes(p->tonecurve_nodes[ch]); k++)
         (void)dt_draw_curve_add_point(d->curve[ch],
                                       p->tonecurve[ch][k].x, p->tonecurve[ch][k].y);
     }
     else
     {
-      for(int k = 0; k < p->tonecurve_nodes[ch]; k++)
+      for(int k = 0; k < _tonecurve_nodes(p->tonecurve_nodes[ch]); k++)
         dt_draw_curve_set_point(d->curve[ch], k,
                                 p->tonecurve[ch][k].x, p->tonecurve[ch][k].y);
     }
@@ -799,7 +806,7 @@ void commit_params(dt_iop_module_t *self,
   d->preserve_colors = p->preserve_colors;
 
   // extrapolation for L-curve (right hand side only):
-  const float xm_L = p->tonecurve[ch_L][p->tonecurve_nodes[ch_L] - 1].x;
+  const float xm_L = p->tonecurve[ch_L][_tonecurve_nodes(p->tonecurve_nodes[ch_L]) - 1].x;
   const float x_L[4] = { 0.7f * xm_L, 0.8f * xm_L, 0.9f * xm_L, 1.0f * xm_L };
   const float y_L[4] = { d->table[ch_L][CLAMP((int)(x_L[0] * 0x10000ul), 0, 0xffff)],
                          d->table[ch_L][CLAMP((int)(x_L[1] * 0x10000ul), 0, 0xffff)],
@@ -808,7 +815,7 @@ void commit_params(dt_iop_module_t *self,
   dt_iop_estimate_exp(x_L, y_L, 4, d->unbounded_coeffs_L);
 
   // extrapolation for a-curve right side:
-  const float xm_ar = p->tonecurve[ch_a][p->tonecurve_nodes[ch_a] - 1].x;
+  const float xm_ar = p->tonecurve[ch_a][_tonecurve_nodes(p->tonecurve_nodes[ch_a]) - 1].x;
   const float x_ar[4] = { 0.7f * xm_ar, 0.8f * xm_ar, 0.9f * xm_ar, 1.0f * xm_ar };
   const float y_ar[4] = { d->table[ch_a][CLAMP((int)(x_ar[0] * 0x10000ul), 0, 0xffff)],
                           d->table[ch_a][CLAMP((int)(x_ar[1] * 0x10000ul), 0, 0xffff)],
@@ -826,7 +833,7 @@ void commit_params(dt_iop_module_t *self,
   dt_iop_estimate_exp(x_al, y_al, 4, d->unbounded_coeffs_ab + 3);
 
   // extrapolation for b-curve right side:
-  const float xm_br = p->tonecurve[ch_b][p->tonecurve_nodes[ch_b] - 1].x;
+  const float xm_br = p->tonecurve[ch_b][_tonecurve_nodes(p->tonecurve_nodes[ch_b]) - 1].x;
   const float x_br[4] = { 0.7f * xm_br, 0.8f * xm_br, 0.9f * xm_br, 1.0f * xm_br };
   const float y_br[4] = { d->table[ch_b][CLAMP((int)(x_br[0] * 0x10000ul), 0, 0xffff)],
                           d->table[ch_b][CLAMP((int)(x_br[1] * 0x10000ul), 0, 0xffff)],
@@ -909,6 +916,10 @@ void gui_update(dt_iop_module_t *self)
 {
   dt_iop_tonecurve_gui_data_t *g = self->gui_data;
   dt_iop_tonecurve_params_t *p = self->params;
+
+  // every GUI handler uses the stored count, and adding a node writes through it
+  for(int ch = 0; ch < ch_max; ch++)
+    p->tonecurve_nodes[ch] = _tonecurve_nodes(p->tonecurve_nodes[ch]);
 
   gui_changed(self, g->autoscale_ab, 0);
 
@@ -1279,7 +1290,7 @@ void gui_init(dt_iop_module_t *self)
   gtk_widget_set_tooltip_text
     (g->colorpicker,
      _("pick GUI color from image\nctrl+click or right-click to select an area"));
-  dt_action_define_iop(self, NULL, N_("pick color"), g->colorpicker, &dt_action_def_toggle);
+  dt_action_define_iop(self, NULL, N_("pick color"), g->colorpicker, &dt_action_def_color_picker);
 
   dt_gui_box_add(self->widget, dt_gui_hbox(dt_gui_expand(g->channel_tabs), 
                                            dt_gui_align_right(g->colorpicker)));
@@ -1568,8 +1579,7 @@ static gboolean dt_iop_tonecurve_draw(GtkWidget *widget,
         cairo_save(cr);
         PangoLayout *layout;
         PangoRectangle ink;
-        PangoFontDescription *desc =
-          pango_font_description_copy_static(darktable.bauhaus->pango_font_desc);
+        PangoFontDescription *desc = dt_gui_get_font();
         pango_font_description_set_weight(desc, PANGO_WEIGHT_BOLD);
         pango_font_description_set_absolute_size(desc, PANGO_SCALE);
         layout = pango_cairo_create_layout(cr);
@@ -1662,8 +1672,7 @@ static gboolean dt_iop_tonecurve_draw(GtkWidget *widget,
     // draw information about current selected node
     PangoLayout *layout;
     PangoRectangle ink;
-    PangoFontDescription *desc =
-      pango_font_description_copy_static(darktable.bauhaus->pango_font_desc);
+    PangoFontDescription *desc = dt_gui_get_font();
     pango_font_description_set_weight(desc, PANGO_WEIGHT_BOLD);
     pango_font_description_set_absolute_size(desc, PANGO_SCALE);
     layout = pango_cairo_create_layout(cr);
@@ -1944,12 +1953,18 @@ static void dt_iop_tonecurve_button_press(GtkGestureSingle *gesture,
   }
   else if(gtk_gesture_single_get_current_button(gesture) == GDK_BUTTON_SECONDARY && g->selected >= 0)
   {
+    // consume the event so it does not bubble to the module body's
+    // right-click handler (which opens the presets menu); the pre-migration
+    // button-press handler returned TRUE here
+    dt_gui_claim(gesture);
+
     if(g->selected == 0 || g->selected == nodes - 1)
     {
       float reset_value = g->selected == 0 ? 0 : 1;
       tonecurve[g->selected].y = tonecurve[g->selected].x = reset_value;
       gtk_widget_queue_draw(GTK_WIDGET(g->area));
       dt_dev_add_history_item_target(darktable.develop, self, TRUE, widget + ch);
+      return; // an endpoint reset must not fall through into node removal
     }
 
     for(int k = g->selected; k < nodes - 1; k++)

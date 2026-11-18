@@ -53,6 +53,16 @@ static const float DT_ALIGNED_ARRAY dt_iop_overexposed_colors[][2][4]
           { 0.512f, 0.934f, 0.371f, 1.0f }  // green  (#83ef5f)
         } };
 
+// the indicators are UI tones, authored as device values of the window
+static void _indicator_colors(dt_iop_module_t *self,
+                              const dt_dev_pixelpipe_t *pipe,
+                              dt_aligned_pixel_t colors[2])
+{
+  const int colorscheme = self->dev->overexposed.colorscheme;
+  for(int k = 0; k < 2; k++) copy_pixel(colors[k], dt_iop_overexposed_colors[colorscheme][k]);
+  dt_ioppr_device_to_output(self->dev, pipe, colors[0], 2, 1);
+}
+
 typedef struct dt_iop_overexposed_global_data_t
 {
   int kernel_overexposed;
@@ -124,15 +134,18 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   const float lower = exp2f(fminf(dev->overexposed.lower, -4.f));   // in EV
   const float upper = dev->overexposed.upper / 100.0f;              // in %
 
-  const int colorscheme = dev->overexposed.colorscheme;
-  const float *const upper_color = dt_iop_overexposed_colors[colorscheme][0];
-  const float *const lower_color = dt_iop_overexposed_colors[colorscheme][1];
+  dt_aligned_pixel_t colors[2];
+  _indicator_colors(self, piece->pipe, colors);
+  const float *const upper_color = colors[0];
+  const float *const lower_color = colors[1];
 
   const float *const restrict in = DT_IS_ALIGNED((const float *const restrict)ivoid);
   float *const restrict out = DT_IS_ALIGNED((float *const restrict)ovoid);
 
   const dt_iop_order_iccprofile_info_t *const current_profile = dt_ioppr_get_pipe_current_profile_info(self, piece->pipe);
-  const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_histogram_profile_info(dev);
+  // the preview may still hold a frame from before this run's proof change
+  const dt_iop_order_iccprofile_info_t *const work_profile =
+    dt_ioppr_get_scope_profile_info(dev, &piece->pipe->output_encoding);
 
   // display mask using histogram profile as output
   // FIXME: the histogram already does this work -- use that data instead?
@@ -176,10 +189,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     DT_OMP_FOR()
     for(size_t k = 0; k < (size_t)ch * roi_out->width * roi_out->height; k += ch)
     {
-      const float luminance = dt_ioppr_get_rgb_matrix_luminance(img_tmp + k,
-                                                                work_profile->matrix_in, work_profile->lut_in,
-                                                                work_profile->unbounded_coeffs_in,
-                                                                work_profile->lutsize, work_profile->nonlinearlut);
+      const float luminance = dt_ioppr_rgb_luminance(img_tmp + k, work_profile);
 
       // luminance is out of bounds
       if(luminance >= upper)
@@ -229,10 +239,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     DT_OMP_FOR()
     for(size_t k = 0; k < (size_t)ch * roi_out->width * roi_out->height; k += ch)
     {
-      const float luminance = dt_ioppr_get_rgb_matrix_luminance(img_tmp + k,
-                                                                work_profile->matrix_in, work_profile->lut_in,
-                                                                work_profile->unbounded_coeffs_in,
-                                                                work_profile->lutsize, work_profile->nonlinearlut);
+      const float luminance = dt_ioppr_rgb_luminance(img_tmp + k, work_profile);
 
       if(luminance >= upper)
       {
@@ -256,10 +263,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
     DT_OMP_FOR()
     for(size_t k = 0; k < (size_t)ch * roi_out->width * roi_out->height; k += ch)
     {
-      const float luminance = dt_ioppr_get_rgb_matrix_luminance(img_tmp + k,
-                                                                work_profile->matrix_in, work_profile->lut_in,
-                                                                work_profile->unbounded_coeffs_in,
-                                                                work_profile->lutsize, work_profile->nonlinearlut);
+      const float luminance = dt_ioppr_rgb_luminance(img_tmp + k, work_profile);
       if(luminance < upper && luminance > lower)
       {
         dt_aligned_pixel_t saturation = { 0.f };
@@ -314,12 +318,17 @@ int process_cl(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_
 
   const int ch = piece->colors;
   cl_mem dev_tmp = NULL;
+  cl_mem dev_profile_info = NULL;
+  cl_mem dev_profile_lut = NULL;
+  dt_colorspaces_iccprofile_info_cl_t *profile_info_cl = NULL;
+  cl_float *profile_lut_cl = NULL;
 
   const int width = roi_out->width;
   const int height = roi_out->height;
 
   const dt_iop_order_iccprofile_info_t *const current_profile = dt_ioppr_get_pipe_current_profile_info(self, piece->pipe);
-  const dt_iop_order_iccprofile_info_t *const work_profile = dt_ioppr_get_histogram_profile_info(dev);
+  const dt_iop_order_iccprofile_info_t *const work_profile =
+    dt_ioppr_get_scope_profile_info(dev, &piece->pipe->output_encoding);
 
   // display mask using histogram profile as output
   dev_tmp = dt_opencl_alloc_device(devid, width, height, sizeof(float) * ch);
@@ -330,21 +339,21 @@ int process_cl(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_
     goto error;
   }
 
-  if(current_profile && work_profile)
-    dt_ioppr_transform_image_colorspace_rgb_cl(devid, dev_in, dev_tmp, roi_out->width, roi_out->height,
-                                               current_profile, work_profile, self->op);
-  else
+  if(!current_profile || !work_profile)
   {
     dt_print(DT_DEBUG_ALWAYS, "[overexposed process_cl] can't create transform profile");
     dt_control_log(_("module overexposed failed in color conversion"));
     goto error;
   }
 
+  if(!dt_ioppr_transform_image_colorspace_rgb_cl(devid, dev_in, dev_tmp, roi_out->width, roi_out->height,
+                                                 current_profile, work_profile, self->op))
+  {
+    err = DT_OPENCL_PROCESS_CL;
+    goto error;
+  }
+
   const int use_work_profile = (work_profile == NULL) ? 0 : 1;
-  cl_mem dev_profile_info = NULL;
-  cl_mem dev_profile_lut = NULL;
-  dt_colorspaces_iccprofile_info_cl_t *profile_info_cl;
-  cl_float *profile_lut_cl = NULL;
 
   err = dt_ioppr_build_iccprofile_params_cl(work_profile, devid, &profile_info_cl, &profile_lut_cl,
                                             &dev_profile_info, &dev_profile_lut);
@@ -352,10 +361,10 @@ int process_cl(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_
 
   const float lower = exp2f(fminf(dev->overexposed.lower, -4.f));   // in EV
   const float upper = dev->overexposed.upper / 100.0f;              // in %
-  const int colorscheme = dev->overexposed.colorscheme;
-
-  const float *upper_color = dt_iop_overexposed_colors[colorscheme][0];
-  const float *lower_color = dt_iop_overexposed_colors[colorscheme][1];
+  dt_aligned_pixel_t colors[2];
+  _indicator_colors(self, piece->pipe, colors);
+  const float *upper_color = colors[0];
+  const float *lower_color = colors[1];
   const int mode = dev->overexposed.mode;
 
   err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_overexposed, width, height,
@@ -364,6 +373,7 @@ int process_cl(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_
     CLARG(dev_profile_info), CLARG(dev_profile_lut), CLARG(use_work_profile), CLARG(mode));
 
 error:
+  dt_ioppr_free_iccprofile_params_cl(&profile_info_cl, &profile_lut_cl, &dev_profile_info, &dev_profile_lut);
   dt_opencl_release_mem_object(dev_tmp);
   return err;
 }

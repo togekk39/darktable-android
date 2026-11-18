@@ -163,8 +163,13 @@ static GtkWidget *setup_pref(GtkWidget **label,
 }
 
 static void setup_not_available(GtkWidget **widget,
-                                GtkWidget *labelev)
+                                GtkWidget *labelev,
+                                GtkWidget *dialog)
 {
+  // the dialog's "response" handler holds this widget as user data; drop it
+  // before the destroy below, or it fires on close against freed memory
+  g_signal_handlers_disconnect_matched(G_OBJECT(dialog), G_SIGNAL_MATCH_DATA,
+                                       0, 0, NULL, NULL, *widget);
   gtk_widget_destroy(*widget);
   *widget = gtk_label_new(_("not available"));
   gtk_widget_set_halign(*widget, GTK_ALIGN_START);
@@ -367,6 +372,17 @@ static void init_tab_generated(GtkWidget *dialog, GtkWidget *stack)
 
   <xsl:for-each select="./section">
     <xsl:variable name="section" select="@name"/>
+    <xsl:choose>
+    <!-- the devices are only known at runtime, preferences.c builds this section -->
+    <xsl:when test="$section = 'cldevices'">
+      <xsl:if test="$HAVE_OPENCL = 1">
+        <xsl:text>
+#ifdef HAVE_OPENCL
+    _preferences_opencl_devices(GTK_GRID(grid), &amp;line, _("</xsl:text><xsl:value-of select="@title"/><xsl:text>"));
+#endif</xsl:text>
+      </xsl:if>
+    </xsl:when>
+    <xsl:otherwise>
     <xsl:text>
     {
       GtkWidget *seclabel = gtk_label_new(_("</xsl:text><xsl:value-of select="@title"/><xsl:text>"));
@@ -381,6 +397,8 @@ static void init_tab_generated(GtkWidget *dialog, GtkWidget *stack)
                                                  and (name != 'opencl' or $HAVE_OPENCL = 1)]">
       <xsl:apply-templates select="." mode="tab_block"/>
     </xsl:for-each>
+    </xsl:otherwise>
+    </xsl:choose>
   </xsl:for-each>
   <xsl:text>
   }</xsl:text>
@@ -450,7 +468,7 @@ static void init_tab_generated(GtkWidget *dialog, GtkWidget *stack)
       <xsl:text>
     if(!dt_capabilities_check("</xsl:text><xsl:value-of select="@capability"/><xsl:text>"))
     {
-      setup_not_available(&amp;widget, labelev);
+      setup_not_available(&amp;widget, labelev, dialog);
     }</xsl:text>
     </xsl:if>
     <xsl:text>

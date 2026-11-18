@@ -309,9 +309,11 @@ static inline void _process_pixel(const dt_aligned_pixel_t pix_in,
     dt_vector_powf(print_linear, gamma, print_gamma); // note : this is always > 0
     dt_aligned_pixel_t e_to_gamma;
     dt_aligned_pixel_t clipped_gamma;
+    // exp(x) = 2^(x / ln(2)). Not dt_vector_exp(): it is off by more than
+    // 10% below -1, and the OpenCL kernel uses the real exp()
     for_each_channel(c)
-      clipped_gamma[c] = -(print_gamma[c] - soft_clip[c]) / soft_clip_comp[c];
-    dt_vector_exp(clipped_gamma, e_to_gamma);
+      clipped_gamma[c] = -(print_gamma[c] - soft_clip[c]) / soft_clip_comp[c] * 1.44269504f;
+    dt_vector_exp2(clipped_gamma, e_to_gamma);
     for_each_channel(c)
     {
       // Compress highlights. from https://lists.gnu.org/archive/html/openexr-devel/2005-03/msg00009.html
@@ -847,7 +849,7 @@ void gui_init(dt_iop_module_t *self)
 
   g->Dmin_sampler = dt_color_picker_new(self, DT_COLOR_PICKER_AREA, NULL);
   gtk_widget_set_tooltip_text(g->Dmin_sampler , _("pick color of film material from image"));
-  dt_action_define_iop(self, N_("pickers"), N_("film material"), g->Dmin_sampler, &dt_action_def_toggle);
+  dt_action_define_iop(self, N_("pickers"), N_("film material"), g->Dmin_sampler, &dt_action_def_color_picker);
 
   dt_gui_box_add(page1, dt_ui_section_label_new(C_("section", "color of the film base")),
                         dt_gui_hbox(dt_gui_expand(g->Dmin_picker), g->Dmin_sampler));
@@ -909,7 +911,7 @@ void gui_init(dt_iop_module_t *self)
 
   g->WB_low_sampler = dt_color_picker_new(self, DT_COLOR_PICKER_AREA, NULL);
   gtk_widget_set_tooltip_text(g->WB_low_sampler, _("pick shadows color from image"));
-  dt_action_define_iop(self, N_("pickers"), N_("shadows"), g->WB_low_sampler, &dt_action_def_toggle);
+  dt_action_define_iop(self, N_("pickers"), N_("shadows"), g->WB_low_sampler, &dt_action_def_color_picker);
 
   dt_gui_box_add(page2, dt_ui_section_label_new(C_("section", "shadows color cast")),
                         dt_gui_hbox(dt_gui_expand(g->WB_low_picker), g->WB_low_sampler));
@@ -943,7 +945,7 @@ void gui_init(dt_iop_module_t *self)
 
   g->WB_high_sampler = dt_color_picker_new(self, DT_COLOR_PICKER_AREA, NULL);
   gtk_widget_set_tooltip_text(g->WB_high_sampler , _("pick illuminant color from image"));
-  dt_action_define_iop(self, N_("pickers"), N_("illuminant"), g->WB_high_sampler, &dt_action_def_toggle);
+  dt_action_define_iop(self, N_("pickers"), N_("illuminant"), g->WB_high_sampler, &dt_action_def_color_picker);
 
   dt_gui_box_add(page2, dt_ui_section_label_new(C_("section", "highlights white balance")),
                         dt_gui_hbox(dt_gui_expand(g->WB_high_picker), g->WB_high_sampler));

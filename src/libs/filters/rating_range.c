@@ -31,28 +31,15 @@ static gboolean _rating_range_update(dt_lib_filtering_rule_t *rule)
                                       : NULL;
 
   rule->manual_widget_set++;
-  char query[1024] = { 0 };
-  // clang-format off
-  g_snprintf(query, sizeof(query),
-             "SELECT CASE WHEN (flags & 8) == 8 THEN -1 ELSE (flags & 7) END AS rating,"
-             " COUNT(*) AS count"
-             " FROM main.images AS mi"
-             " WHERE %s"
-             " GROUP BY rating"
-             " ORDER BY rating",
-             rule->lib->last_where_ext);
-  // clang-format on
   int nb[7] = { 0 };
-  sqlite3_stmt *stmt;
-  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), query, -1, &stmt, NULL);
-  while(sqlite3_step(stmt) == SQLITE_ROW)
-  {
-    const int val = sqlite3_column_int(stmt, 0);
-    const int count = sqlite3_column_int(stmt, 1);
 
-    if(val < 6 && val >= -1) nb[val + 1] += count;
+  GList *counts = dt_filter_get_rating_range_counts(rule->lib->last_where_ext);
+  for(GList *iter = counts; iter; iter = g_list_next(iter))
+  {
+    dt_filter_int_count_t *count = iter->data;
+    if(count->val < 6 && count->val >= -1) nb[count->val + 1] += count->count;
   }
-  sqlite3_finalize(stmt);
+  g_list_free_full(counts, dt_filter_int_count_free);
 
   dtgtk_range_select_reset_blocks(range);
   dtgtk_range_select_add_range_block(range, 1.0, 1.0, DT_RANGE_BOUND_MIN | DT_RANGE_BOUND_MAX,
@@ -173,29 +160,6 @@ static gchar *_rating_get_bounds_pretty(GtkDarktableRangeSelect *range)
   }
 
   return dtgtk_range_select_get_bounds_pretty(range);
-}
-
-static void _rating_paint_icon(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data)
-{
-  // first, we set the color depending on the flags
-  void *my_data = NULL;
-  GdkRGBA shade_color;
-
-  if((flags & CPF_PRELIGHT) || (flags & CPF_ACTIVE))
-  {
-    // we want a filled icon
-    cairo_get_source(cr);
-    cairo_pattern_get_rgba(cairo_get_source(cr),
-                           &shade_color.red,
-                           &shade_color.green,
-                           &shade_color.blue,
-                           &shade_color.alpha);
-    shade_color.alpha *= 0.6;
-    my_data = &shade_color;
-  }
-
-  // then we draw the regular icon
-  dtgtk_cairo_paint_star(cr, x, y, w, h, flags, my_data);
 }
 
 enum
@@ -338,11 +302,11 @@ static void _rating_range_widget_init(dt_lib_filtering_rule_t *rule,
   dtgtk_range_select_add_icon(range, 7, -1, dtgtk_cairo_paint_reject, 0, NULL);
   dtgtk_range_select_add_icon(range, 22, 0, dtgtk_cairo_paint_unratestar, 0, NULL);
 
-  dtgtk_range_select_add_icon(range, 36, 1, _rating_paint_icon, 0, NULL);
-  dtgtk_range_select_add_icon(range, 50, 2, _rating_paint_icon, 0, NULL);
-  dtgtk_range_select_add_icon(range, 64, 3, _rating_paint_icon, 0, NULL);
-  dtgtk_range_select_add_icon(range, 78, 4, _rating_paint_icon, 0, NULL);
-  dtgtk_range_select_add_icon(range, 93, 5, _rating_paint_icon, 0, NULL);
+  dtgtk_range_select_add_icon(range, 36, 1, dtgtk_cairo_paint_rating_star, 0, NULL);
+  dtgtk_range_select_add_icon(range, 50, 2, dtgtk_cairo_paint_rating_star, 0, NULL);
+  dtgtk_range_select_add_icon(range, 64, 3, dtgtk_cairo_paint_rating_star, 0, NULL);
+  dtgtk_range_select_add_icon(range, 78, 4, dtgtk_cairo_paint_rating_star, 0, NULL);
+  dtgtk_range_select_add_icon(range, 93, 5, dtgtk_cairo_paint_rating_star, 0, NULL);
   range->print = _rating_print_func;
   range->current_bounds = _rating_get_bounds_pretty;
 

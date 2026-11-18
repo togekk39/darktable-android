@@ -37,6 +37,11 @@
 #endif
 #include "gui/presets.h"
 #include "libs/lib.h"
+#ifdef HAVE_OPENCL
+#include "common/opencl.h"
+// the generated processing tab in preferences_gen.h calls it
+static void _preferences_opencl_devices(GtkGrid *grid, int *line, const char *title);
+#endif
 #include "preferences_gen.h"
 #ifdef USE_LUA
 #include "lua/preferences.h"
@@ -210,6 +215,51 @@ static void use_sys_font_callback(GtkWidget *widget,
   reload_ui_last_theme();
 }
 
+static void use_rounded_header_callback(GtkWidget *widget,
+                                        gpointer user_data)
+{
+  dt_conf_set_bool("themes/rounded-header",
+                   gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget)));
+
+  reload_ui_last_theme();
+}
+
+static void use_condensed_control_callback(GtkWidget *widget,
+                                           gpointer user_data)
+{
+  dt_conf_set_bool("themes/condensed",
+                   gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget)));
+
+  reload_ui_last_theme();
+}
+
+static void use_accent_color_callback(GtkWidget *widget,
+                                        gpointer user_data)
+{
+  const int selected = dt_bauhaus_combobox_get(widget);
+
+  dt_conf_set_int("themes/accent-color", selected);
+  reload_ui_last_theme();
+}
+
+static void use_focused_module_border_callback(GtkWidget *widget,
+                                               gpointer user_data)
+{
+  const int selected = dt_bauhaus_combobox_get(widget);
+
+  dt_conf_set_int("themes/focused-module-border", selected);
+  reload_ui_last_theme();
+}
+
+static void use_expanded_module_border_callback(GtkWidget *widget,
+                                                gpointer user_data)
+{
+  const int selected = dt_bauhaus_combobox_get(widget);
+
+  dt_conf_set_int("themes/expanded-module-border", selected);
+  reload_ui_last_theme();
+}
+
 static void save_usercss(GtkTextBuffer *buffer)
 {
   // get file locations
@@ -322,8 +372,7 @@ static void _reset_panels_clicked(GtkButton *button, gpointer user_data)
     return;
 
   g_hash_table_foreach_remove(darktable.conf->table, _remove_panel_config, NULL);
-  dt_view_manager_switch_by_view(darktable.view_manager,
-                                 dt_view_manager_get_current_view(darktable.view_manager));
+  dt_ctl_reload_view(dt_view_manager_get_current_view(darktable.view_manager));
 }
 
 // forward declaration for use in init_tab_general
@@ -418,6 +467,115 @@ static void init_tab_general(GtkWidget *dialog,
   g_signal_connect(G_OBJECT(widget), "value-changed",
                    G_CALLBACK(theme_callback), 0);
   gtk_widget_set_tooltip_text(widget, _("set the theme for the user interface"));
+
+  // theme variants
+
+  // condensed controls
+  GtkWidget *t_condensed = gtk_check_button_new();
+  label = gtk_label_new(_("condensed module controls"));
+  gtk_widget_set_name(label, "theme-variant");
+  gtk_widget_set_halign(label, GTK_ALIGN_START);
+  labelev = gtk_event_box_new();
+  gtk_widget_add_events(labelev, GDK_BUTTON_PRESS_MASK);
+  gtk_container_add(GTK_CONTAINER(labelev), label);
+  gtk_grid_attach(GTK_GRID(grid), labelev, 0, line++, 1, 1);
+  gtk_grid_attach_next_to(GTK_GRID(grid), t_condensed, labelev, GTK_POS_RIGHT, 1, 1);
+  gtk_widget_set_tooltip_text(t_condensed, _("use condensed module controls"));
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(t_condensed),
+                               dt_conf_get_bool("themes/condensed"));
+  g_signal_connect(G_OBJECT(t_condensed), "toggled",
+                   G_CALLBACK(use_condensed_control_callback),
+                  (gpointer)t_condensed);
+
+  // rounded header
+  GtkWidget *t_rounded = gtk_check_button_new();
+  label = gtk_label_new(_("rounded module headers"));
+  gtk_widget_set_name(label, "theme-variant");
+  gtk_widget_set_halign(label, GTK_ALIGN_START);
+  labelev = gtk_event_box_new();
+  gtk_widget_add_events(labelev, GDK_BUTTON_PRESS_MASK);
+  gtk_container_add(GTK_CONTAINER(labelev), label);
+  gtk_grid_attach(GTK_GRID(grid), labelev, 0, line++, 1, 1);
+  gtk_grid_attach_next_to(GTK_GRID(grid), t_rounded, labelev, GTK_POS_RIGHT, 1, 1);
+  gtk_widget_set_tooltip_text(t_rounded, _("use rounded module headers variant"));
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(t_rounded),
+                               dt_conf_get_bool("themes/rounded-header"));
+  g_signal_connect(G_OBJECT(t_rounded), "toggled",
+                   G_CALLBACK(use_rounded_header_callback), (gpointer)t_rounded);
+
+  // focused module border
+  label = gtk_label_new(_("focused module border"));
+  gtk_widget_set_name(label, "theme-variant");
+  gtk_widget_set_halign(label, GTK_ALIGN_START);
+  widget = dt_bauhaus_combobox_new(NULL);
+  dt_bauhaus_combobox_set_selected_text_align(widget, DT_BAUHAUS_COMBOBOX_ALIGN_LEFT);
+
+  labelev = gtk_event_box_new();
+  gtk_widget_add_events(labelev, GDK_BUTTON_PRESS_MASK);
+  gtk_container_add(GTK_CONTAINER(labelev), label);
+  gtk_grid_attach(GTK_GRID(grid), labelev, 0, line++, 1, 1);
+  gtk_grid_attach_next_to(GTK_GRID(grid), widget, labelev, GTK_POS_RIGHT, 1, 1);
+  dt_bauhaus_combobox_add_aligned(widget, _("none"), DT_BAUHAUS_COMBOBOX_ALIGN_LEFT);
+  dt_bauhaus_combobox_add_aligned(widget, _("light"), DT_BAUHAUS_COMBOBOX_ALIGN_LEFT);
+  dt_bauhaus_combobox_add_aligned(widget, _("dark"), DT_BAUHAUS_COMBOBOX_ALIGN_LEFT);
+  dt_bauhaus_combobox_add_aligned(widget, _("green"), DT_BAUHAUS_COMBOBOX_ALIGN_LEFT);
+  dt_bauhaus_combobox_add_aligned(widget, _("blue"), DT_BAUHAUS_COMBOBOX_ALIGN_LEFT);
+  dt_bauhaus_combobox_add_aligned(widget, _("yellow"), DT_BAUHAUS_COMBOBOX_ALIGN_LEFT);
+  dt_bauhaus_combobox_add_aligned(widget, _("orange"), DT_BAUHAUS_COMBOBOX_ALIGN_LEFT);
+  dt_bauhaus_combobox_set(widget, dt_conf_get_int("themes/focused-module-border"));
+  g_signal_connect(G_OBJECT(widget), "value-changed",
+                   G_CALLBACK(use_focused_module_border_callback), 0);
+  gtk_widget_set_tooltip_text(widget,
+                              _("set the focused module border color"));
+
+  // expanded module border
+  label = gtk_label_new(_("expanded module border"));
+  gtk_widget_set_name(label, "theme-variant");
+  gtk_widget_set_halign(label, GTK_ALIGN_START);
+  widget = dt_bauhaus_combobox_new(NULL);
+  dt_bauhaus_combobox_set_selected_text_align(widget, DT_BAUHAUS_COMBOBOX_ALIGN_LEFT);
+
+  labelev = gtk_event_box_new();
+  gtk_widget_add_events(labelev, GDK_BUTTON_PRESS_MASK);
+  gtk_container_add(GTK_CONTAINER(labelev), label);
+  gtk_grid_attach(GTK_GRID(grid), labelev, 0, line++, 1, 1);
+  gtk_grid_attach_next_to(GTK_GRID(grid), widget, labelev, GTK_POS_RIGHT, 1, 1);
+  dt_bauhaus_combobox_add_aligned(widget, _("none"), DT_BAUHAUS_COMBOBOX_ALIGN_LEFT);
+  dt_bauhaus_combobox_add_aligned(widget, _("light"), DT_BAUHAUS_COMBOBOX_ALIGN_LEFT);
+  dt_bauhaus_combobox_add_aligned(widget, _("dark"), DT_BAUHAUS_COMBOBOX_ALIGN_LEFT);
+  dt_bauhaus_combobox_add_aligned(widget, _("green"), DT_BAUHAUS_COMBOBOX_ALIGN_LEFT);
+  dt_bauhaus_combobox_add_aligned(widget, _("blue"), DT_BAUHAUS_COMBOBOX_ALIGN_LEFT);
+  dt_bauhaus_combobox_add_aligned(widget, _("yellow"), DT_BAUHAUS_COMBOBOX_ALIGN_LEFT);
+  dt_bauhaus_combobox_add_aligned(widget, _("orange"), DT_BAUHAUS_COMBOBOX_ALIGN_LEFT);
+  dt_bauhaus_combobox_set(widget, dt_conf_get_int("themes/expanded-module-border"));
+  g_signal_connect(G_OBJECT(widget), "value-changed",
+                   G_CALLBACK(use_expanded_module_border_callback), 0);
+  gtk_widget_set_tooltip_text(widget,
+                              _("set the expanded module border color"));
+
+  // accent color
+  label = gtk_label_new(_("accent color"));
+  gtk_widget_set_name(label, "theme-variant");
+  gtk_widget_set_halign(label, GTK_ALIGN_START);
+  widget = dt_bauhaus_combobox_new(NULL);
+  dt_bauhaus_combobox_set_selected_text_align(widget, DT_BAUHAUS_COMBOBOX_ALIGN_LEFT);
+
+  labelev = gtk_event_box_new();
+  gtk_widget_add_events(labelev, GDK_BUTTON_PRESS_MASK);
+  gtk_container_add(GTK_CONTAINER(labelev), label);
+  gtk_grid_attach(GTK_GRID(grid), labelev, 0, line++, 1, 1);
+  gtk_grid_attach_next_to(GTK_GRID(grid), widget, labelev, GTK_POS_RIGHT, 1, 1);
+  dt_bauhaus_combobox_add_aligned(widget, _("none"), DT_BAUHAUS_COMBOBOX_ALIGN_LEFT);
+  dt_bauhaus_combobox_add_aligned(widget, _("green"), DT_BAUHAUS_COMBOBOX_ALIGN_LEFT);
+  dt_bauhaus_combobox_add_aligned(widget, _("blue"), DT_BAUHAUS_COMBOBOX_ALIGN_LEFT);
+  dt_bauhaus_combobox_add_aligned(widget, _("yellow"), DT_BAUHAUS_COMBOBOX_ALIGN_LEFT);
+  dt_bauhaus_combobox_add_aligned(widget, _("orange"), DT_BAUHAUS_COMBOBOX_ALIGN_LEFT);
+  dt_bauhaus_combobox_set
+    (widget, dt_conf_get_int("themes/accent-color"));
+  g_signal_connect(G_OBJECT(widget), "value-changed",
+                   G_CALLBACK(use_accent_color_callback), 0);
+  gtk_widget_set_tooltip_text(widget,
+                              _("set the theme accent color for the interface"));
 
   //Font size check and spin buttons
   GtkWidget *usesysfont = gtk_check_button_new();
@@ -708,26 +866,26 @@ static void _create_lock_check_pixbuf(GdkPixbuf **lock_pixbuf,
 
 static void _update_preset_line(GtkTreeStore *tree_store,
                                 GtkTreeIter *iter,
-                                sqlite3_stmt *stmt,
+                                const dt_presets_line_t *line,
                                 GdkPixbuf *lock_pixbuf,
                                 GdkPixbuf *check_pixbuf)
 {
-  const gint rowid = sqlite3_column_int(stmt, 0);
-  const gchar *name = (gchar *)sqlite3_column_text(stmt, 1);
-  const gchar *operation = (gchar *)sqlite3_column_text(stmt, 2);
-  const gboolean autoapply = (sqlite3_column_int(stmt, 3) == 0 ? FALSE : TRUE);
-  const gchar *model = (gchar *)sqlite3_column_text(stmt, 4);
-  const gchar *maker = (gchar *)sqlite3_column_text(stmt, 5);
-  const gchar *lens = (gchar *)sqlite3_column_text(stmt, 6);
-  const float iso_min = sqlite3_column_double(stmt, 7);
-  const float iso_max = sqlite3_column_double(stmt, 8);
-  const float exposure_min = sqlite3_column_double(stmt, 9);
-  const float exposure_max = sqlite3_column_double(stmt, 10);
-  const float aperture_min = sqlite3_column_double(stmt, 11);
-  const float aperture_max = sqlite3_column_double(stmt, 12);
-  const int focal_length_min = sqlite3_column_double(stmt, 13);
-  const int focal_length_max = sqlite3_column_double(stmt, 14);
-  const gboolean writeprotect = (sqlite3_column_int(stmt, 15) == 0 ? FALSE : TRUE);
+  const gint rowid = line->rowid;
+  const gchar *name = line->name;
+  const gchar *operation = line->operation;
+  const gboolean autoapply = (line->autoapply == 0 ? FALSE : TRUE);
+  const gchar *model = line->model;
+  const gchar *maker = line->maker;
+  const gchar *lens = line->lens;
+  const float iso_min = line->iso_min;
+  const float iso_max = line->iso_max;
+  const float exposure_min = line->exposure_min;
+  const float exposure_max = line->exposure_max;
+  const float aperture_min = line->aperture_min;
+  const float aperture_max = line->aperture_max;
+  const int focal_length_min = line->focal_length_min;
+  const int focal_length_max = line->focal_length_max;
+  const gboolean writeprotect = (line->writeprotect == 0 ? FALSE : TRUE);
 
   gchar *iso = NULL, *exposure = NULL, *aperture = NULL,
     *focal_length = NULL, *smaker = NULL, *smodel = NULL, *slens = NULL;
@@ -820,25 +978,16 @@ static void _update_preset_line(GtkTreeStore *tree_store,
 static void tree_insert_presets(GtkTreeStore *tree_store)
 {
   GtkTreeIter iter, parent;
-  sqlite3_stmt *stmt;
   gchar *last_module = NULL;
 
   GdkPixbuf *lock_pixbuf, *check_pixbuf;
   _create_lock_check_pixbuf(&lock_pixbuf, &check_pixbuf);
 
-  // clang-format off
-  DT_DEBUG_SQLITE3_PREPARE_V2
-    (dt_database_get(darktable.db),
-     "SELECT rowid, name, operation, autoapply, model, maker, lens, iso_min, "
-     "iso_max, exposure_min, exposure_max, aperture_min, aperture_max, "
-     "focal_length_min, focal_length_max, writeprotect "
-     "FROM data.presets "
-     "ORDER BY operation, name",
-     -1, &stmt, NULL);
-  // clang-format on
-  while(sqlite3_step(stmt) == SQLITE_ROW)
+  GList *lines = dt_presets_list_lines();
+  for(const GList *l = lines; l; l = g_list_next(l))
   {
-    const gchar *operation = (gchar *)sqlite3_column_text(stmt, 2);
+    const dt_presets_line_t *line = l->data;
+    const gchar *operation = line->operation;
     if(g_strcmp0(operation, last_module))
     {
       gchar *module = g_strdup(dt_iop_get_localized_name(operation));
@@ -855,10 +1004,10 @@ static void tree_insert_presets(GtkTreeStore *tree_store)
 
     gtk_tree_store_insert(tree_store, &iter, &parent, -1);
 
-    _update_preset_line(tree_store, &iter, stmt, lock_pixbuf, check_pixbuf);
+    _update_preset_line(tree_store, &iter, line, lock_pixbuf, check_pixbuf);
   }
   g_free(last_module);
-  sqlite3_finalize(stmt);
+  g_list_free_full(lines, dt_presets_line_free);
 
   g_object_unref(lock_pixbuf);
   g_object_unref(check_pixbuf);
@@ -1107,24 +1256,10 @@ static void edit_preset_response(dt_gui_presets_edit_dialog_t *g)
     GdkPixbuf *lock_pixbuf, *check_pixbuf;
     _create_lock_check_pixbuf(&lock_pixbuf, &check_pixbuf);
 
-    sqlite3_stmt *stmt;
-
-    // clang-format off
-    DT_DEBUG_SQLITE3_PREPARE_V2
-      (dt_database_get(darktable.db),
-       "SELECT rowid, name, operation, autoapply, model, maker, lens, iso_min, "
-       "iso_max, exposure_min, exposure_max, aperture_min, aperture_max, "
-       "focal_length_min, focal_length_max, writeprotect "
-       "FROM data.presets "
-       "WHERE rowid = ?1",
-       -1, &stmt, NULL);
-    // clang-format on
-    DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, g->old_id);
-
-    if(sqlite3_step(stmt) == SQLITE_ROW)
-      _update_preset_line(g->data, &edited_iter, stmt, lock_pixbuf, check_pixbuf);
-
-    sqlite3_finalize(stmt);
+    dt_presets_line_t line = { 0 };
+    if(dt_presets_get_line_at_rowid(g->old_id, &line))
+      _update_preset_line(g->data, &edited_iter, &line, lock_pixbuf, check_pixbuf);
+    dt_presets_line_clear(&line);
   }
 }
 
@@ -1289,30 +1424,24 @@ static void export_preset(GtkButton *button,
   if(gtk_native_dialog_run(GTK_NATIVE_DIALOG(filechooser)) == GTK_RESPONSE_ACCEPT)
   {
     gchar *filedir = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(filechooser));
-    sqlite3_stmt *stmt;
 
     // we have n+1 selects for saving presets, using single
     // transaction for whole process saves us microlocks
     dt_database_start_transaction(darktable.db);
 
-    DT_DEBUG_SQLITE3_PREPARE_V2
-      (dt_database_get(darktable.db),
-       "SELECT rowid, name, operation FROM data.presets WHERE writeprotect = 0",
-       -1, &stmt, NULL);
-
-    while(sqlite3_step(stmt) == SQLITE_ROW)
+    // the user's presets: one file each
+    GList *lines = dt_presets_list_lines();
+    for(const GList *l = lines; l; l = g_list_next(l))
     {
-      const gint rowid = sqlite3_column_int(stmt, 0);
-      const gchar *name = (gchar *)sqlite3_column_text(stmt, 1);
-      const gchar *operation = (gchar *)sqlite3_column_text(stmt, 2);
-      gchar* preset_name = g_strdup_printf("%s_%s", operation, name);
+      const dt_presets_line_t *line = l->data;
+      if(line->writeprotect) continue;
+      gchar* preset_name = g_strdup_printf("%s_%s", line->operation, line->name);
 
-      dt_presets_save_to_file(rowid, preset_name, filedir);
+      dt_presets_save_to_file(line->rowid, preset_name, filedir);
 
       g_free(preset_name);
     }
-
-    sqlite3_finalize(stmt);
+    g_list_free_full(lines, dt_presets_line_free);
 
     dt_database_release_transaction(darktable.db);
 
@@ -1392,6 +1521,138 @@ void dt_gui_preferences_bool_update(GtkWidget *widget)
   const gboolean val = dt_conf_get_bool(key);
   gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(widget), val);
 }
+
+#ifdef HAVE_OPENCL
+static void _opencl_device_toggled(GtkToggleButton *button,
+                                   gpointer user_data)
+{
+  const gboolean enabled = gtk_toggle_button_get_active(button);
+  dt_opencl_device_conf_set_enabled((const char *)user_data, enabled);
+  // with every device disabled dt_opencl_init() switched OpenCL off, and
+  // with OpenCL off it does not look at devices, so this list would be gone
+  if(enabled) dt_conf_set_bool("opencl", TRUE);
+  restart_required = TRUE;
+}
+
+static void _opencl_headroom_changed(GtkSpinButton *spin,
+                                     gpointer user_data)
+{
+  dt_opencl_set_device_headroom(GPOINTER_TO_INT(user_data),
+                                gtk_spin_button_get_value_as_int(spin));
+}
+
+static void _opencl_tune_headroom_toggled(GtkToggleButton *button,
+                                          gpointer user_data)
+{
+  const gboolean tune = gtk_toggle_button_get_active(button);
+  dt_conf_set_bool("opencl_tune_headroom", tune);
+  dt_opencl_update_settings();
+  for(GList *l = user_data; l; l = g_list_next(l))
+    gtk_widget_set_sensitive(GTK_WIDGET(l->data), tune);
+}
+
+static void _preferences_opencl_devices(GtkGrid *grid,
+                                        int *line,
+                                        const char *title)
+{
+  dt_opencl_t *cl = darktable.opencl;
+  // nothing to configure if dt_opencl_init() did not look at any device
+  if(!cl || !cl->found) return;
+
+  GtkWidget *seclabel = gtk_label_new(title);
+  GtkWidget *lbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_box_pack_start(GTK_BOX(lbox), seclabel, FALSE, FALSE, 0);
+  gtk_widget_set_name(lbox, "pref_section");
+  gtk_grid_attach(grid, lbox, 0, (*line)++, 2, 1);
+
+  // labels and spin buttons of the headroom rows, grayed out without 'tuned GPU memory'
+  GList *headroom_widgets = NULL;
+  for(GList *l = cl->found; l; l = g_list_next(l))
+  {
+    const dt_opencl_found_t *found = l->data;
+    const gboolean enabled = dt_opencl_device_conf_enabled(found->cname);
+
+    // identical cards share one darktablerc entry, so they get one switch
+    gboolean same_as_before = FALSE;
+    for(GList *p = cl->found; p != l; p = g_list_next(p))
+      same_as_before |= !g_strcmp0(((dt_opencl_found_t *)p->data)->cname, found->cname);
+
+    gchar *text;
+    GtkWidget *label, *widget;
+    if(!same_as_before)
+    {
+      text = g_strdup_printf("%s (%s)", found->name,
+                             found->unified_memory ? _("shared memory")
+                                                   : _("dedicated memory"));
+      label = gtk_label_new(text);
+      g_free(text);
+      gtk_label_set_xalign(GTK_LABEL(label), .0);
+      gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_MIDDLE);
+      widget = gtk_check_button_new();
+      gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(widget), enabled);
+      gtk_widget_set_tooltip_text(widget,
+                                  found->devid < 0 && enabled
+                                  ? _("darktable could not use this device, start darktable"
+                                      " with '-d opencl' to see why")
+                                  : _("use this OpenCL device, takes effect after a restart.\n"
+                                      "switch off a second, slower device, such as an integrated GPU,"
+                                      " so darktable only uses the faster one"));
+      gtk_widget_set_tooltip_text(label, found->cname);
+      g_signal_connect_data(widget, "toggled", G_CALLBACK(_opencl_device_toggled),
+                            g_strdup(found->cname), (GClosureNotify)g_free, 0);
+      gtk_grid_attach(grid, label, 0, *line, 1, 1);
+      gtk_grid_attach(grid, widget, 2, (*line)++, 1, 1);
+    }
+
+    // shown, if grayed out, with a single device too, so the rows do not
+    // vanish after switching the second one off
+    if(found->devid < 0) continue;
+
+    text = g_strdup_printf(_("device %d headroom in MB"), found->devid);
+    label = gtk_label_new(text);
+    g_free(text);
+    gtk_label_set_xalign(GTK_LABEL(label), .0);
+    gtk_widget_set_margin_start(label, DT_PIXEL_APPLY_DPI(16));
+    const int maxmem = cl->dev[found->devid].max_global_mem / DT_MEGA;
+    widget = gtk_spin_button_new_with_range(0, maxmem, 50);
+    gtk_spin_button_set_digits(GTK_SPIN_BUTTON(widget), 0);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(widget),
+                              dt_opencl_get_device_headroom(found->devid));
+    gtk_widget_set_tooltip_text(widget,
+                                _("memory darktable leaves free on this device,"
+                                  " only used with 'tuned GPU memory'"));
+    g_signal_connect(widget, "value-changed", G_CALLBACK(_opencl_headroom_changed),
+                     GINT_TO_POINTER(found->devid));
+    gtk_grid_attach(grid, label, 0, *line, 1, 1);
+    gtk_grid_attach(grid, widget, 2, (*line)++, 1, 1);
+    headroom_widgets = g_list_prepend(headroom_widgets, label);
+    headroom_widgets = g_list_prepend(headroom_widgets, widget);
+  }
+
+  // 'tuned GPU memory' is what makes the headroom rows above count, and
+  // dt_opencl_update_settings() ignores it with fewer than two devices
+  const char *key = "opencl_tune_headroom";
+  const gboolean multi = cl->num_devs > 1;
+  const gboolean tune = multi && dt_conf_get_bool(key);
+  GtkWidget *label = gtk_label_new(_(dt_confgen_get_label(key)));
+  gtk_label_set_xalign(GTK_LABEL(label), .0);
+  GtkWidget *widget = gtk_check_button_new();
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(widget), dt_conf_get_bool(key));
+  const char *tooltip = multi
+                        ? _(dt_confgen_get_tooltip(key))
+                        : _("only used with two or more OpenCL devices in use");
+  gtk_widget_set_tooltip_text(label, tooltip);
+  gtk_widget_set_tooltip_text(widget, tooltip);
+  gtk_widget_set_sensitive(label, multi);
+  gtk_widget_set_sensitive(widget, multi);
+  for(GList *l = headroom_widgets; l; l = g_list_next(l))
+    gtk_widget_set_sensitive(GTK_WIDGET(l->data), tune);
+  g_signal_connect_data(widget, "toggled", G_CALLBACK(_opencl_tune_headroom_toggled),
+                        headroom_widgets, (GClosureNotify)g_list_free, 0);
+  gtk_grid_attach(grid, label, 0, *line, 1, 1);
+  gtk_grid_attach(grid, widget, 2, (*line)++, 1, 1);
+}
+#endif
 
 GtkWidget *dt_gui_preferences_bool(GtkGrid *grid,
                                    const char *key,

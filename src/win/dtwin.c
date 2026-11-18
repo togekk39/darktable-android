@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2017-2023 darktable developers.
+    Copyright (C) 2017-2026 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -17,8 +17,10 @@
 */
 
 #include "dtwin.h"
+
 #include <setjmp.h>
 #include <windows.h>
+#include <shlobj.h>
 
 // Required by (at least) clang 10.0 as packaged by MSYS2 MinGW64.
 #ifdef __clang__
@@ -348,15 +350,19 @@ void dtwin_set_thread_name(DWORD dwThreadID, const char *threadName)
 // The GLib version of this function always shows confirmation dialog boxes, unfortunately.
 // This replacement does trashing without dialogs using "FOF_SILENT | FOF_NOCONFIRMATION".
 // When GLib version on Windows will be able to trash silently we can remove this function.
-boolean dt_win_file_trash(GFile *file, GCancellable *cancellable, GError **error)
+boolean dt_win_file_trash(GFile *file,
+                          GCancellable *cancellable,
+                          GError **error)
 {
   SHFILEOPSTRUCTW op = { 0 };
   gboolean success;
   wchar_t *wfilename;
   long len;
 
-  wfilename = g_utf8_to_utf16(g_file_get_parse_name(file), -1, NULL, &len, NULL);
-  /* SHFILEOPSTRUCT.pFrom is double-zero-terminated */
+  char *parsed_name = g_file_get_parse_name(file);
+
+  wfilename = g_utf8_to_utf16(parsed_name, -1, NULL, &len, NULL);
+  // SHFILEOPSTRUCT.pFrom is double-zero-terminated
   wfilename = g_renew(wchar_t, wfilename, len + 2);
   wfilename[len + 1] = 0;
 
@@ -368,16 +374,72 @@ boolean dt_win_file_trash(GFile *file, GCancellable *cancellable, GError **error
 
   if(success && op.fAnyOperationsAborted)
   {
-    if(cancellable && !g_cancellable_is_cancelled(cancellable)) g_cancellable_cancel(cancellable);
-    g_set_error(error, G_IO_ERROR, g_io_error_from_errno(ECANCELED), "Unable to trash file %s: %s",
-                g_file_get_parse_name(file), g_strerror(ECANCELED));
+    if(cancellable && !g_cancellable_is_cancelled(cancellable))
+      g_cancellable_cancel(cancellable);
+    g_set_error(error,
+                G_IO_ERROR,
+                g_io_error_from_errno(ECANCELED),
+                "Unable to trash file %s: %s",
+                parsed_name,
+                g_strerror(ECANCELED));
     success = FALSE;
   }
   else if(!success)
-    g_set_error(error, G_IO_ERROR, g_io_error_from_errno(0), "Unable to trash file %s",
-                g_file_get_parse_name(file));
+    g_set_error(error,
+                G_IO_ERROR,
+                g_io_error_from_errno(0),
+                "Unable to trash file %s",
+                parsed_name);
 
+  g_free(parsed_name);
   g_free(wfilename);
+  return success;
+}
+
+// SetClipboardData() fails without a real owner window
+gboolean dtwin_clipboard_set_files(GList *files, HWND owner)
+{
+  GPtrArray *paths = g_ptr_array_new_with_free_func(g_free);
+  size_t chars = 1; // double NUL terminated
+  for(GList *iter = files; iter; iter = g_list_next(iter))
+  {
+    wchar_t *wpath = g_utf8_to_utf16(iter->data, -1, NULL, NULL, NULL);
+    if(!wpath) continue;
+    chars += wcslen(wpath) + 1;
+    g_ptr_array_add(paths, wpath);
+  }
+
+  HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT,
+                            sizeof(DROPFILES) + chars * sizeof(wchar_t));
+  if(!mem)
+  {
+    g_ptr_array_free(paths, TRUE);
+    return FALSE;
+  }
+
+  DROPFILES *drop = GlobalLock(mem);
+  drop->pFiles = sizeof(DROPFILES);
+  drop->fWide = TRUE;
+  wchar_t *out = (wchar_t *)((char *)drop + sizeof(DROPFILES));
+  for(guint i = 0; i < paths->len; i++)
+  {
+    const wchar_t *wpath = g_ptr_array_index(paths, i);
+    const size_t len = wcslen(wpath) + 1;
+    memcpy(out, wpath, len * sizeof(wchar_t));
+    out += len;
+  }
+  GlobalUnlock(mem);
+  g_ptr_array_free(paths, TRUE);
+
+  gboolean success = FALSE;
+  if(OpenClipboard(owner))
+  {
+    EmptyClipboard();
+    // owned by the clipboard on success
+    success = SetClipboardData(CF_HDROP, mem) != NULL;
+    CloseClipboard();
+  }
+  if(!success) GlobalFree(mem);
   return success;
 }
 

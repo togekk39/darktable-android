@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2021 darktable developers.
+    Copyright (C) 2021-2026 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -18,7 +18,7 @@
 
 #include "common/printing.h"
 
-void _clear_pos(dt_image_pos *pos)
+static void _clear_pos(dt_image_pos *pos)
 {
   pos->x = pos->y = pos->width = pos->height = 0.0f;
 }
@@ -89,9 +89,9 @@ int32_t dt_printing_get_image_box(const dt_images_box *imgs,
   return box;
 }
 
-void _compute_rel_pos(const dt_images_box *imgs,
-                      const dt_image_pos *ref,
-                      dt_image_pos *pos)
+static void _compute_rel_pos(const dt_images_box *imgs,
+                             const dt_image_pos *ref,
+                             dt_image_pos *pos)
 {
   // compute the printing position & width as % of the page
 
@@ -207,11 +207,11 @@ void dt_printing_setup_page(dt_images_box *imgs,
   }
 }
 
-void _align_pos(const dt_image_pos *ref,
-                const dt_alignment_t alignment,
-                const int32_t width,
-                const int32_t height,
-                dt_image_pos *pos)
+static void _align_pos(const dt_image_pos *ref,
+                       const dt_alignment_t alignment,
+                       const int32_t width,
+                       const int32_t height,
+                       dt_image_pos *pos)
 {
   pos->width  = width;
   pos->height = height;
@@ -328,8 +328,9 @@ void dt_printing_setup_image(dt_images_box *imgs,
   box->print.y      = box->pos.y * imgs->page_height;
   box->print.width  = box->pos.width * imgs->page_width;
   box->print.height = box->pos.height * imgs->page_height;
-
-  dt_image_pos pos;
+  
+  // Instantiate position structure to avoid compiler warning in MinGW_w64 for Windows
+  dt_image_pos pos = {0};
   _align_pos(&box->print, box->alignment, box->exp_width, box->exp_height, &pos);
 
   box->print.x = pos.x;

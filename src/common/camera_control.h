@@ -169,6 +169,8 @@ typedef struct dt_camctl_t
 
   /** Camera event thread. */
   pthread_t camera_event_thread;
+  /** TRUE after a successful create until join completes. */
+  gboolean camera_event_thread_running;
   /** List of registered listeners of camera control. \see dt_camctl_register_listener() ,
    * dt_camctl_unregister_listener() */
   GList *listeners;
@@ -360,7 +362,7 @@ const char *dt_camctl_camera_property_get_next_choice(const dt_camctl_t *c,
 /** build a popup menu with all properties available */
 void dt_camctl_camera_build_property_menu(const dt_camctl_t *c,
                                           const dt_camera_t *cam,
-                                          GtkMenu **menu,
+                                          GMenu **menu,
                                           GCallback item_activate,
                                           gpointer user_data);
 

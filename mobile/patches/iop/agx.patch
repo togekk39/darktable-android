@@ -1,0 +1,134 @@
+--- a/src/iop/agx.c
++++ b/src/iop/agx.c
+@@ -1113,10 +1113,10 @@
+   DT_LEAVE_GUI_UPDATE();
+ }
+ 
+-static void _update_pivot_x(const float old_black_ev, const float old_white_ev, dt_iop_module_t *self, dt_iop_agx_params_t *const p)
+-{
+-  const dt_iop_agx_gui_data_t *g = self->gui_data;
+-
++/* Keep the parameter transformation independent of the desktop slider. */
++static void _update_pivot_x(const float old_black_ev, const float old_white_ev,
++                            dt_iop_agx_params_t *const p)
++{
+   const float new_black_ev = p->range_black_relative_ev;
+   const float new_white_ev = p->range_white_relative_ev;
+   const float new_range = new_white_ev - new_black_ev;
+@@ -1130,23 +1130,33 @@
+ 
+   // new_range is ensured to be > 0 due to hard limits on sliders
+   p->curve_pivot_x = (clamped_pivot_ev - new_black_ev) / new_range;
+-
+-  _update_pivot_slider_settings(g->basic_curve_controls.curve_pivot_x, p);
+-}
+-
+-static void _adjust_relative_exposure_from_exposure_params(dt_iop_module_t *self)
+-{
+-  dt_iop_agx_params_t *p = self->params;
+-
++}
++
++static void _update_pivot_x_and_slider(const float old_black_ev, const float old_white_ev,
++                                      dt_iop_module_t *self, dt_iop_agx_params_t *const p)
++{
++  _update_pivot_x(old_black_ev, old_white_ev, p);
++  const dt_iop_agx_gui_data_t *g = self->gui_data;
++  if(g) _update_pivot_slider_settings(g->basic_curve_controls.curve_pivot_x, p);
++}
++
++static void _adjust_relative_exposure(const float exposure, dt_iop_agx_params_t *const p)
++{
+   const float old_black_ev = p->range_black_relative_ev;
+   const float old_white_ev = p->range_white_relative_ev;
+-
+-  const float exposure = dt_dev_exposure_get_effective_exposure(self->dev);
+-
+   p->range_black_relative_ev = CLAMPF((-8.f + 0.5f * exposure) * (1.f + p->dynamic_range_scaling), -20.f, -0.1f);
+   p->range_white_relative_ev = CLAMPF((4.f + 0.8 * exposure) * (1.f + p->dynamic_range_scaling), 0.1f, 20.f);
+-
+-  _update_pivot_x(old_black_ev, old_white_ev, self, p);
++  _update_pivot_x(old_black_ev, old_white_ev, p);
++}
++
++static void _adjust_relative_exposure_from_exposure_params(dt_iop_module_t *self)
++{
++  dt_iop_agx_params_t *p = self->params;
++
++  const float exposure = dt_dev_exposure_get_effective_exposure(self->dev);
++  _adjust_relative_exposure(exposure, p);
++  const dt_iop_agx_gui_data_t *g = self->gui_data;
++  if(g) _update_pivot_slider_settings(g->basic_curve_controls.curve_pivot_x, p);
+ }
+ 
+ // x is linear, relative to the peak
+@@ -1930,7 +1940,7 @@
+       const float old_black_ev = *(float*)previous;
+       const float old_white_ev = p->range_white_relative_ev;
+ 
+-      _update_pivot_x(old_black_ev, old_white_ev, self, p);
++      _update_pivot_x_and_slider(old_black_ev, old_white_ev, self, p);
+     }
+ 
+     if(widget == g->white_exposure_picker)
+@@ -1938,7 +1948,7 @@
+       const float old_black_ev = p->range_black_relative_ev;
+       const float old_white_ev = *(float*)previous;
+ 
+-      _update_pivot_x(old_black_ev, old_white_ev, self, p);
++      _update_pivot_x_and_slider(old_black_ev, old_white_ev, self, p);
+     }
+ 
+     if(widget == g->security_factor)
+@@ -1951,7 +1961,7 @@
+ 
+       p->range_black_relative_ev = old_black_ev * (1.f + ratio);
+       p->range_white_relative_ev = old_white_ev * (1.f + ratio);
+-      _update_pivot_x(old_black_ev, old_white_ev, self, p);
++      _update_pivot_x_and_slider(old_black_ev, old_white_ev, self, p);
+ 
+       DT_ENTER_GUI_UPDATE();
+       dt_bauhaus_slider_set(g->black_exposure_picker, p->range_black_relative_ev);
+@@ -2319,10 +2329,8 @@
+   gtk_popover_popup(GTK_POPOVER(popover_menu));
+ }
+ 
+-static void _set_post_curve_primaries_from_pre_callback(GtkWidget *widget, dt_iop_module_t *self)
+-{
+-  dt_iop_agx_params_t *p = self->params;
+-
++static void _set_post_curve_primaries_from_pre(dt_iop_agx_params_t *p)
++{
+   p->master_outset_ratio = 1.0f;
+   p->master_unrotation_ratio = 1.0f;
+ 
+@@ -2333,6 +2341,11 @@
+   p->red_unrotation = p->red_rotation;
+   p->green_unrotation = p->green_rotation;
+   p->blue_unrotation = p->blue_rotation;
++}
++
++static void _set_post_curve_primaries_from_pre_callback(GtkWidget *widget, dt_iop_module_t *self)
++{
++  _set_post_curve_primaries_from_pre(self->params);
+ 
+   dt_iop_gui_update(self);
+   dt_dev_add_history_item(darktable.develop, self, TRUE);
+@@ -2903,7 +2916,7 @@
+   else if(picker == g->basic_curve_controls.curve_pivot_x) _apply_auto_pivot_x(self, dt_ioppr_get_pipe_work_profile_info(pipe));
+   else if(picker == g->basic_curve_controls.curve_pivot_y_linear) _apply_auto_pivot_xy(self, dt_ioppr_get_pipe_work_profile_info(pipe));
+ 
+-  _update_pivot_x(old_black_ev, old_white_ev, self, p);
++  _update_pivot_x_and_slider(old_black_ev, old_white_ev, self, p);
+ 
+   if(p->auto_gamma)
+   {
+@@ -2919,6 +2932,8 @@
+   gtk_widget_queue_draw(GTK_WIDGET(g->graph_drawing_area));
+   dt_dev_add_history_item(darktable.develop, self, TRUE);
+ }
++
++#include "mobile/adapters/iop/agx.inc"
+ 
+ void commit_params(dt_iop_module_t *self,
+                    dt_iop_params_t *gui_params,

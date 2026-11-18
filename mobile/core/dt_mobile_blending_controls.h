@@ -29,6 +29,16 @@ static gboolean mobile_blending_available(dt_iop_module_t *module)
     && mobile_blending_colorspace(module) != DEVELOP_BLEND_CS_NONE;
 }
 
+/* the existing mobile controls edit classic masks. A new empty mask can use
+ * that representation and upstream migrates it for each rendering develop;
+ * an imported flexi tree must keep its own operators, elements and refinement */
+static gboolean mobile_blending_classic_editor(dt_iop_module_t *module)
+{
+  const dt_develop_blend_params_t *p = module->blend_params;
+  return !(p->mask_mode & DEVELOP_MASK_FLEXI)
+    || !dt_is_valid_maskid(dt_develop_blend_mask_group_id(module, p));
+}
+
 static gboolean mobile_blending_mode_allowed(dt_develop_blend_colorspace_t colorspace, uint32_t mode)
 {
   switch(mode)
@@ -129,7 +139,8 @@ static gint mobile_raster_id_compare(gconstpointer a, gconstpointer b)
  * are enabled or disabled. The original advertised mask table supplies labels. */
 static void append_mobile_raster_parameters(dt_iop_module_t *module, parameter_json *description)
 {
-  if(!module->dev || (module->flags() & IOP_FLAGS_NO_MASKS)) return;
+  if(!module->dev || (module->flags() & IOP_FLAGS_NO_MASKS)
+     || !mobile_blending_classic_editor(module)) return;
   const dt_develop_blend_params_t *p = module->blend_params;
   for(GList *item = module->dev->iop; item; item = item->next)
   {
@@ -161,7 +172,8 @@ static void append_mobile_raster_parameters(dt_iop_module_t *module, parameter_j
 static int update_mobile_raster_parameter(dt_iop_module_t *module, const char *parameter, double value)
 {
   if(strncmp(parameter, "blend.raster_", 13)) return 0;
-  if(!module->dev || (module->flags() & IOP_FLAGS_NO_MASKS) || (value != 0 && value != 1)) return -1;
+  if(!module->dev || (module->flags() & IOP_FLAGS_NO_MASKS)
+     || !mobile_blending_classic_editor(module) || (value != 0 && value != 1)) return -1;
   dt_develop_blend_params_t p = *module->blend_params;
   if(!strcmp(parameter, "blend.raster_invert"))
   {

@@ -200,16 +200,31 @@ int write_image(struct dt_imageio_module_data_t *data,
   LIBJXL_ASSERT(
       JxlEncoderFrameSettingsSetOption(frame_settings, JXL_ENC_FRAME_SETTING_DECODING_SPEED, params->tier));
 
-  // Codestream level should be chosen automatically given the settings
-  LIBJXL_ASSERT(JxlEncoderSetBasicInfo(encoder, &basic_info));
-
-  // Determine and set the encoder color space
+  // Determine the encoder color space, needed below for the PQ intensity target
   const dt_colorspaces_color_profile_t *output_profile
       = dt_colorspaces_get_output_profile(imgid, over_type, over_filename);
   const cmsHPROFILE out_profile = output_profile->profile;
   // Previous call will give us a more accurate color profile type
   // (not what the user requested in the export menu but what the image is actually using)
   over_type = output_profile->type;
+
+  // PQ samples are absolute luminance, so the brightest one is the content peak.
+  // Left at 0, libjxl assumes 10000 nits and viewers tone map for a peak the
+  // image never reaches. HLG is relative and keeps libjxl's default.
+  if(over_type == DT_COLORSPACE_PQ_REC2020 || over_type == DT_COLORSPACE_PQ_P3)
+  {
+    float max_cll = 0.0f, max_fall = 0.0f;
+    dt_imageio_pq_light_level((const float *)in_tmp, (size_t)width * height,
+                              &max_cll, &max_fall);
+    if(max_cll > 0.0f)
+      basic_info.intensity_target = max_cll;
+
+    dt_print(DT_DEBUG_IMAGEIO, "[jxl] PQ intensity target: %.1f nits",
+             basic_info.intensity_target);
+  }
+
+  // Codestream level should be chosen automatically given the settings
+  LIBJXL_ASSERT(JxlEncoderSetBasicInfo(encoder, &basic_info));
 
   // If possible we want libjxl to save the color encoding in its own format, rather
   // than as an ICC binary blob which is possible.
@@ -386,12 +401,10 @@ int write_image(struct dt_imageio_module_data_t *data,
         chunk_size *= 2;
 
       out_len += chunk_size;
-      out_buf = g_realloc(out_buf, out_len);
+      out_buf = g_try_realloc(out_buf, out_len);
       if(!out_buf)
-      {
         JXL_FAIL("could not reallocate codestream buffer to size %zu", out_len);
-        goto end;
-      }
+
       out_cur = out_buf + offset;
       out_avail = out_len - offset;
     }
@@ -469,7 +482,7 @@ size_t params_size(dt_imageio_module_format_t *self)
 
 void *get_params(dt_imageio_module_format_t *self)
 {
-  dt_imageio_jxl_t *d = g_malloc0(sizeof(dt_imageio_jxl_t));
+  dt_imageio_jxl_t *d = g_try_malloc0(sizeof(dt_imageio_jxl_t));
 
   if(!d) return NULL;
 
@@ -575,7 +588,7 @@ static void tier_changed(GtkWidget *widget, dt_imageio_jxl_gui_data_t *gui)
 
 void gui_init(dt_imageio_module_format_t *self)
 {
-  dt_imageio_jxl_gui_data_t *gui = g_malloc0(sizeof(dt_imageio_jxl_gui_data_t));
+  dt_imageio_jxl_gui_data_t *gui = g_try_malloc0(sizeof(dt_imageio_jxl_gui_data_t));
   if(!gui) return;
   self->gui_data = gui;
 

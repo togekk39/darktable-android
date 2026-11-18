@@ -23,6 +23,7 @@
 
 #include "bauhaus/bauhaus.h"
 #include "common/collection.h"
+#include "common/colorlabels.h"
 #include "common/debug.h"
 #include "common/focus.h"
 #include "common/focus_peaking.h"
@@ -37,6 +38,7 @@
 #include "dtgtk/thumbnail_btn.h"
 #include "gui/drag_and_drop.h"
 #include "gui/accelerators.h"
+#include "develop/frame.h"
 #include "views/view.h"
 
 static void _thumb_resize_overlays(dt_thumbnail_t *thumb);
@@ -174,34 +176,25 @@ static void _image_update_group_tooltip(dt_thumbnail_t *thumb)
   }
 
   // and the other images
-  sqlite3_stmt *stmt;
-  // clang-format off
-  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),
-                              "SELECT id, version, filename"
-                              " FROM main.images"
-                              " WHERE group_id = ?1", -1, &stmt,
-                              NULL);
-  // clang-format on
-  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, thumb->groupid);
-  while(sqlite3_step(stmt) == SQLITE_ROW)
+  GList *members = dt_grouping_get_members_info(thumb->groupid);
+  for(const GList *l = members; l; l = g_list_next(l))
   {
     nb++;
-    const dt_imgid_t id = sqlite3_column_int(stmt, 0);
-    const int v = sqlite3_column_int(stmt, 1);
+    const dt_grouping_member_t *m = l->data;
 
-    if(id != thumb->groupid)
+    if(m->id != thumb->groupid)
     {
-      if(id == thumb->imgid)
+      if(m->id == thumb->imgid)
         dt_util_str_cat(&tt, "\n\u2022 %s", _("current"));
       else
       {
-        dt_util_str_cat(&tt, "\n\u2022 %s", sqlite3_column_text(stmt, 2));
-        if(v > 0)
-          dt_util_str_cat(&tt, " v%d", v);
+        dt_util_str_cat(&tt, "\n\u2022 %s", m->filename);
+        if(m->version > 0)
+          dt_util_str_cat(&tt, " v%d", m->version);
       }
     }
   }
-  sqlite3_finalize(stmt);
+  g_list_free_full(members, dt_grouping_member_free);
 
   // and the number of grouped images
   gchar *ttf = g_strdup_printf("%d %s\n%s", nb, _("grouped images"), tt);
@@ -270,25 +263,18 @@ static void _image_get_infos(dt_thumbnail_t *thumb)
 
   // colorlabels
   thumb->colorlabels = 0;
-  DT_DEBUG_SQLITE3_CLEAR_BINDINGS(darktable.view_manager->statements.get_color);
-  DT_DEBUG_SQLITE3_RESET(darktable.view_manager->statements.get_color);
-  DT_DEBUG_SQLITE3_BIND_INT(darktable.view_manager->statements.get_color, 1, thumb->imgid);
-
-  while(sqlite3_step(darktable.view_manager->statements.get_color) == SQLITE_ROW)
-  {
-    const int col = sqlite3_column_int(darktable.view_manager->statements.get_color, 0);
-    // we reuse CPF_* flags, as we'll pass them to the paint fct after
-    if(col == 0)
-      thumb->colorlabels |= CPF_LABEL_RED;
-    else if(col == 1)
-      thumb->colorlabels |= CPF_LABEL_YELLOW;
-    else if(col == 2)
-      thumb->colorlabels |= CPF_LABEL_GREEN;
-    else if(col == 3)
-      thumb->colorlabels |= CPF_LABEL_BLUE;
-    else if(col == 4)
-      thumb->colorlabels |= CPF_LABEL_PURPLE;
-  }
+  const int labels = dt_colorlabels_get_labels(thumb->imgid);
+  // we reuse CPF_* flags, as we'll pass them to the paint fct after
+  if(labels & (1 << DT_COLORLABELS_RED))
+    thumb->colorlabels |= CPF_LABEL_RED;
+  if(labels & (1 << DT_COLORLABELS_YELLOW))
+    thumb->colorlabels |= CPF_LABEL_YELLOW;
+  if(labels & (1 << DT_COLORLABELS_GREEN))
+    thumb->colorlabels |= CPF_LABEL_GREEN;
+  if(labels & (1 << DT_COLORLABELS_BLUE))
+    thumb->colorlabels |= CPF_LABEL_BLUE;
+  if(labels & (1 << DT_COLORLABELS_PURPLE))
+    thumb->colorlabels |= CPF_LABEL_PURPLE;
   if(thumb->w_color)
   {
     GtkDarktableThumbnailBtn *btn = (GtkDarktableThumbnailBtn *)thumb->w_color;
@@ -299,14 +285,7 @@ static void _image_get_infos(dt_thumbnail_t *thumb)
   thumb->is_altered = dt_image_altered(thumb->imgid);
 
   // grouping
-  DT_DEBUG_SQLITE3_CLEAR_BINDINGS(darktable.view_manager->statements.get_grouped);
-  DT_DEBUG_SQLITE3_RESET(darktable.view_manager->statements.get_grouped);
-  DT_DEBUG_SQLITE3_BIND_INT(darktable.view_manager->statements.get_grouped,
-                            1, thumb->imgid);
-  DT_DEBUG_SQLITE3_BIND_INT(darktable.view_manager->statements.get_grouped,
-                            2, thumb->imgid);
-  thumb->is_grouped =
-    (sqlite3_step(darktable.view_manager->statements.get_grouped) == SQLITE_ROW);
+  thumb->is_grouped = dt_grouping_has_others(thumb->imgid);
 
   // grouping tooltip
   _image_update_group_tooltip(thumb);
@@ -451,7 +430,7 @@ static gboolean _event_cursor_draw(GtkWidget *widget,
   const double w_height = gtk_widget_get_allocated_height(widget);
   GtkStyleContext *context = gtk_widget_get_style_context(widget);
   GdkRGBA col;
-  gtk_style_context_lookup_color(context, "bg_color", &col);
+  gtk_style_context_get_color(context, gtk_widget_get_state_flags(widget), &col);
 
   cairo_set_source_rgba(cr, col.red, col.green, col.blue, col.alpha);
   cairo_line_to(cr, w_width, 0);
@@ -728,7 +707,7 @@ static gboolean _event_image_draw(GtkWidget *widget,
   dt_develop_t *dev = darktable.develop;
   if(thumb->img_surf_preview
      && (dt_view_get_current() != DT_VIEW_DARKROOM
-         || !dev->preview_pipe->backbuf
+         || !dev->preview_pipe->frame
          || dev->preview_pipe->output_imgid != thumb->imgid))
   {
     dt_thumbnail_surface_destroy(thumb);
@@ -751,32 +730,20 @@ static gboolean _event_image_draw(GtkWidget *widget,
 
     if(dt_view_get_current() == DT_VIEW_DARKROOM
        && dev->preview_pipe->output_imgid == thumb->imgid
-       && dev->preview_pipe->backbuf)
+       && dev->preview_pipe->frame)
     {
       // the current thumb is the one currently developed in darkroom
       // better use the preview buffer for surface, in order to stay in sync
       dt_thumbnail_surface_destroy(thumb);
 
-      // make sure we use all backbuf data here with local copies in a protected state
-      // to protect against darkroom image switching to next/previous for example.
-      dt_pthread_mutex_t *mutex = &dev->preview_pipe->backbuf_mutex;
-      dt_pthread_mutex_lock(mutex);
+      // a reference keeps the frame as it is, whatever darkroom does next,
+      // switching to the next or previous image for example
+      dt_frame_t *frame = dt_dev_pixelpipe_frame(dev->preview_pipe);
+      const int buf_width = frame ? dt_frame_geometry(frame)->width : 0;
+      const int buf_height = frame ? dt_frame_geometry(frame)->height : 0;
 
-      // get new surface with preview image
-      const int buf_width = dev->preview_pipe->backbuf_width;
-      const int buf_height = dev->preview_pipe->backbuf_height;
-
-      const size_t bbufsize = sizeof(uint8_t) * 4 * buf_width * buf_height;
-      uint8_t *rgbbuf = dt_alloc_align_uint8(bbufsize);
-
-      memcpy(rgbbuf, dev->preview_pipe->backbuf, bbufsize);
-      dt_pthread_mutex_unlock(mutex);
-
-      const int stride = cairo_format_stride_for_width(CAIRO_FORMAT_RGB24, buf_width);
-      cairo_surface_t *tmp_surface
-          = cairo_image_surface_create_for_data(rgbbuf,
-                                                CAIRO_FORMAT_RGB24,
-                                                buf_width, buf_height, stride);
+      // the colors GTK's surface shows
+      cairo_surface_t *tmp_surface = dt_frame_device_surface(frame, DT_COLORSPACE_DISPLAY);
 
       // copy preview image into final surface
       if(tmp_surface)
@@ -811,10 +778,9 @@ static gboolean _event_image_draw(GtkWidget *widget,
                           cairo_image_surface_get_data(thumb->img_surf));
           cairo_restore(cr2);
         }
-        cairo_surface_destroy(tmp_surface);
         cairo_destroy(cr2);
       }
-      dt_free_align(rgbbuf);
+      dt_frame_unref(frame);
       thumb->img_surf_preview = TRUE;
     }
     else
@@ -872,10 +838,13 @@ static gboolean _event_image_draw(GtkWidget *widget,
         _thumb_resize_overlays(thumb);
     }
 
-    // if we don't have the right size of the image now, we reload it again
+    // A smaller mipmap is a usable fallback while the requested level is
+    // loading.  Keep retrying so it can be replaced, but do not cover the
+    // displayed image with a permanent "working..." message when a surface
+    // is already available (notably when zooming a full preview to 100%).
     if(res != DT_VIEW_SURFACE_OK)
     {
-      thumb->busy = TRUE;
+      thumb->busy = (res != DT_VIEW_SURFACE_SMALLER || !thumb->img_surf);
       if(!thumb->expose_again_timeout_id)
         thumb->expose_again_timeout_id = g_timeout_add(250, _thumb_expose_again, thumb);
     }
@@ -1099,8 +1068,8 @@ static void _event_grouping_release_cb(GtkGestureSingle *gesture,
 
   if(!thumb->moved)
   {
-    GdkModifierType state;
-    gtk_get_current_event_state(&state);
+    const GdkModifierType state =
+      dt_gui_get_current_event_state(GTK_EVENT_CONTROLLER(gesture));
     //TODO: will succeed if either or *both* of Shift and Control are
     //pressed.  Do we want this?
     if(dt_modifier_is(state, GDK_SHIFT_MASK)
@@ -1108,15 +1077,7 @@ static void _event_grouping_release_cb(GtkGestureSingle *gesture,
     {
       // just add the whole group to the selection. TODO: make this
       // also work for collapsed groups.
-      sqlite3_stmt *stmt;
-      DT_DEBUG_SQLITE3_PREPARE_V2(
-          dt_database_get(darktable.db),
-          "INSERT OR IGNORE INTO main.selected_images (imgid)"
-          " SELECT id FROM main.images WHERE group_id = ?1", -1, &stmt,
-          NULL);
-      DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, thumb->groupid);
-      sqlite3_step(stmt);
-      sqlite3_finalize(stmt);
+      dt_grouping_select_members(thumb->groupid);
     }
     else if(!darktable.gui->grouping
             || thumb->groupid == darktable.gui->expanded_group_id)
@@ -1281,7 +1242,7 @@ static void _dt_preview_updated_callback(gpointer instance,
   if(dt_view_get_current() == DT_VIEW_DARKROOM
      && (thumb->img_surf_preview
          || darktable.develop->preview_pipe->output_imgid == thumb->imgid)
-     && darktable.develop->preview_pipe->backbuf)
+     && darktable.develop->preview_pipe->frame)
   {
     // reset surface and invalidate native mipmap cache (content changed)
     thumb->img_surf_dirty = TRUE;
@@ -1862,6 +1823,8 @@ static void _thumb_resize_overlays(dt_thumbnail_t *thumb)
     gtk_widget_set_margin_top(thumb->w_bottom, thumb->img_margin->bottom);
     gtk_widget_set_valign(thumb->w_bottom_eb, GTK_ALIGN_END);
     gtk_widget_set_halign(thumb->w_bottom_eb, GTK_ALIGN_CENTER);
+    // margins set by the other overlay layout must be cleared, see dt_thumbnail_set_overlay()
+    gtk_widget_set_margin_top(thumb->w_bottom_eb, 0);
     gtk_widget_set_margin_start(thumb->w_bottom_eb, 0);
 
     // reject icon
@@ -1872,6 +1835,7 @@ static void _thumb_resize_overlays(dt_thumbnail_t *thumb)
     // align on the left of the thumb
     gtk_widget_set_margin_start(thumb->w_reject, pos);
     gtk_widget_set_margin_bottom(thumb->w_reject, margin_b_icons);
+    gtk_widget_set_margin_top(thumb->w_reject, 0);
 
     // stars
     for(int i = 0; i < MAX_STARS; i++)
@@ -1879,6 +1843,7 @@ static void _thumb_resize_overlays(dt_thumbnail_t *thumb)
       gtk_widget_set_size_request(thumb->w_stars[i], icon_size, icon_size);
       gtk_widget_set_valign(thumb->w_stars[i], GTK_ALIGN_END);
       gtk_widget_set_margin_bottom(thumb->w_stars[i], margin_b_icons);
+      gtk_widget_set_margin_top(thumb->w_stars[i], 0);
       gtk_widget_set_margin_start(
           thumb->w_stars[i],
           thumb->img_margin->left
@@ -1892,6 +1857,7 @@ static void _thumb_resize_overlays(dt_thumbnail_t *thumb)
     gtk_widget_set_valign(thumb->w_color, GTK_ALIGN_END);
     gtk_widget_set_halign(thumb->w_color, GTK_ALIGN_START);
     gtk_widget_set_margin_bottom(thumb->w_color, margin_b_icons);
+    gtk_widget_set_margin_top(thumb->w_color, 0);
     pos = width - thumb->img_margin->right - icon_size + icon_size * 0.125;
     // align on the right
     gtk_widget_set_margin_start(thumb->w_color, pos);
@@ -1900,30 +1866,36 @@ static void _thumb_resize_overlays(dt_thumbnail_t *thumb)
     _set_flag(thumb->w_local_copy, GTK_STATE_FLAG_ACTIVE, FALSE);
     gtk_widget_set_size_request(thumb->w_local_copy, 1.618 * r1, 1.618 * r1);
     gtk_widget_set_halign(thumb->w_local_copy, GTK_ALIGN_END);
+    gtk_widget_set_margin_top(thumb->w_local_copy, 0);
+    gtk_widget_set_margin_start(thumb->w_local_copy, 0);
 
     // the altered icon
     gtk_widget_set_size_request(thumb->w_altered, 2.0 * r1, 2.0 * r1);
     gtk_widget_set_halign(thumb->w_altered, GTK_ALIGN_END);
     gtk_widget_set_margin_top(thumb->w_altered, thumb->img_margin->top);
     gtk_widget_set_margin_end(thumb->w_altered, thumb->img_margin->right);
+    gtk_widget_set_margin_start(thumb->w_altered, 0);
 
     // the tags icon
     gtk_widget_set_size_request(thumb->w_tags, 2.0 * r1, 2.0 * r1);
     gtk_widget_set_halign(thumb->w_tags, GTK_ALIGN_END);
     gtk_widget_set_margin_top(thumb->w_tags, thumb->img_margin->top);
     gtk_widget_set_margin_end(thumb->w_tags, thumb->img_margin->right + 2.5 * r1);
+    gtk_widget_set_margin_start(thumb->w_tags, 0);
 
     // the group bouton
     gtk_widget_set_size_request(thumb->w_group, 2.0 * r1, 2.0 * r1);
     gtk_widget_set_halign(thumb->w_group, GTK_ALIGN_END);
     gtk_widget_set_margin_top(thumb->w_group, thumb->img_margin->top);
     gtk_widget_set_margin_end(thumb->w_group, thumb->img_margin->right + 5.0 * r1);
+    gtk_widget_set_margin_start(thumb->w_group, 0);
 
     // the sound icon
     gtk_widget_set_size_request(thumb->w_audio, 2.0 * r1, 2.0 * r1);
     gtk_widget_set_halign(thumb->w_audio, GTK_ALIGN_END);
     gtk_widget_set_margin_top(thumb->w_audio, thumb->img_margin->top);
     gtk_widget_set_margin_end(thumb->w_audio, thumb->img_margin->right + 7.5 * r1);
+    gtk_widget_set_margin_start(thumb->w_audio, 0);
 
     // the filmstrip cursor
     gtk_widget_set_size_request(thumb->w_cursor, 6.0 * r1, 3.0 * r1);
@@ -2002,6 +1974,8 @@ static void _thumb_resize_overlays(dt_thumbnail_t *thumb)
     gtk_widget_set_margin_start(thumb->w_reject,
                                 padding - icon_size / 8.0 + border_l + px);
     gtk_widget_set_margin_top(thumb->w_reject, line2 + py);
+    // margins set by the other overlay layout must be cleared, see dt_thumbnail_set_overlay()
+    gtk_widget_set_margin_bottom(thumb->w_reject, 0);
     // stars
     for(int i = 0; i < MAX_STARS; i++)
     {
@@ -2011,6 +1985,7 @@ static void _thumb_resize_overlays(dt_thumbnail_t *thumb)
       gtk_widget_set_margin_start
         (thumb->w_stars[i],
          padding - icon_size / 8.0 + border_l + r1 + (i + 1) * 3.0 * r1 + px);
+      gtk_widget_set_margin_bottom(thumb->w_stars[i], 0);
     }
     // the color labels
     gtk_widget_set_size_request(thumb->w_color, icon_size, icon_size);
@@ -2020,6 +1995,7 @@ static void _thumb_resize_overlays(dt_thumbnail_t *thumb)
     gtk_widget_set_margin_start
       (thumb->w_color,
        padding - icon_size / 8.0 + border_l + 2.0 * r1 + (MAX_STARS + 1) * 3.0 * r1 + px);
+    gtk_widget_set_margin_bottom(thumb->w_color, 0);
     // the local copy indicator
     _set_flag(thumb->w_local_copy, GTK_STATE_FLAG_ACTIVE, TRUE);
     gtk_widget_set_size_request(thumb->w_local_copy, icon_size2, icon_size2);
@@ -2031,21 +2007,25 @@ static void _thumb_resize_overlays(dt_thumbnail_t *thumb)
     gtk_widget_set_halign(thumb->w_altered, GTK_ALIGN_START);
     gtk_widget_set_margin_top(thumb->w_altered, line3 + py);
     gtk_widget_set_margin_start(thumb->w_altered, 10.0 * r1 + px);
+    gtk_widget_set_margin_end(thumb->w_altered, 0);
     // the tags icon
     gtk_widget_set_size_request(thumb->w_tags, icon_size2, icon_size2);
     gtk_widget_set_halign(thumb->w_tags, GTK_ALIGN_START);
     gtk_widget_set_margin_top(thumb->w_tags, line3 + py);
     gtk_widget_set_margin_start(thumb->w_tags, 7.0 * r1 + px);
+    gtk_widget_set_margin_end(thumb->w_tags, 0);
     // the group bouton
     gtk_widget_set_size_request(thumb->w_group, icon_size2, icon_size2);
     gtk_widget_set_halign(thumb->w_group, GTK_ALIGN_START);
     gtk_widget_set_margin_top(thumb->w_group, line3 + py);
     gtk_widget_set_margin_start(thumb->w_group, 4.0 * r1 + px);
+    gtk_widget_set_margin_end(thumb->w_group, 0);
     // the sound icon
     gtk_widget_set_size_request(thumb->w_audio, icon_size2, icon_size2);
     gtk_widget_set_halign(thumb->w_audio, GTK_ALIGN_START);
     gtk_widget_set_margin_top(thumb->w_audio, line3 + py);
     gtk_widget_set_margin_start(thumb->w_audio, r1 + px);
+    gtk_widget_set_margin_end(thumb->w_audio, 0);
     // the zoomming indicator
     gtk_widget_set_margin_top(thumb->w_zoom_eb, line3 + py);
     gtk_widget_set_margin_start(thumb->w_zoom_eb, 18.0 * r1 + px);
@@ -2412,6 +2392,7 @@ void dt_thumbnail_reload_infos(dt_thumbnail_t *thumb)
   {
     if(thumb->over != DT_THUMBNAIL_OVERLAYS_NONE)
     {
+      g_free(thumb->filename);
       thumb->filename = g_strdup(img->filename);
       thumb->has_audio = (img->flags & DT_IMAGE_HAS_WAV);
       thumb->has_localcopy = (img->flags & DT_IMAGE_LOCAL_COPY);
@@ -2425,12 +2406,17 @@ void dt_thumbnail_reload_infos(dt_thumbnail_t *thumb)
      || thumb->over == DT_THUMBNAIL_OVERLAYS_HOVER_BLOCK)
     _thumb_update_extended_infos_line(thumb);
 
-  // we read all other infos
+  // Always refresh the rating (and its greyed/rejected CSS class): when a
+  // thumbnail widget is reused for a different image while panning the
+  // zoomable lighttable, skipping this leaves the previous image's reject
+  // class in place and unrelated images look greyed out.  _image_get_infos()
+  // is safe when overlays are off -- it refreshes the rating and returns
+  // early -- only the on-screen overlay icons are gated on the overlay mode.
+  _image_get_infos(thumb);
+  // reused widgets keep the previous image's active flag.
+  _dt_active_images_callback(NULL, thumb);
   if(thumb->over != DT_THUMBNAIL_OVERLAYS_NONE)
-  {
-    _image_get_infos(thumb);
     _thumb_update_icons(thumb);
-  }
 
   _thumb_write_extension(thumb);
 

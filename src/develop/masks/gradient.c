@@ -157,7 +157,7 @@ static int _gradient_events_mouse_scrolled(dt_iop_module_t *module,
     if(dt_modifier_is(state, GDK_CONTROL_MASK))
     {
       // we try to change the opacity
-      dt_masks_form_change_opacity(form, parentid, up ? 0.05f : -0.05f);
+      dt_masks_form_change_opacity(module, form, parentid, up ? 0.05f : -0.05f);
     }
     else if(dt_modifier_is(state, GDK_SHIFT_MASK))
     {
@@ -203,7 +203,10 @@ static int _gradient_events_button_pressed(dt_iop_module_t *module,
 {
   if(!gui) return 0;
 
-  if(which == GDK_BUTTON_PRIMARY && type == GDK_2BUTTON_PRESS)
+  // while creating there is no point yet: a double-click is just another click,
+  // and an empty form's points must never be dereferenced
+  if(!gui->creation && form->points
+     && which == GDK_BUTTON_PRIMARY && type == GDK_2BUTTON_PRESS)
   {
     // double-click resets curvature
     dt_masks_point_gradient_t *gradient = form->points->data;
@@ -339,8 +342,8 @@ static int _gradient_events_button_released(dt_iop_module_t *module,
                                             dt_masks_form_gui_t *gui,
                                             const int index)
 {
-  float wd, ht, iwidth, iheight;
-  dt_masks_get_image_size(&wd, &ht, &iwidth, &iheight);
+  float wd, ht;
+  dt_masks_get_image_size(&wd, &ht, NULL, NULL);
 
   if(which == GDK_BUTTON_SECONDARY
      && dt_is_valid_maskid(parentid)
@@ -371,7 +374,7 @@ static int _gradient_events_button_released(dt_iop_module_t *module,
     }
 
     // we remove the shape
-    dt_masks_form_remove(module, dt_masks_get_from_id(darktable.develop, parentid), form);
+    dt_masks_remove_shape(module, form, parentid);
     return 1;
   }
 
@@ -379,19 +382,9 @@ static int _gradient_events_button_released(dt_iop_module_t *module,
      && form->points
      && gui->edit_mode == DT_MASKS_EDIT_FULL)
   {
-    // we get the gradient
-    dt_masks_point_gradient_t *gradient = form->points->data;
-
-    // we end the form dragging
+    // the move was already applied incrementally in mouse_moved; just finalise
     gui->form_dragging = FALSE;
 
-    // we change the center value
-    float pts[2] = { pzx * wd + gui->dx, pzy * ht + gui->dy };
-    dt_masks_clamp_move_pts(pts, wd, ht);
-    dt_dev_distort_backtransform(darktable.develop, pts, 1);
-
-    gradient->anchor[0] = pts[0] / iwidth;
-    gradient->anchor[1] = pts[1] / iheight;
     dt_dev_add_masks_history_item(darktable.develop, module, TRUE);
 
     // we recreate the form points
@@ -403,40 +396,8 @@ static int _gradient_events_button_released(dt_iop_module_t *module,
           && form->points
           && gui->edit_mode == DT_MASKS_EDIT_FULL)
   {
-    // we get the gradient
-    dt_masks_point_gradient_t *gradient = form->points->data;
-
-    // we end the form rotating
+    // rotation was applied incrementally in mouse_moved; just finalise
     gui->form_rotating = FALSE;
-
-    const float x = pzx * wd;
-    const float y = pzy * ht;
-
-    // we need the reference point
-    dt_masks_form_gui_points_t *gpt = g_list_nth_data(gui->points, index);
-    if(!gpt) return 0;
-    const float xref = gpt->points[0];
-    const float yref = gpt->points[1];
-
-    const float pts[8] = { xref, yref, x , y, 0, 0, gui->dx, gui->dy };
-
-    const float dv = atan2f(pts[3] - pts[1],
-                            pts[2] - pts[0]) - atan2f(-(pts[7] - pts[5]),
-                                                      -(pts[6] - pts[4]));
-
-    float pts2[8] = { xref, yref, x , y, xref+10.0f, yref, xref, yref+10.0f };
-
-    dt_dev_distort_backtransform(darktable.develop, pts2, 4);
-
-    float check_angle = atan2f(pts2[7] - pts2[1],
-                               pts2[6] - pts2[0]) - atan2f(pts2[5] - pts2[1],
-                                                           pts2[4] - pts2[0]);
-    // Normalize to the range -180 to 180 degrees
-    check_angle = atan2f(sinf(check_angle), cosf(check_angle));
-    if(check_angle < 0)
-      gradient->rotation += rad2degf(dv);
-    else
-      gradient->rotation -= rad2degf(dv);
 
     dt_dev_add_masks_history_item(darktable.develop, module, TRUE);
 
@@ -469,7 +430,10 @@ static int _gradient_events_button_released(dt_iop_module_t *module,
   else if(gui->creation)
   {
     // get the rotation angle only if we are not too close from starting point
-    const float zoom_scale = dt_dev_get_zoom_scale_full();
+    // no dt_dev_get_zoom_scale_full(): global_mutex under history_mutex can deadlock
+    dt_dev_viewport_t *port = &darktable.develop->full;
+    const float zoom_scale =
+      dt_dev_get_zoom_scale(port, port->zoom, 1 << port->closeup, TRUE);
 
     // we create the gradient
     dt_masks_point_gradient_t *gradient = malloc(sizeof(dt_masks_point_gradient_t));
@@ -501,7 +465,6 @@ static int _gradient_events_button_released(dt_iop_module_t *module,
       dt_masks_iop_update(crea_module);
     }
 
-    dt_dev_masks_selection_change(darktable.develop, crea_module, form->formid);
     gui->creation_module = NULL;
 
     if(gui->creation_continuous)
@@ -735,7 +698,7 @@ static int _gradient_get_points(dt_develop_t *dev,
   const float xstart = fabsf(curvature) > 1.0f ? -sqrtf(1.0f / fabsf(curvature)) : -1.0f;
   const float xdelta = -2.0f * xstart / (count - 3);
 
-  DT_OMP_FOR(num_threads(nthreads) if(count > 100))
+  DT_OMP_FOR(if(count > 100))
   for(int i = _nb_ctrl_point(); i < count; i++)
   {
     const float xi = xstart + (i - 3) * xdelta;
@@ -1106,8 +1069,10 @@ static int _gradient_get_area(const dt_iop_module_t *const module,
 // caller needs to make sure that input remains within bounds
 static inline float dt_gradient_lookup(const float *lut, const float i)
 {
-  const int bin0 = i;
-  const int bin1 = i + 1;
+  // floor, not truncation: truncating a negative index rounds it up, which
+  // turns the interpolation into an extrapolation below the table's 0.0 floor
+  const int bin0 = floorf(i);
+  const int bin1 = bin0 + 1;
   const float f = i - bin0;
   return lut[bin1] * f + lut[bin0] * (1.0f - f);
 }
@@ -1274,7 +1239,8 @@ static int _gradient_get_mask_roi(const dt_iop_module_t *const module,
                                   const dt_dev_pixelpipe_iop_t *const piece,
                                   dt_masks_form_t *const form,
                                   const dt_iop_roi_t *roi,
-                                  float *buffer)
+                                  float *buffer,
+                                  dt_masks_extent_t *const extent)
 {
   double start2 = dt_get_debug_wtime();
 
@@ -1408,6 +1374,8 @@ static int _gradient_get_mask_roi(const dt_iop_module_t *const module,
   }
 
   dt_free_align(points);
+  // the fill above wrote the whole frame, so a group need not clear it first
+  if(extent) *extent = (dt_masks_extent_t){ 0, 0, w, h };
 
   dt_print(DT_DEBUG_MASKS | DT_DEBUG_PERF,
            "[masks %s] gradient fill took %0.04f sec", form->name,

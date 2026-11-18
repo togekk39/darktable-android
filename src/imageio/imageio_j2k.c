@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2012-2024 darktable developers.
+    Copyright (C) 2012-2026 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -20,7 +20,6 @@
 #include "common/exif.h"
 #include "imageio/imageio_j2k.h"
 
-#include <assert.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -506,7 +505,7 @@ static void sycc420_to_rgb(opj_image_t *img)
       sycc_to_rgb(offset, upb, y[rowstart+j], curr_cb, curr_cr, r+rowstart+j, g+rowstart+j, b+rowstart+j);
       sycc_to_rgb(offset, upb, y[rowstart+j+1], curr_cb, curr_cr, r+rowstart+j+1, g+rowstart+j+1, b+rowstart+j+1);
       sycc_to_rgb(offset, upb, y[nextrow+j], curr_cb, curr_cr, r+nextrow+j, g+nextrow+j, b+nextrow+j);
-      sycc_to_rgb(offset, upb, y[nextrow+j+1], curr_cb, *cr, r+nextrow+j+1, g+nextrow+j+1, b+nextrow+j+1);
+      sycc_to_rgb(offset, upb, y[nextrow+j+1], curr_cb, curr_cr, r+nextrow+j+1, g+nextrow+j+1, b+nextrow+j+1);
     }
   }
   free(img->comps[0].data);

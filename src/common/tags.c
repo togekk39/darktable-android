@@ -24,6 +24,7 @@
 #include "control/conf.h"
 #include "control/control.h"
 #include <glib.h>
+
 #if defined (_WIN32)
 #include "win/getdelim.h"
 #endif // defined (_WIN32)
@@ -237,7 +238,7 @@ guint dt_tag_remove(const guint tagid,
   if(rv == SQLITE_ROW) count = sqlite3_column_int(stmt, 0);
   sqlite3_finalize(stmt);
 
-  if(final == TRUE)
+  if(final)
   {
     // let's actually remove the tag
     DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),
@@ -903,9 +904,9 @@ GList *dt_tag_get_list(const dt_imgid_t imgid)
   if(count < 1)
     return NULL;
 
-  for(; taglist; taglist = g_list_next(taglist))
+  for(const GList *l = taglist; l; l = g_list_next(l))
   {
-    dt_tag_t *t = taglist->data;
+    dt_tag_t *t = l->data;
     gchar *value = t->tag;
 
     gchar **pch = g_strsplit(value, "|", -1);
@@ -1056,8 +1057,8 @@ GList *dt_tag_get_list_export(const dt_imgid_t imgid,
 
   if(count < 1)
     return NULL;
-  GList *sorted_tags = dt_sort_tag(taglist, 0);
-  sorted_tags = g_list_reverse(sorted_tags);
+  taglist = g_list_reverse(dt_sort_tag(taglist, 0));
+  GList *sorted_tags = taglist;
 
   // reset private if export private
   if(export_private_tags)
@@ -1190,6 +1191,83 @@ GList *dt_tag_get_images(const gint tagid)
   sqlite3_finalize(stmt);
 
   return g_list_reverse(result);  // list was built in reverse order, so un-reverse it
+}
+
+dt_imgid_t dt_tag_get_nth_image(const gint tagid, const int n)
+{
+  dt_imgid_t imgid = NO_IMGID;
+  sqlite3_stmt *stmt = NULL;
+  char query[1024];
+  snprintf(query, sizeof(query),
+           "SELECT imgid FROM main.tagged_images WHERE tagid=?1 ORDER BY imgid LIMIT 1 OFFSET %d", n);
+  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), query, -1, &stmt, NULL);
+  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, tagid);
+  if(sqlite3_step(stmt) == SQLITE_ROW)
+    imgid = sqlite3_column_int(stmt, 0);
+  sqlite3_finalize(stmt);
+  return imgid;
+}
+
+GList *dt_tag_get_tag_ids(const dt_imgid_t imgid)
+{
+  GList *result = NULL;
+  sqlite3_stmt *stmt;
+  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), "SELECT tagid FROM main.tagged_images WHERE imgid=?1",
+                              -1, &stmt, NULL);
+  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);
+  while(sqlite3_step(stmt) == SQLITE_ROW)
+    result = g_list_prepend(result, GINT_TO_POINTER(sqlite3_column_int(stmt, 0)));
+  sqlite3_finalize(stmt);
+  return g_list_reverse(result);
+}
+
+uint32_t dt_tag_count_tags(void)
+{
+  uint32_t count = 0;
+  sqlite3_stmt *stmt;
+  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), "SELECT COUNT(*) FROM data.tags", -1, &stmt, NULL);
+  if(sqlite3_step(stmt) == SQLITE_ROW)
+    count = sqlite3_column_int(stmt, 0);
+  sqlite3_finalize(stmt);
+  return count;
+}
+
+gint dt_tag_get_nth_tag(const int n)
+{
+  gint tagid = -1;
+  sqlite3_stmt *stmt = NULL;
+  char query[1024];
+  snprintf(query, sizeof(query), "SELECT id FROM data.tags ORDER BY id LIMIT 1 OFFSET %d", n);
+  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), query, -1, &stmt, NULL);
+  if(sqlite3_step(stmt) == SQLITE_ROW)
+    tagid = sqlite3_column_int(stmt, 0);
+  sqlite3_finalize(stmt);
+  return tagid;
+}
+
+GList *dt_tag_get_flags_counts(const char *images)
+{
+  GList *result = NULL;
+  sqlite3_stmt *stmt = NULL;
+  // clang-format off
+  gchar *query = g_strdup_printf("SELECT flags, COUNT(DISTINCT imgid)"
+                                 " FROM main.tagged_images"
+                                 " JOIN data.tags"
+                                 " ON data.tags.id = main.tagged_images.tagid"
+                                 "   AND name NOT LIKE 'darktable|%%' "
+                                 " WHERE imgid in (%s) GROUP BY tagid", images);
+  // clang-format on
+  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), query, -1, &stmt, NULL);
+  g_free(query);
+  while(sqlite3_step(stmt) == SQLITE_ROW)
+  {
+    dt_tag_flags_count_t *fc = g_malloc(sizeof(dt_tag_flags_count_t));
+    fc->flags = sqlite3_column_int(stmt, 0);
+    fc->count = sqlite3_column_int(stmt, 1);
+    result = g_list_prepend(result, fc);
+  }
+  sqlite3_finalize(stmt);
+  return g_list_reverse(result);
 }
 
 GList *dt_tag_get_images_from_list(const GList *img, const gint tagid)
@@ -1905,57 +1983,104 @@ ssize_t dt_tag_export(const char *filename)
 
   g_strfreev(hierarchy);
 
-  dt_tag_free_result(&tags);
+  dt_tag_free_result(&sorted_tags);
 
   fclose(fd);
 
   return count;
 }
 
-char *dt_tag_get_subtags(const dt_imgid_t imgid,
-                         const char *category,
-                         const int level)
+GList *dt_tag_get_subtags_list(const dt_imgid_t imgid,
+                               const char *category,
+                               const int level)
 {
   if(!category)
     return NULL;
 
   const guint rootnb = dt_util_string_count_char(category, '|');
-  char *tags = NULL;
+  GList *tags = NULL;
+  GHashTable *seen = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
   sqlite3_stmt *stmt;
   // clang-format off
   DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),
           "SELECT DISTINCT T.name FROM main.tagged_images AS I "
           "INNER JOIN data.tags AS T "
           "ON T.id = I.tagid AND SUBSTR(T.name, 1, LENGTH(?2)) = ?2 "
-          "WHERE I.imgid = ?1",
+          "WHERE I.imgid = ?1 "
+          "ORDER BY T.name",
           -1, &stmt, NULL);
   // clang-format on
   DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, imgid);
   DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 2, category, -1, SQLITE_TRANSIENT);
   while(sqlite3_step(stmt) == SQLITE_ROW)
   {
-    char *tag = (char *)sqlite3_column_text(stmt, 0);
+    const char *tag = (const char *)sqlite3_column_text(stmt, 0);
     const guint tagnb = dt_util_string_count_char(tag, '|');
     if(tagnb >= rootnb + level)
     {
       gchar **pch = g_strsplit(tag, "|", -1);
-      char *subtag = pch[rootnb + level];
-      gboolean valid = TRUE;
-      // check we have not yet this subtag in the list
-      if(tags && strlen(tags) >= strlen(subtag) + 1)
+      const char *subtag = pch[rootnb + level];
+      if(subtag && *subtag && !g_hash_table_contains(seen, subtag))
       {
-        gchar *found = g_strstr_len(tags, strlen(tags), subtag);
-        if(found && found[strlen(subtag)] == ',')
-          valid = FALSE;
+        g_hash_table_add(seen, g_strdup(subtag));
+        tags = g_list_append(tags, g_strdup(subtag));
       }
-      if(valid)
-        dt_util_str_cat(&tags, "%s,", subtag);
       g_strfreev(pch);
     }
   }
-  if(tags) tags[strlen(tags) - 1] = '\0'; // remove the last comma
+  g_hash_table_destroy(seen);
   sqlite3_finalize(stmt);
   return tags;
+}
+
+char *dt_tag_get_subtags(const dt_imgid_t imgid,
+                         const char *category,
+                         const int level)
+{
+  GList *tags = dt_tag_get_subtags_list(imgid, category, level);
+  char *result = dt_util_glist_to_str(",", tags);
+  g_list_free_full(tags, g_free);
+  return result;
+}
+
+GList *dt_tag_get_subtags_paths(const dt_imgid_t imgid,
+                                const char *category)
+{
+  // dt_tag_get_attached() falls back to the current selection for an invalid
+  // image; CATEGORY is image-scoped, so this must be too
+  if(!category || !dt_is_valid_imgid(imgid))
+    return NULL;
+
+  // number of components the category itself is made of
+  const guint prefix_components = dt_util_string_count_char(category, '|') + 1;
+  gchar *prefix = g_strdup_printf("%s|", category);
+
+  GList *taglist = NULL;
+  const uint32_t count = dt_tag_get_attached(imgid, &taglist, TRUE);
+  if(count < 1)
+  {
+    g_free(prefix);
+    return NULL;
+  }
+
+  GList *paths = NULL;
+  for(GList *tag_iter = taglist; tag_iter; tag_iter = g_list_next(tag_iter))
+  {
+    const dt_tag_t *t = (const dt_tag_t *)tag_iter->data;
+    if(!g_str_has_prefix(t->tag, prefix))
+      continue;
+
+    gchar **components = g_strsplit(t->tag, "|", -1);
+    // the entity is the part of the tag below the category. a tag that is
+    // exactly the category has no entity
+    if(g_strv_length(components) > prefix_components)
+      paths = g_list_append(paths, g_strdupv(components + prefix_components));
+    g_strfreev(components);
+  }
+
+  g_free(prefix);
+  dt_tag_free_result(&taglist);
+  return paths;
 }
 
 uint32_t dt_tag_get_tag_id_by_name(const char *const name)

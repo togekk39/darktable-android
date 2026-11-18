@@ -81,19 +81,17 @@ static void _filename_changed(GtkWidget *widget, gpointer user_data)
   g_free(value);
 }
 
-static gboolean _filename_focus_out(GtkWidget *entry, GdkEventFocus *event, gpointer user_data)
+static void _filename_focus_out(GtkEventController *controller, gpointer user_data)
 {
   _widgets_filename_t *filename = (_widgets_filename_t *)user_data;
-  if(filename->rule->cleaning) return FALSE;
-  _filename_changed(entry, user_data);
-  return FALSE;
+  if(filename->rule->cleaning) return;
+  _filename_changed(dt_gui_get_widget(controller), user_data);
 }
 
-void _filename_tree_update(_widgets_filename_t *filename)
+static void _filename_tree_update(_widgets_filename_t *filename)
 {
   dt_lib_filtering_t *d = filename->rule->lib;
 
-  char query[1024] = { 0 };
   int nb_raw = 0;
   int nb_not_raw = 0;
   int nb_ldr = 0;
@@ -104,67 +102,33 @@ void _filename_tree_update(_widgets_filename_t *filename)
   GtkTreeModel *ext_model = gtk_tree_view_get_model(GTK_TREE_VIEW(filename->ext_tree));
   gtk_list_store_clear(GTK_LIST_STORE(ext_model));
 
-  // how do we separate filename and extension directly in sqlite :
-  // starting example : 'nice.bird.cr2'
-  // replace(filename, '.', '') => nicebirdcr2 (remove all the point)
-  // rtrim(filename, replace(filename, '.', '')) => nice.bird. (remove ending chars presents in 'nice.bird.cr2' and
-  // 'nicebirdcr2') rtrim(rtrim(filename, replace(filename, '.', '')), '.') => nice.bird (remove ending '.')
-  // replace(filename, rtrim(filename, replace(filename, '.', '')), '.') => .cr2 (replace the filename part by a
-  // '.')
-
-  // clang-format off
-  g_snprintf(query, sizeof(query),
-             "SELECT rtrim(rtrim(filename, replace(filename, '.', '')), '.') AS fn, COUNT(*) AS count"
-             " FROM main.images AS mi"
-             " WHERE %s"
-             " GROUP BY fn"
-             " ORDER BY filename",
-             d->last_where_ext);
-  // clang-format on
-  sqlite3_stmt *stmt;
-  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), query, -1, &stmt, NULL);
-  while(sqlite3_step(stmt) == SQLITE_ROW)
+  GList *counts = dt_filter_get_filename_counts(d->last_where_ext);
+  for(GList *iter = counts; iter; iter = g_list_next(iter))
   {
-    const char *name = (const char *)sqlite3_column_text(stmt, 0);
-    if(name == NULL) continue; // safeguard against degenerated db entries
-    const int count = sqlite3_column_int(stmt, 1);
-
+    dt_filter_name_count_t *count = iter->data;
     gtk_list_store_insert_with_values(GTK_LIST_STORE(name_model), NULL, -1,
-                       TREE_COL_TEXT, name, TREE_COL_TOOLTIP, name,
-                       TREE_COL_PATH, name, TREE_COL_COUNT, count, -1);
+                       TREE_COL_TEXT, count->name, TREE_COL_TOOLTIP, count->name,
+                       TREE_COL_PATH, count->name, TREE_COL_COUNT, count->count, -1);
   }
-  sqlite3_finalize(stmt);
+  g_list_free_full(counts, dt_filter_name_count_free);
 
 
-  // clang-format off
-  g_snprintf(query, sizeof(query),
-             "SELECT upper(replace(filename, rtrim(filename, replace(filename, '.', '')), '.')) AS ext, COUNT(*) AS count, flags"
-             " FROM main.images AS mi"
-             " WHERE %s"
-             " GROUP BY ext"
-             " ORDER BY ext",
-             d->last_where_ext);
-  // clang-format on
-  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), query, -1, &stmt, NULL);
-  while(sqlite3_step(stmt) == SQLITE_ROW)
+  counts = dt_filter_get_extension_counts(d->last_where_ext);
+  for(GList *iter = counts; iter; iter = g_list_next(iter))
   {
-    const char *name = (const char *)sqlite3_column_text(stmt, 0);
-    if(name == NULL) continue; // safeguard against degenerated db entries
-    const int count = sqlite3_column_int(stmt, 1);
-    const int flags = sqlite3_column_int(stmt, 2);
-
+    dt_filter_ext_flag_count_t *count = iter->data;
     gtk_list_store_insert_with_values(GTK_LIST_STORE(ext_model), NULL, -1,
-                       TREE_COL_TEXT, name, TREE_COL_TOOLTIP, name,
-                       TREE_COL_PATH, name, TREE_COL_COUNT, count, -1);
+                       TREE_COL_TEXT, count->name, TREE_COL_TOOLTIP, count->name,
+                       TREE_COL_PATH, count->name, TREE_COL_COUNT, count->count, -1);
 
-    if(flags & DT_IMAGE_RAW)
-      nb_raw += count;
+    if(count->flags & DT_IMAGE_RAW)
+      nb_raw += count->count;
     else
-      nb_not_raw += count;
-    if(flags & DT_IMAGE_LDR) nb_ldr += count;
-    if(flags & DT_IMAGE_HDR) nb_hdr += count;
+      nb_not_raw += count->count;
+    if(count->flags & DT_IMAGE_LDR) nb_ldr += count->count;
+    if(count->flags & DT_IMAGE_HDR) nb_hdr += count->count;
   }
-  sqlite3_finalize(stmt);
+  g_list_free_full(counts, dt_filter_ext_flag_count_free);
 
   // and we insert the predefined extensions
   gtk_list_store_insert_with_values(GTK_LIST_STORE(ext_model), NULL, 0,
@@ -186,7 +150,7 @@ void _filename_tree_update(_widgets_filename_t *filename)
   filename->tree_ok = TRUE;
 }
 
-void _filename_tree_update_visibility(GtkWidget *w, _widgets_filename_t *filename)
+static void _filename_tree_update_visibility(GtkWidget *w, _widgets_filename_t *filename)
 {
   if(!filename->tree_ok) _filename_tree_update(filename);
   gtk_widget_set_visible(gtk_widget_get_parent(filename->name_tree), w == filename->name);
@@ -329,8 +293,8 @@ static void _filename_ok_clicked(GtkWidget *w, _widgets_filename_t *filename)
   gtk_widget_hide(filename->pop);
 }
 
-void _filename_tree_count_func(GtkTreeViewColumn *col, GtkCellRenderer *renderer, GtkTreeModel *model,
-                               GtkTreeIter *iter, gpointer data)
+static void _filename_tree_count_func(GtkTreeViewColumn *col, GtkCellRenderer *renderer, GtkTreeModel *model,
+                                      GtkTreeIter *iter, gpointer data)
 {
   gchar *name;
   guint count;
@@ -371,7 +335,7 @@ static void _filename_widget_init(dt_lib_filtering_rule_t *rule, const dt_collec
                                                 "\nright-click to get existing filenames"));
   gtk_box_pack_start(GTK_BOX(hb), filename->name, TRUE, TRUE, 0);
   g_signal_connect(G_OBJECT(filename->name), "activate", G_CALLBACK(_filename_changed), filename);
-  g_signal_connect(G_OBJECT(filename->name), "focus-out-event", G_CALLBACK(_filename_focus_out), filename);
+  dt_gui_connect_focus(filename->name, NULL, _filename_focus_out, filename);
   GtkGestureSingle *g_name = dt_gui_connect_click(filename->name, _filename_press, NULL, filename);
   gtk_gesture_single_set_button(g_name, GDK_BUTTON_SECONDARY);
   gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(g_name), GTK_PHASE_TARGET);
@@ -385,7 +349,7 @@ static void _filename_widget_init(dt_lib_filtering_rule_t *rule, const dt_collec
                                                "\nright-click to get existing extensions"));
   gtk_box_pack_start(GTK_BOX(hb), filename->ext, TRUE, TRUE, 0);
   g_signal_connect(G_OBJECT(filename->ext), "activate", G_CALLBACK(_filename_changed), filename);
-  g_signal_connect(G_OBJECT(filename->ext), "focus-out-event", G_CALLBACK(_filename_focus_out), filename);
+  dt_gui_connect_focus(filename->ext, NULL, _filename_focus_out, filename);
   GtkGestureSingle *g_ext = dt_gui_connect_click(filename->ext, _filename_press, NULL, filename);
   gtk_gesture_single_set_button(g_ext, GDK_BUTTON_SECONDARY);
   gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(g_ext), GTK_PHASE_TARGET);

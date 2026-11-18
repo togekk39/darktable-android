@@ -154,7 +154,9 @@ static int update_mobile_file_parameter(dt_iop_module_t *module, const char *val
   {
     gchar *folder = g_path_get_dirname(path);
     dt_film_t film;
+    dt_film_init(&film);
     const dt_filmid_t film_id = dt_film_new(&film, folder);
+    dt_film_cleanup(&film);
     g_free(folder);
     overlay_id = dt_is_valid_filmid(film_id) ? dt_image_import(film_id, path, TRUE, FALSE) : NO_IMGID;
     if(!dt_is_valid_imgid(overlay_id) || overlay_id == module->dev->image_storage.id

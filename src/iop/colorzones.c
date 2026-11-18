@@ -82,6 +82,14 @@ typedef struct dt_iop_colorzones_params_t
   int splines_version;
 } dt_iop_colorzones_params_t;
 
+static inline int _colorzones_nodes(const dt_iop_colorzones_params_t *const p,
+                                    const int ch)
+{
+  // stored counts index the fixed node arrays; legacy splines also read nodes - 2
+  const int min_nodes = p->splines_version == DT_IOP_COLORZONES_SPLINES_V1 ? 2 : 1;
+  return CLAMP(p->curve_num_nodes[ch], min_nodes, DT_IOP_COLORZONES_MAXNODES);
+}
+
 typedef struct dt_iop_colorzones_gui_data_t
 {
   dt_draw_curve_t *minmax_curve[DT_IOP_COLORZONES_MAX_CHANNELS]; // curve for gui to draw
@@ -437,7 +445,9 @@ void process_display(dt_iop_module_t *self,
   const int ch = piece->colors;
   const float normalize_C = 1.f / (128.0f * M_SQRT2_F);
 
+  dt_iop_gui_enter_critical_section(self);
   const dt_iop_colorzones_channel_t display_channel = g->channel;
+  dt_iop_gui_leave_critical_section(self);
 
   dt_iop_image_copy_by_size(ovoid, ivoid, roi_out->width, roi_out->height, ch);
 
@@ -579,12 +589,15 @@ void process(dt_iop_module_t *self,
   dt_iop_colorzones_data_t *d = piece->data;
   dt_iop_colorzones_gui_data_t *g = self->gui_data;
 
-  // display selection if requested
-  if(dt_pipe_is_full(piece->pipe)
-     && g
-     && g->display_mask
-     && dt_iop_has_focus(self)
-     && (piece->pipe == self->dev->full.pipe))
+  gboolean show_display = FALSE;
+  if(self->dev->gui_attached && g && dt_pipe_is_full(piece->pipe) && dt_iop_has_focus(self))
+  {
+    dt_iop_gui_enter_critical_section(self);
+    show_display = g->display_mask;
+    dt_iop_gui_leave_critical_section(self);
+  }
+
+  if(show_display)
     process_display(self, piece, ivoid, ovoid, roi_in, roi_out);
   else if(d->mode == DT_IOP_COLORZONES_MODE_SMOOTH)
     process_v3(self, piece, ivoid, ovoid, roi_in, roi_out);
@@ -1340,8 +1353,7 @@ static gboolean _area_draw_callback(GtkWidget *widget,
     char text[256];
     PangoLayout *layout;
     PangoRectangle ink;
-    PangoFontDescription *desc =
-      pango_font_description_copy_static(darktable.bauhaus->pango_font_desc);
+    PangoFontDescription *desc = dt_gui_get_font();
     pango_font_description_set_weight(desc, PANGO_WEIGHT_BOLD);
     pango_font_description_set_absolute_size(desc, PANGO_SCALE);
     layout = pango_cairo_create_layout(cr);
@@ -1868,7 +1880,8 @@ static void _area_scrolled_callback(GtkEventControllerScroll *controller,
 
   if(dt_modifier_is(dt_key_modifier_state(), GDK_MOD1_MASK))
   {
-    // FIXME: event forwarding to g->channel_tabs removed
+    // alt+scroll switches the channel tab (as before the controller conversion)
+    dt_gui_forward_scroll(controller, GTK_WIDGET(g->channel_tabs));
     return;
   }
 
@@ -2185,6 +2198,10 @@ static void _area_button_press_callback(GtkGestureSingle *gesture,
   }
   else if(gtk_gesture_single_get_current_button(gesture) == GDK_BUTTON_SECONDARY && g->selected >= 0)
   {
+    // consume the event so it does not bubble to the module body's
+    // right-click handler (which opens the presets menu)
+    dt_gui_claim(gesture);
+
     if((g->selected == 0 || g->selected == nodes - 1)
        && p->splines_version == DT_IOP_COLORZONES_SPLINES_V1)
     {
@@ -2205,6 +2222,7 @@ static void _area_button_press_callback(GtkGestureSingle *gesture,
       dt_iop_color_picker_reset(self, TRUE);
       gtk_widget_queue_draw(GTK_WIDGET(g->area));
       dt_dev_add_history_item_target(darktable.develop, self, TRUE, widget + ch);
+      return; // an endpoint reset must not fall through into node removal
     }
 
     // right click deletes the node, ctrl+right click reset the node to y-zero
@@ -2318,7 +2336,10 @@ void gui_changed(dt_iop_module_t *self,
   if(w == g->select_by)
   {
     _reset_parameters(p, p->channel, p->splines_version);
-    if(g->display_mask) _reset_display_selection(self);
+    dt_iop_gui_enter_critical_section(self);
+    const gboolean display_mask = g && g->display_mask;
+    dt_iop_gui_leave_critical_section(self);
+    if(display_mask) _reset_display_selection(self);
     gtk_widget_queue_draw(GTK_WIDGET(g->area));
     gtk_widget_queue_draw(GTK_WIDGET(g->bottom_area));
   }
@@ -2364,7 +2385,11 @@ static void _display_mask_callback(GtkToggleButton *togglebutton,
   dt_iop_colorzones_gui_data_t *g = self->gui_data;
 
   // if blend module is displaying mask do not display it here
-  if(self->request_mask_display && !g->display_mask)
+  dt_iop_gui_enter_critical_section(self);
+  gboolean display_mask = g->display_mask;
+  dt_iop_gui_leave_critical_section(self);
+
+  if(self->request_mask_display && !display_mask)
   {
     dt_control_log(_("cannot display masks when the blending mask is displayed"));
 
@@ -2373,8 +2398,10 @@ static void _display_mask_callback(GtkToggleButton *togglebutton,
     DT_LEAVE_GUI_UPDATE();
     return;
   }
-
-  g->display_mask = gtk_toggle_button_get_active(togglebutton);
+  const gboolean is_toggle = gtk_toggle_button_get_active(togglebutton);
+  dt_iop_gui_enter_critical_section(self);
+  g->display_mask = is_toggle;
+  dt_iop_gui_leave_critical_section(self);
 
   if(self->off) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(self->off), 1);
   dt_iop_request_focus(self);
@@ -2390,9 +2417,11 @@ void color_picker_apply(dt_iop_module_t *self,
   {
     dt_iop_colorzones_params_t *p = self->params;
     const dt_iop_colorzones_params_t *const d = self->default_params;
-
+    dt_iop_gui_enter_critical_section(self);
     const int ch_curve = g->channel;
     const int ch_val = p->channel;
+    dt_iop_gui_leave_critical_section(self);
+
     dt_iop_colorzones_node_t *curve = p->curve[ch_curve];
 
     // reset current curve
@@ -2488,10 +2517,13 @@ static float _action_process_zones(gpointer target,
   if(element >= DT_IOP_COLORZONES_BANDS) return DT_ACTION_NOT_VALID;
 
   dt_iop_module_t *self = g_object_get_data(G_OBJECT(target), "iop-instance");
-  dt_iop_colorzones_gui_data_t *g = self->gui_data;
+  const dt_iop_colorzones_gui_data_t *g = self->gui_data;
   dt_iop_colorzones_params_t *p = self->params;
 
-  const int ch = g->channel;
+  dt_iop_gui_enter_critical_section(self);
+  const int ch = g ? g->channel : 0;
+  dt_iop_gui_leave_critical_section(self);
+
   const int nodes = p->curve_num_nodes[ch];
   dt_iop_colorzones_node_t *curve = p->curve[ch];
   const float x = (float)element / DT_IOP_COLORZONES_BANDS;
@@ -2583,7 +2615,9 @@ void gui_init(dt_iop_module_t *self)
 
   self->histogram_cst = IOP_CS_LCH;
 
-  g->channel = dt_conf_get_int("plugins/darkroom/colorzones/gui_channel");
+  const int channel = dt_conf_get_int("plugins/darkroom/colorzones/gui_channel");
+  dt_iop_gui_enter_critical_section(self);
+  g->channel = channel;
   for(int ch = 0; ch < DT_IOP_COLORZONES_MAX_CHANNELS; ch++)
   {
     g->minmax_curve[ch] = dt_draw_curve_new(0.f, 1.f, p->curve_type[ch]);
@@ -2603,6 +2637,7 @@ void gui_init(dt_iop_module_t *self)
   g->dragging = 0;
   g->edit_by_area = 0;
   g->display_mask = FALSE;
+  dt_iop_gui_leave_critical_section(self);
 
   // tabs
   static dt_action_def_t notebook_def = { };
@@ -2614,8 +2649,8 @@ void gui_init(dt_iop_module_t *self)
   dt_ui_notebook_page(g->channel_tabs, N_("chroma"), NULL);
   dt_ui_notebook_page(g->channel_tabs, N_("hue"), NULL);
 
-  gtk_widget_show(gtk_notebook_get_nth_page(g->channel_tabs, g->channel));
-  gtk_notebook_set_current_page(g->channel_tabs, g->channel);
+  gtk_widget_show(gtk_notebook_get_nth_page(g->channel_tabs, channel));
+  gtk_notebook_set_current_page(g->channel_tabs, channel);
   g_signal_connect(G_OBJECT(g->channel_tabs), "switch_page",
                    G_CALLBACK(_channel_tabs_switch_callback), self);
 
@@ -2627,7 +2662,7 @@ void gui_init(dt_iop_module_t *self)
      _("pick GUI color from image\nctrl+click or right-click to select an area"));
   gtk_widget_set_name(g->colorpicker, "keep-active");
   dt_action_define_iop(self, N_("pickers"), N_("show color"),
-                       g->colorpicker, &dt_action_def_toggle);
+                       g->colorpicker, &dt_action_def_color_picker);
   g->colorpicker_set_values = dt_color_picker_new_with_cst(self,
                                                            DT_COLOR_PICKER_AREA,
                                                            NULL, IOP_CS_LCH);
@@ -2642,7 +2677,7 @@ void gui_init(dt_iop_module_t *self)
                                 "ctrl+drag to create a positive curve\n"
                                 "shift+drag to create a negative curve"));
   dt_action_define_iop(self, N_("pickers"), N_("create curve"),
-                       g->colorpicker_set_values, &dt_action_def_toggle);
+                       g->colorpicker_set_values, &dt_action_def_color_picker);
 
   // the nice graph
   g->area = GTK_DRAWING_AREA(dt_ui_resize_wrap(NULL,
@@ -2667,11 +2702,13 @@ void gui_init(dt_iop_module_t *self)
                    G_CALLBACK(_edit_by_area_callback), self);
 
   // display selection
-  g->bt_showmask = dtgtk_togglebutton_new(dtgtk_cairo_paint_showmask, 0, NULL);
+  g->bt_showmask = dtgtk_togglebutton_new_full(dtgtk_cairo_paint_showmask, 0, NULL,
+      &(dtgtk_button_config_t){
+        .tooltip = _("display selection"),
+        .toggled_cb = G_CALLBACK(_display_mask_callback),
+        .toggled_data = self,
+      });
   dt_gui_add_class(g->bt_showmask, "dt_transparent_background");
-  gtk_widget_set_tooltip_text(g->bt_showmask, _("display selection"));
-  g_signal_connect(G_OBJECT(g->bt_showmask), "toggled",
-                   G_CALLBACK(_display_mask_callback), self);
   gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->bt_showmask), FALSE);
 
   self->widget = dt_gui_vbox
@@ -2730,6 +2767,10 @@ void gui_update(dt_iop_module_t *self)
 {
   dt_iop_colorzones_gui_data_t *g = self->gui_data;
   dt_iop_colorzones_params_t *p = self->params;
+
+  // every GUI handler uses the stored count, and adding a node writes through it
+  for(int ch = 0; ch < DT_IOP_COLORZONES_MAX_CHANNELS; ch++)
+    p->curve_num_nodes[ch] = _colorzones_nodes(p, ch);
 
   dt_bauhaus_combobox_set(g->interpolator, p->curve_type[g->channel]);
 
@@ -2790,7 +2831,14 @@ void commit_params(dt_iop_module_t *self,
 #endif
 
   // display selection don't work with opencl
-  piece->process_cl_ready = (g && g->display_mask) ? FALSE : TRUE;
+  gboolean display_mask = FALSE;
+  if(self->dev->gui_attached && g && dt_pipe_is_full(piece->pipe))
+  {
+    dt_iop_gui_enter_critical_section(self);
+    display_mask = g->display_mask;
+    dt_iop_gui_leave_critical_section(self);
+  }
+  piece->process_cl_ready = !display_mask;
   d->channel = (dt_iop_colorzones_channel_t)p->channel;
   d->mode = p->mode;
 
@@ -2798,6 +2846,7 @@ void commit_params(dt_iop_module_t *self,
   {
     for(int ch = 0; ch < DT_IOP_COLORZONES_MAX_CHANNELS; ch++)
     {
+      const int nodes = _colorzones_nodes(p, ch);
       // take care of possible change of curve type or number of nodes
       // (not yet implemented in UI)
       if(d->curve_type[ch] != p->curve_type[ch]
@@ -2810,14 +2859,14 @@ void commit_params(dt_iop_module_t *self,
 
         if(d->channel == DT_IOP_COLORZONES_h)
           dt_draw_curve_add_point(d->curve[ch],
-                                  p->curve[ch][p->curve_num_nodes[ch] - 2].x - 1.f,
-                                  strength(p->curve[ch][p->curve_num_nodes[ch] - 2].y,
+                                  p->curve[ch][nodes - 2].x - 1.f,
+                                  strength(p->curve[ch][nodes - 2].y,
                                            p->strength));
         else
           dt_draw_curve_add_point(d->curve[ch],
-                                  p->curve[ch][p->curve_num_nodes[ch] - 2].x - 1.f,
+                                  p->curve[ch][nodes - 2].x - 1.f,
                                   strength(p->curve[ch][0].y, p->strength));
-        for(int k = 0; k < p->curve_num_nodes[ch]; k++)
+        for(int k = 0; k < nodes; k++)
           dt_draw_curve_add_point(d->curve[ch], p->curve[ch][k].x,
                                   strength(p->curve[ch][k].y, p->strength));
         if(d->channel == DT_IOP_COLORZONES_h)
@@ -2825,31 +2874,31 @@ void commit_params(dt_iop_module_t *self,
                                   strength(p->curve[ch][1].y, p->strength));
         else
           dt_draw_curve_add_point(d->curve[ch], p->curve[ch][1].x + 1.f,
-                                  strength(p->curve[ch][p->curve_num_nodes[ch] - 1].y,
+                                  strength(p->curve[ch][nodes - 1].y,
                                            p->strength));
       }
       else
       {
         if(d->channel == DT_IOP_COLORZONES_h)
           dt_draw_curve_set_point(d->curve[ch], 0,
-                                  p->curve[ch][p->curve_num_nodes[ch] - 2].x - 1.f,
-                                  strength(p->curve[ch][p->curve_num_nodes[ch] - 2].y,
+                                  p->curve[ch][nodes - 2].x - 1.f,
+                                  strength(p->curve[ch][nodes - 2].y,
                                            p->strength));
         else
           dt_draw_curve_set_point(d->curve[ch], 0,
-                                  p->curve[ch][p->curve_num_nodes[ch] - 2].x - 1.f,
+                                  p->curve[ch][nodes - 2].x - 1.f,
                                   strength(p->curve[ch][0].y, p->strength));
-        for(int k = 0; k < p->curve_num_nodes[ch]; k++)
+        for(int k = 0; k < nodes; k++)
           dt_draw_curve_set_point(d->curve[ch], k + 1, p->curve[ch][k].x,
                                   strength(p->curve[ch][k].y, p->strength));
         if(d->channel == DT_IOP_COLORZONES_h)
-          dt_draw_curve_set_point(d->curve[ch], p->curve_num_nodes[ch] + 1,
+          dt_draw_curve_set_point(d->curve[ch], nodes + 1,
                                   p->curve[ch][1].x + 1.f,
                                   strength(p->curve[ch][1].y, p->strength));
         else
-          dt_draw_curve_set_point(d->curve[ch], p->curve_num_nodes[ch] + 1,
+          dt_draw_curve_set_point(d->curve[ch], nodes + 1,
                                   p->curve[ch][1].x + 1.f,
-                                  strength(p->curve[ch][p->curve_num_nodes[ch] - 1].y,
+                                  strength(p->curve[ch][nodes - 1].y,
                                            p->strength));
       }
       dt_draw_curve_calc_values(d->curve[ch], 0.f, 1.f,
@@ -2860,6 +2909,7 @@ void commit_params(dt_iop_module_t *self,
   {
     for(int ch = 0; ch < DT_IOP_COLORZONES_MAX_CHANNELS; ch++)
     {
+      const int nodes = _colorzones_nodes(p, ch);
       if(d->curve_type[ch] != p->curve_type[ch]
          || d->curve_nodes[ch] != p->curve_num_nodes[ch]
          || d->curve[ch]->c.m_numAnchors != p->curve_num_nodes[ch])
@@ -2869,13 +2919,13 @@ void commit_params(dt_iop_module_t *self,
         d->curve_nodes[ch] = p->curve_num_nodes[ch];
         d->curve_type[ch] = p->curve_type[ch];
 
-        for(int k = 0; k < p->curve_num_nodes[ch]; k++)
+        for(int k = 0; k < nodes; k++)
           dt_draw_curve_add_point(d->curve[ch], p->curve[ch][k].x,
                                   strength(p->curve[ch][k].y, p->strength));
       }
       else
       {
-        for(int k = 0; k < p->curve_num_nodes[ch]; k++)
+        for(int k = 0; k < nodes; k++)
           dt_draw_curve_set_point(d->curve[ch], k, p->curve[ch][k].x,
                                   strength(p->curve[ch][k].y, p->strength));
       }

@@ -16,6 +16,7 @@
 
 brew 'coreutils'
 brew 'cmake'
+brew 'cmocka'
 brew 'pkg-config'
 brew 'adwaita-icon-theme'
 brew 'desktop-file-utils'
@@ -48,6 +49,7 @@ brew 'lua@5.4', link: true, overwrite: true
 brew 'libomp', link: true
 brew 'ninja'
 brew 'onnxruntime'
+brew 'opencv'
 brew 'openexr'
 brew 'openjpeg'
 brew 'osm-gps-map'

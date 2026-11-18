@@ -22,6 +22,7 @@
 // Otherwise, it may optimize away conditionals based on isnan() or
 // isfinite().
 
+#include <glib-2.0/glib-object.h>
 #ifdef __GNUC__
 #pragma GCC optimize ("no-finite-math-only")
 #endif
@@ -32,26 +33,20 @@
 #include "common/imagebuf.h"
 #include "common/opencl.h"
 #include "common/utility.h"
-#include "control/control.h"
 #include "develop/develop.h"
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
 #include "develop/tiling.h"
-#include "dtgtk/button.h"
-#include "dtgtk/resetlabel.h"
-#include "gui/accelerators.h"
-#include "gui/draw.h"
 #include "gui/gtk.h"
 #include "iop/iop_api.h"
-#include <assert.h>
-#include <float.h>
+
 #include <ctype.h>
 #include <gtk/gtk.h>
-#include <inttypes.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <lensfun.h>
+
 
 #define MAXKNOTS 16
 #define VIGSPLINES 512
@@ -189,6 +184,8 @@ typedef struct dt_iop_lens_gui_data_t
   GtkLabel *message;
   GtkBox *hbox1;
   int corrections_done;
+  // the shading compensation warning is up, GUI thread only
+  gboolean shading_warned;
   gboolean lensfun_trouble;
   gboolean vig_masking;
   const lfCamera *camera;
@@ -207,6 +204,41 @@ typedef struct dt_iop_lens_global_data_t
   int kernel_md_correct;
   lfDatabase *db;
 } dt_iop_lens_global_data_t;
+
+// lensfun values on a grid of every step-th pixel: gwidth x gheight points,
+// stride floats to a point. A step of 0 means no grid.
+typedef struct dt_iop_lens_grid_t
+{
+  float *data;
+  int step;
+  int stride;
+  // the pixel of the first point
+  int x0;
+  int y0;
+  int gwidth;
+  int gheight;
+} dt_iop_lens_grid_t;
+
+// the grids of the last run, kept while the pipe area and the committed
+// params stay the same. They are not dropped in commit_params(): a history
+// change that adds an item recommits every module (synch_all in
+// pixelpipe_hb.c), first with its defaults, so the params hash is compared
+// at the next run instead.
+typedef struct dt_iop_lens_grid_cache_t
+{
+  dt_hash_t params_hash;
+  dt_iop_roi_t roi_in;
+  dt_iop_roi_t roi_out;
+  float orig_w;
+  float orig_h;
+  int lf_mask;
+  gboolean pass_mode;
+  int modflags;
+  // whether a grid of step 1 has its data
+  gboolean buffer;
+  dt_iop_lens_grid_t coords;
+  dt_iop_lens_grid_t vig;
+} dt_iop_lens_grid_cache_t;
 
 typedef struct dt_iop_lens_data_t
 {
@@ -246,6 +278,9 @@ typedef struct dt_iop_lens_data_t
   float reserved[2];
   float vigspline[VIGSPLINES];
   dt_hash_t vighash;
+  dt_iop_lens_grid_cache_t *grid_cache;
+  // the committed params, which the grids are valid for
+  dt_hash_t params_hash;
 } dt_iop_lens_data_t;
 
 
@@ -342,6 +377,29 @@ static dt_iop_lens_modflag_t _modflags_from_lensfun_mods(int lf_mods)
   mods |= lf_mods & LF_MODIFY_TCA        ? DT_IOP_LENS_MODIFY_FLAG_TCA        : 0;
 
   return (dt_iop_lens_modflag_t)mods;
+}
+
+// whether Lensfun corrects vignetting on a raw the camera already corrected
+static gboolean _shading_overcorrected(dt_iop_module_t *self)
+{
+  dt_iop_lens_gui_data_t *g = (dt_iop_lens_gui_data_t *)self->gui_data;
+  const dt_iop_lens_params_t *p = (dt_iop_lens_params_t *)self->params;
+
+  dt_iop_gui_enter_critical_section(self);
+  const int corrections_done = g->corrections_done;
+  dt_iop_gui_leave_critical_section(self);
+
+  // corrections_done holds the flags Lensfun reported for the last params
+  // committed to the preview pipe, -1 before the first. the params are checked as well, because
+  // gui_changed() asks before the preview has caught up, and in
+  // distort mode Lensfun reports vignetting while it darkens the corners
+  return self->enabled
+    && p->method == DT_IOP_LENS_METHOD_LENSFUN
+    && p->inverse == DT_IOP_LENS_MODE_CORRECT
+    && (p->modify_flags & DT_IOP_LENS_MODIFY_FLAG_VIGNETTING)
+    && self->dev->image_storage.exif_shading_compensation
+    && corrections_done > 0
+    && (corrections_done & DT_IOP_LENS_MODIFY_FLAG_VIGNETTING);
 }
 
 static dt_iop_lens_lenstype_t _lenstype_from_lensfun_lenstype(lfLensType lt)
@@ -451,8 +509,8 @@ int legacy_params(dt_iop_module_t *self,
     n->distance = o->distance;
     n->target_geom = _lenstype_from_lensfun_lenstype(o->target_geom);
     n->tca_override = o->tca_override;
-    g_strlcpy(n->camera, o->camera, sizeof(n->camera));
-    g_strlcpy(n->lens, o->lens, sizeof(n->lens));
+    dt_strlcpy_fixed_to_fixed(n->camera, sizeof(n->camera), o->camera, sizeof(o->camera));
+    dt_strlcpy_fixed_to_fixed(n->lens, sizeof(n->lens), o->lens, sizeof(o->lens));
 
     // old versions had R and B swapped
     n->tca_r = o->tca_b;
@@ -519,8 +577,8 @@ int legacy_params(dt_iop_module_t *self,
     n->distance = o->distance;
     n->target_geom = _lenstype_from_lensfun_lenstype(o->target_geom);
     n->tca_override = o->tca_override;
-    g_strlcpy(n->camera, o->camera, sizeof(n->camera));
-    g_strlcpy(n->lens, o->lens, sizeof(n->lens));
+    dt_strlcpy_fixed_to_fixed(n->camera, sizeof(n->camera), o->camera, sizeof(o->camera));
+    dt_strlcpy_fixed_to_fixed(n->lens, sizeof(n->lens), o->lens, sizeof(o->lens));
     n->tca_r = o->tca_r;
     n->tca_b = o->tca_b;
 
@@ -586,8 +644,8 @@ int legacy_params(dt_iop_module_t *self,
     n->distance = o->distance;
     n->target_geom = _lenstype_from_lensfun_lenstype(o->target_geom);
     n->tca_override = o->tca_override;
-    g_strlcpy(n->camera, o->camera, sizeof(n->camera));
-    g_strlcpy(n->lens, o->lens, sizeof(n->lens));
+    dt_strlcpy_fixed_to_fixed(n->camera, sizeof(n->camera), o->camera, sizeof(o->camera));
+    dt_strlcpy_fixed_to_fixed(n->lens, sizeof(n->lens), o->lens, sizeof(o->lens));
     n->tca_r = o->tca_r;
     n->tca_b = o->tca_b;
 
@@ -654,8 +712,8 @@ int legacy_params(dt_iop_module_t *self,
     n->distance = o->distance;
     n->target_geom = _lenstype_from_lensfun_lenstype(o->target_geom);
     n->tca_override = o->tca_override;
-    g_strlcpy(n->camera, o->camera, sizeof(n->camera));
-    g_strlcpy(n->lens, o->lens, sizeof(n->lens));
+    dt_strlcpy_fixed_to_fixed(n->camera, sizeof(n->camera), o->camera, sizeof(o->camera));
+    dt_strlcpy_fixed_to_fixed(n->lens, sizeof(n->lens), o->lens, sizeof(o->lens));
     n->tca_r = o->tca_r;
     n->tca_b = o->tca_b;
 
@@ -726,8 +784,8 @@ int legacy_params(dt_iop_module_t *self,
     n->aperture = o->aperture;
     n->distance = o->distance;
     n->target_geom = (dt_iop_lens_lenstype_t)o->target_geom;
-    g_strlcpy(n->camera, o->camera, sizeof(n->camera));
-    g_strlcpy(n->lens, o->lens, sizeof(n->lens));
+    dt_strlcpy_fixed_to_fixed(n->camera, sizeof(n->camera), o->camera, sizeof(o->camera));
+    dt_strlcpy_fixed_to_fixed(n->lens, sizeof(n->lens), o->lens, sizeof(o->lens));
     n->tca_override = o->tca_override;
     n->tca_r = o->tca_r;
     n->tca_b = o->tca_b;
@@ -800,8 +858,8 @@ int legacy_params(dt_iop_module_t *self,
     n->aperture = o->aperture;
     n->distance = o->distance;
     n->target_geom = (dt_iop_lens_lenstype_t)o->target_geom;
-    g_strlcpy(n->camera, o->camera, sizeof(n->camera));
-    g_strlcpy(n->lens, o->lens, sizeof(n->lens));
+    dt_strlcpy_fixed_to_fixed(n->camera, sizeof(n->camera), o->camera, sizeof(o->camera));
+    dt_strlcpy_fixed_to_fixed(n->lens, sizeof(n->lens), o->lens, sizeof(o->lens));
     n->tca_override = o->tca_override;
     n->tca_r = o->tca_r;
     n->tca_b = o->tca_b;
@@ -875,8 +933,8 @@ int legacy_params(dt_iop_module_t *self,
     n->aperture = o->aperture;
     n->distance = o->distance;
     n->target_geom = (dt_iop_lens_lenstype_t)o->target_geom;
-    g_strlcpy(n->camera, o->camera, sizeof(n->camera));
-    g_strlcpy(n->lens, o->lens, sizeof(n->lens));
+    dt_strlcpy_fixed_to_fixed(n->camera, sizeof(n->camera), o->camera, sizeof(o->camera));
+    dt_strlcpy_fixed_to_fixed(n->lens, sizeof(n->lens), o->lens, sizeof(o->lens));
     n->tca_override = o->tca_override;
     n->tca_r = o->tca_r;
     n->tca_b = o->tca_b;
@@ -1043,6 +1101,296 @@ static float _get_autoscale_lf(dt_iop_module_t *self,
   return scale;
 }
 
+// lensfun is asked only at every step-th pixel, and the pixels in between
+// are interpolated bilinearly, on the CPU and in OpenCL alike. This removes
+// the per-pixel lensfun work and upload of the OpenCL path, and the up to
+// ~0.3 px error of lensfun's row calls on x86. The step is halved while the
+// interpolation misses lensfun's own values at sampled cell centers by more
+// than the tolerance.
+#define LENS_GRID_STEP 8
+#define LENS_GRID_TOL_COORD 0.01f
+#define LENS_GRID_TOL_VIG 1e-4f
+// the largest error accepted when it is noise in lensfun's own values
+#define LENS_GRID_NOISE_COORD 0.05f
+
+// lensfun's values for n pixels of a row, stride floats each
+static inline void _lens_grid_eval(const lfModifier *modifier,
+                                   const gboolean vig,
+                                   const int x,
+                                   const int y,
+                                   const int n,
+                                   float *out)
+{
+  if(vig)
+  {
+    // lensfun only multiplies its factors into pixels, so get them from
+    // pixels of 0.5, which keeps them exact
+    for(int k = 0; k < 4 * n; k++) out[k] = 0.5f;
+    modifier->ApplyColorModification(out, x, y, n, 1, LF_CR_4(RED, GREEN, BLUE, UNKNOWN), 4 * n);
+    for(int k = 0; k < 4 * n; k++) out[k] *= 2.0f;
+  }
+  else
+    modifier->ApplySubpixelGeometryDistortion(x, y, n, 1, out);
+}
+
+static inline gboolean _lens_coords_finite(const lfModifier *modifier,
+                                           const int x,
+                                           const int y)
+{
+  float p[6];
+  _lens_grid_eval(modifier, FALSE, x, y, 1, p);
+  gboolean finite = TRUE;
+  for(int n = 0; n < 6; n++) finite = finite && isfinite(p[n]);
+  return finite;
+}
+
+// with buffer FALSE, a grid of step 1 gets no data, and _lens_grid_row()
+// asks lensfun for each row instead
+static gboolean _lens_grid_build(const lfModifier *modifier,
+                                 const gboolean vig,
+                                 const gboolean buffer,
+                                 const int x0,
+                                 const int y0,
+                                 const int width,
+                                 const int height,
+                                 dt_iop_lens_grid_t *grid)
+{
+  const int stride = vig ? 4 : 6;
+  const int count = vig ? 3 : 6;
+  const float tol = vig ? LENS_GRID_TOL_VIG : LENS_GRID_TOL_COORD;
+  const float noise_max = vig ? LENS_GRID_TOL_VIG : LENS_GRID_NOISE_COORD;
+
+  float prev_err = INFINITY;
+  for(int step = LENS_GRID_STEP; step >= 1; step /= 2)
+  {
+    // one more point than needed in each direction, so that the last
+    // pixels interpolate rather than extrapolate. An even row length keeps
+    // the rows 16-byte aligned, which lensfun's SSE code requires.
+    const int gw = ((width - 1) / step + 3) & ~1;
+    const int gh = (height - 1) / step + 2;
+
+    grid->step = step;
+    grid->stride = stride;
+    grid->x0 = x0;
+    grid->y0 = y0;
+    grid->gwidth = gw;
+    grid->gheight = gh;
+    grid->data = NULL;
+    if(step == 1 && !buffer) return TRUE;
+
+    // where lensfun can't map a pixel, it's usually at the edge of the
+    // image, so check the edge before filling the whole grid
+    if(step > 1 && !vig)
+    {
+      const int x1 = x0 + (gw - 1) * step;
+      const int y1 = y0 + (gh - 1) * step;
+      gboolean edge_finite = TRUE;
+      for(int i = 0; i < gw && edge_finite; i++)
+        edge_finite = _lens_coords_finite(modifier, x0 + i * step, y0)
+                      && _lens_coords_finite(modifier, x0 + i * step, y1);
+      for(int j = 0; j < gh && edge_finite; j++)
+        edge_finite = _lens_coords_finite(modifier, x0, y0 + j * step)
+                      && _lens_coords_finite(modifier, x1, y0 + j * step);
+      if(!edge_finite)
+      {
+        step = 2;
+        continue;
+      }
+    }
+
+    float *data = dt_alloc_align_float((size_t)gw * gh * stride);
+    if(!data) return FALSE;
+
+    int finite = 1;
+    DT_OMP_FOR(reduction(&&: finite))
+    for(int j = 0; j < gh; j++)
+    {
+      float *row = data + (size_t)j * gw * stride;
+      if(step == 1)
+        _lens_grid_eval(modifier, vig, x0, y0 + j, gw, row);
+      else
+        for(int i = 0; i < gw; i++)
+        {
+          float *p = row + (size_t)i * stride;
+          _lens_grid_eval(modifier, vig, x0 + i * step, y0 + j * step, 1, p);
+          for(int n = 0; n < count; n++) finite = finite && isfinite(p[n]);
+        }
+    }
+
+    // non-finite coordinates mark pixels lensfun can't map, and
+    // interpolating would spread them over whole cells
+    if(step > 1 && !finite)
+    {
+      dt_free_align(data);
+      step = 2;
+      continue;
+    }
+
+    if(step > 1)
+    {
+      float err = 0.0f;
+      DT_OMP_FOR(reduction(max: err))
+      for(int j = 0; j < gh - 1; j += 4)
+        for(int i = 0; i < gw - 1; i += 4)
+        {
+          float exact[6];
+          _lens_grid_eval(modifier, vig, x0 + i * step + step / 2,
+                          y0 + j * step + step / 2, 1, exact);
+          const float *p00 = data + ((size_t)j * gw + i) * stride;
+          const float *p01 = p00 + (size_t)gw * stride;
+          for(int n = 0; n < count; n++)
+          {
+            const float mid = 0.25f * (p00[n] + p00[stride + n] + p01[n] + p01[stride + n]);
+            const float e = fabsf(mid - exact[n]);
+            err = isfinite(e) ? fmaxf(err, e) : INFINITY;
+          }
+        }
+      // halving the step quarters the error of a smooth field. When it
+      // doesn't even halve, the error is noise in lensfun's own values, as
+      // from its iterative solution in reverse mode. Its per-pixel values
+      // carry the same noise, so the grid is kept unless the noise is large.
+      const gboolean noise = err > 0.5f * prev_err;
+      if(err > tol && !(noise && err <= noise_max))
+      {
+        dt_free_align(data);
+        if(noise) step = 2;
+        prev_err = err;
+        continue;
+      }
+    }
+
+    grid->data = data;
+    return TRUE;
+  }
+  return FALSE;
+}
+
+// row y of the grid, relative to its origin, interpolated to width pixels of
+// stride floats. This is the C version of _lens_grid_sample() in
+// data/kernels/basic.cl, and computes the same values.
+static inline void _lens_grid_row(const dt_iop_lens_grid_t *grid,
+                                  const lfModifier *modifier,
+                                  const int y,
+                                  const int width,
+                                  float *row)
+{
+  const int step = grid->step;
+  const int stride = grid->stride;
+  if(!grid->data)
+  {
+    _lens_grid_eval(modifier, stride == 4, grid->x0, grid->y0 + y, width, row);
+    return;
+  }
+  if(step == 1)
+  {
+    memcpy(row, grid->data + (size_t)y * grid->gwidth * stride, sizeof(float) * width * stride);
+    return;
+  }
+  const int j = y / step;
+  const float ty = (float)(y - j * step) / (float)step;
+  const float *g0 = grid->data + (size_t)j * grid->gwidth * stride;
+  const float *g1 = g0 + (size_t)grid->gwidth * stride;
+  float tx[LENS_GRID_STEP];
+  for(int k = 0; k < step; k++) tx[k] = (float)k / (float)step;
+  for(int x0 = 0, i = 0; x0 < width; x0 += step, i++)
+  {
+    float left[6], right[6];
+    for(int n = 0; n < stride; n++)
+    {
+      left[n] = mixf(g0[i * stride + n], g1[i * stride + n], ty);
+      right[n] = mixf(g0[(i + 1) * stride + n], g1[(i + 1) * stride + n], ty);
+    }
+    const int n_x = MIN(step, width - x0);
+    float *out = row + (size_t)x0 * stride;
+    for(int k = 0; k < n_x; k++, out += stride)
+      for(int n = 0; n < stride; n++) out[n] = mixf(left[n], right[n], tx[k]);
+  }
+}
+
+static void _lens_grid_cache_free(dt_iop_lens_data_t *d)
+{
+  dt_iop_lens_grid_cache_t *c = d->grid_cache;
+  if(!c) return;
+  dt_free_align(c->coords.data);
+  dt_free_align(c->vig.data);
+  free(c);
+  d->grid_cache = NULL;
+}
+
+// the per-pixel buffers of step 1 are too large to keep between runs
+static void _lens_grid_cache_release(dt_iop_lens_data_t *d)
+{
+  const dt_iop_lens_grid_cache_t *c = d->grid_cache;
+  if(c && ((c->coords.data && c->coords.step == 1) || (c->vig.data && c->vig.step == 1)))
+    _lens_grid_cache_free(d);
+}
+
+// the grids for this run of the CPU path (buffer FALSE) or the OpenCL path
+// (buffer TRUE), from the cache when nothing they depend on changed. NULL
+// when out of memory.
+static const dt_iop_lens_grid_cache_t *_lens_grids(dt_iop_lens_data_t *d,
+                                                   const lfModifier *modifier,
+                                                   const int modflags,
+                                                   const dt_iop_roi_t *const roi_in,
+                                                   const dt_iop_roi_t *const roi_out,
+                                                   const float orig_w,
+                                                   const float orig_h,
+                                                   const int used_lf_mask,
+                                                   const gboolean pass_mode,
+                                                   const gboolean buffer)
+{
+  dt_iop_lens_grid_cache_t *c = d->grid_cache;
+  if(c
+     && c->params_hash == d->params_hash
+     && !memcmp(&c->roi_in, roi_in, sizeof(dt_iop_roi_t))
+     && !memcmp(&c->roi_out, roi_out, sizeof(dt_iop_roi_t))
+     && c->orig_w == orig_w && c->orig_h == orig_h
+     && c->lf_mask == used_lf_mask
+     && c->pass_mode == pass_mode
+     && c->modflags == modflags
+     && (c->buffer || !buffer))
+    return c;
+
+  _lens_grid_cache_free(d);
+
+  const double start = dt_get_debug_wtime();
+  c = (dt_iop_lens_grid_cache_t *)calloc(1, sizeof(dt_iop_lens_grid_cache_t));
+  if(!c) return NULL;
+  c->params_hash = d->params_hash;
+  c->roi_in = *roi_in;
+  c->roi_out = *roi_out;
+  c->orig_w = orig_w;
+  c->orig_h = orig_h;
+  c->lf_mask = used_lf_mask;
+  c->pass_mode = pass_mode;
+  c->modflags = modflags;
+  c->buffer = buffer;
+  d->grid_cache = c;
+
+  gboolean ok = TRUE;
+  if(modflags & (LF_MODIFY_TCA | LF_MODIFY_DISTORTION | LF_MODIFY_GEOMETRY | LF_MODIFY_SCALE))
+    ok = _lens_grid_build(modifier, FALSE, buffer, roi_out->x, roi_out->y,
+                          roi_out->width, roi_out->height, &c->coords);
+  // the vignetting correction comes after the distortion in reverse
+  // mode and before it otherwise
+  if(ok && !pass_mode && (modflags & LF_MODIFY_VIGNETTING))
+  {
+    const dt_iop_roi_t *vroi = d->inverse ? roi_out : roi_in;
+    ok = _lens_grid_build(modifier, TRUE, buffer, vroi->x, vroi->y,
+                          vroi->width, vroi->height, &c->vig);
+  }
+
+  if(!ok)
+  {
+    _lens_grid_cache_free(d);
+    return NULL;
+  }
+
+  dt_print(DT_DEBUG_PERF, "[lens] lensfun grid step %d, vignetting step %d took %.3f secs",
+           c->coords.step, c->vig.step, dt_get_debug_wtime() - start);
+  return c;
+}
+
 static void _process_lf(dt_iop_module_t *self,
                         dt_dev_pixelpipe_iop_t *piece,
                         const void *const ivoid,
@@ -1050,18 +1398,15 @@ static void _process_lf(dt_iop_module_t *self,
                         const dt_iop_roi_t *const roi_in,
                         const dt_iop_roi_t *const roi_out)
 {
-  const dt_iop_lens_data_t *const d = (dt_iop_lens_data_t *)piece->data;
+  dt_iop_lens_data_t *const d = (dt_iop_lens_data_t *)piece->data;
 
   const int ch = piece->colors;
   const int ch_width = ch * roi_in->width;
   const dt_dev_pixelpipe_display_mask_t mask_display = piece->pipe->mask_display;
 
-  const unsigned int pixelformat = ch == 3
-    ? LF_CR_3(RED, GREEN, BLUE)
-    : LF_CR_4(RED, GREEN, BLUE, UNKNOWN);
-
   if(!d->lens || !d->lens->Maker || d->crop <= 0.0f)
   {
+    dt_print_pipe(DT_DEBUG_PIPE, "lensfun bypass", piece->pipe, self, piece->pipe->devid, roi_in, roi_out);
     dt_iop_image_copy_by_size((float*)ovoid, (float*)ivoid,
                               roi_out->width, roi_out->height, ch);
     return;
@@ -1085,6 +1430,17 @@ static void _process_lf(dt_iop_module_t *self,
 
   dt_pthread_mutex_unlock(&darktable.plugin_threadsafe);
 
+  const dt_iop_lens_grid_cache_t *const grids =
+    _lens_grids(d, modifier, modflags, roi_in, roi_out,
+                orig_w, orig_h, used_lf_mask, pass_mode, FALSE);
+  if(!grids)
+  {
+    dt_iop_image_copy_by_size((float*)ovoid, (float*)ivoid,
+                              roi_out->width, roi_out->height, ch);
+    delete modifier;
+    return;
+  }
+
   const dt_interpolation_t *const interpolation = dt_interpolation_new(DT_INTERPOLATION_USERPREF_WARP);
 
   if(d->inverse)
@@ -1101,12 +1457,11 @@ static void _process_lf(dt_iop_module_t *self,
       size_t padded_bufsize;
       float *const buf = dt_alloc_perthread_float(bufsize, &padded_bufsize);
 
-      DT_OMP_FOR(dt_omp_sharedconst(buf) shared(modifier))
+      DT_OMP_FOR(dt_omp_sharedconst(buf) shared(grids, modifier))
       for(int y = 0; y < roi_out->height; y++)
       {
         float *bufptr = (float*)dt_get_perthread(buf, padded_bufsize);
-        modifier->ApplySubpixelGeometryDistortion(roi_out->x, roi_out->y + y,
-                                                  roi_out->width, 1, bufptr);
+        _lens_grid_row(&grids->coords, modifier, y, roi_out->width, bufptr);
 
         // reverse transform the global coords from lf to our buffer
         float *out = ((float *)ovoid) + (size_t)y * roi_out->width * ch;
@@ -1165,18 +1520,23 @@ static void _process_lf(dt_iop_module_t *self,
                                 roi_out->width, roi_out->height, ch);
     }
 
-    if(!pass_mode && (modflags & LF_MODIFY_VIGNETTING))
+    if(grids->vig.step)
     {
-      DT_OMP_FOR(shared(modifier))
+      const size_t vigsize = (size_t)roi_out->width * 4;
+      size_t padded_vigsize;
+      float *const vig = dt_alloc_perthread_float(vigsize, &padded_vigsize);
+
+      DT_OMP_FOR(dt_omp_sharedconst(vig) shared(grids, modifier))
       for(int y = 0; y < roi_out->height; y++)
       {
         /* Colour correction: vignetting */
-        // actually this way row stride does not matter.
+        float *vigptr = (float*)dt_get_perthread(vig, padded_vigsize);
+        _lens_grid_row(&grids->vig, modifier, y, roi_out->width, vigptr);
         float *out = ((float *)ovoid) + (size_t)y * roi_out->width * ch;
-        modifier->ApplyColorModification(out, roi_out->x, roi_out->y + y,
-                                         roi_out->width, 1,
-                                         pixelformat, ch * roi_out->width);
+        for(int x = 0; x < roi_out->width; x++, out += ch, vigptr += 4)
+          for(int c = 0; c < 3; c++) out[c] *= vigptr[c];
       }
+      dt_free_align(vig);
     }
   }
   else // correct distortions:
@@ -1187,18 +1547,23 @@ static void _process_lf(dt_iop_module_t *self,
     void *buf = dt_alloc_aligned(bufsize);
     memcpy(buf, ivoid, bufsize);
 
-    if(!pass_mode && (modflags & LF_MODIFY_VIGNETTING))
+    if(grids->vig.step)
     {
-      DT_OMP_FOR(shared(buf, modifier))
+      const size_t vigsize = (size_t)roi_in->width * 4;
+      size_t padded_vigsize;
+      float *const vig = dt_alloc_perthread_float(vigsize, &padded_vigsize);
+
+      DT_OMP_FOR(dt_omp_sharedconst(vig) shared(buf, grids, modifier))
       for(int y = 0; y < roi_in->height; y++)
       {
         /* Colour correction: vignetting */
-        // actually this way row stride does not matter.
+        float *vigptr = (float*)dt_get_perthread(vig, padded_vigsize);
+        _lens_grid_row(&grids->vig, modifier, y, roi_in->width, vigptr);
         float *bufptr = ((float *)buf) + (size_t)ch * roi_in->width * y;
-        modifier->ApplyColorModification(bufptr, roi_in->x, roi_in->y + y,
-                                         roi_in->width, 1,
-                                         pixelformat, ch * roi_in->width);
+        for(int x = 0; x < roi_in->width; x++, bufptr += ch, vigptr += 4)
+          for(int c = 0; c < 3; c++) bufptr[c] *= vigptr[c];
       }
+      dt_free_align(vig);
     }
 
     if(modflags & (LF_MODIFY_TCA
@@ -1211,14 +1576,11 @@ static void _process_lf(dt_iop_module_t *self,
       size_t padded_buf2size;
       float *const buf2 = dt_alloc_perthread_float(buf2size, &padded_buf2size);
 
-      DT_OMP_FOR(dt_omp_sharedconst(buf2) shared(buf, modifier))
+      DT_OMP_FOR(dt_omp_sharedconst(buf2) shared(buf, grids, modifier))
       for(int y = 0; y < roi_out->height; y++)
       {
         float *buf2ptr = (float*)dt_get_perthread(buf2, padded_buf2size);
-        modifier->ApplySubpixelGeometryDistortion(roi_out->x,
-                                                  roi_out->y + y,
-                                                  roi_out->width,
-                                                  1, buf2ptr);
+        _lens_grid_row(&grids->coords, modifier, y, roi_out->width, buf2ptr);
         // reverse transform the global coords from lf to our buffer
         float *out = ((float *)ovoid) + (size_t)y * roi_out->width * ch;
         for(int x = 0; x < roi_out->width; x++, buf2ptr += 6, out += ch)
@@ -1276,6 +1638,7 @@ static void _process_lf(dt_iop_module_t *self,
     }
     dt_free_align(buf);
   }
+  _lens_grid_cache_release(d);
   delete modifier;
 }
 
@@ -1295,12 +1658,14 @@ static int _process_cl_lf(dt_iop_module_t *self,
     ? LF_MODIFY_ALL & ~LF_MODIFY_TCA
     : LF_MODIFY_ALL;
 
-  cl_mem dev_tmpbuf = NULL;
+  cl_mem dev_coords = NULL;
+  cl_mem dev_vig = NULL;
   cl_mem dev_tmp = NULL;
   cl_int err = DT_OPENCL_DEFAULT_ERROR;
 
-  float *tmpbuf = NULL;
   lfModifier *modifier = NULL;
+  const dt_iop_lens_grid_cache_t *grids = NULL;
+  int coord_step = 0, coord_gwidth = 0, vig_step = 0, vig_gwidth = 0;
 
   const int devid = piece->pipe->devid;
   const int iwidth = roi_in->width;
@@ -1311,17 +1676,6 @@ static int _process_cl_lf(dt_iop_module_t *self,
   const int roi_in_y = roi_in->y;
   const int width = MAX(iwidth, owidth);
   const int height = MAX(iheight, oheight);
-  const int ch = piece->colors;
-  const int tmpbufwidth = owidth * 2 * 3;
-  const size_t tmpbufsize = (size_t)tmpbufwidth * oheight * sizeof(float);
-  const size_t tmpbuflen = d->inverse
-    ? (size_t)oheight * owidth * 2 * 3 * sizeof(float)
-    : MAX((size_t)oheight * owidth * 2 * 3,
-          (size_t)iheight * iwidth * ch) * sizeof(float);
-
-  const unsigned int pixelformat = ch == 3
-    ? LF_CR_3(RED, GREEN, BLUE)
-    : LF_CR_4(RED, GREEN, BLUE, UNKNOWN);
 
   const float orig_w = roi_in->scale * piece->buf_in.width;
   const float orig_h = roi_in->scale * piece->buf_in.height;
@@ -1334,8 +1688,11 @@ static int _process_cl_lf(dt_iop_module_t *self,
   const dt_interpolation_t *interpolation = dt_interpolation_new(DT_INTERPOLATION_USERPREF_WARP);
 
   if(!d->lens || !d->lens->Maker || d->crop <= 0.0f)
+  {
+    dt_print_pipe(DT_DEBUG_PIPE, "lensfun bypass", piece->pipe, self, piece->pipe->devid, roi_in, roi_out);
     return dt_opencl_enqueue_copy_image(devid, dev_in, dev_out,
                                         CLIMG_ORIGIN, CLIMG_ORIGIN, oregion);
+  }
 
   switch(interpolation->id)
   {
@@ -1355,48 +1712,49 @@ static int _process_cl_lf(dt_iop_module_t *self,
       return DT_OPENCL_PROCESS_CL;
   }
 
-  tmpbuf = (float *)dt_alloc_aligned(tmpbuflen);
-  if(tmpbuf == NULL) goto error;
-
   dev_tmp = (cl_mem)dt_opencl_alloc_device(devid, width, height,
                                            sizeof(float) * 4);
   if(dev_tmp == NULL) goto error;
-
-  dev_tmpbuf = (cl_mem)dt_opencl_alloc_device_buffer(devid, tmpbuflen);
-  if(dev_tmpbuf == NULL) goto error;
 
   dt_pthread_mutex_lock(&darktable.plugin_threadsafe);
   modifier = _get_modifier(&modflags, orig_w, orig_h, d, used_lf_mask, FALSE);
   dt_pthread_mutex_unlock(&darktable.plugin_threadsafe);
 
+  grids = _lens_grids(d, modifier, modflags, roi_in, roi_out,
+                      orig_w, orig_h, used_lf_mask, pass_mode, TRUE);
+  if(!grids) goto error;
+  coord_step = grids->coords.step;
+  coord_gwidth = grids->coords.gwidth;
+  vig_step = grids->vig.step;
+  vig_gwidth = grids->vig.gwidth;
+
+  if(grids->coords.data)
+  {
+    dev_coords = (cl_mem)dt_opencl_copy_host_to_device_constant
+      (devid, sizeof(float) * 6 * grids->coords.gwidth * grids->coords.gheight,
+       grids->coords.data);
+    if(dev_coords == NULL) goto error;
+  }
+  if(grids->vig.data)
+  {
+    dev_vig = (cl_mem)dt_opencl_copy_host_to_device_constant
+      (devid, sizeof(float) * 4 * grids->vig.gwidth * grids->vig.gheight,
+       grids->vig.data);
+    if(dev_vig == NULL) goto error;
+  }
+
   if(d->inverse)
   {
     // reverse direction (useful for renderings)
-    if(modflags & (LF_MODIFY_TCA
-                   | LF_MODIFY_DISTORTION
-                   | LF_MODIFY_GEOMETRY
-                   | LF_MODIFY_SCALE))
+    if(dev_coords)
     {
-      DT_OMP_FOR(dt_omp_sharedconst(raw_monochrome) shared(tmpbuf, d, modifier))
-      for(int y = 0; y < roi_out->height; y++)
-      {
-        float *pi = tmpbuf + (size_t)y * tmpbufwidth;
-        modifier->ApplySubpixelGeometryDistortion(roi_out->x,
-                                                  roi_out->y + y,
-                                                  roi_out->width, 1, pi);
-      }
-
-      err = dt_opencl_write_buffer_to_device(devid, tmpbuf,
-                                             dev_tmpbuf, 0,
-                                             tmpbufsize, TRUE);
-      if(err != CL_SUCCESS) goto error;
-
       err = dt_opencl_enqueue_kernel_2d_args(devid, ldkernel, owidth, oheight,
          CLARG(dev_in), CLARG(dev_tmp),
          CLARG(owidth), CLARG(oheight),
          CLARG(iwidth), CLARG(iheight),
          CLARG(roi_in_x), CLARG(roi_in_y),
-         CLARG(dev_tmpbuf), CLARG((d->do_nan_checks)));
+         CLARG(dev_coords), CLARG((d->do_nan_checks)),
+         CLARG(coord_step), CLARG(coord_gwidth));
       if(err != CL_SUCCESS) goto error;
     }
     else
@@ -1406,33 +1764,15 @@ static int _process_cl_lf(dt_iop_module_t *self,
       if(err != CL_SUCCESS) goto error;
     }
 
-    if(!pass_mode && (modflags & LF_MODIFY_VIGNETTING))
+    if(dev_vig)
     {
-      DT_OMP_FOR(shared(tmpbuf, modifier, d))
-      for(int y = 0; y < roi_out->height; y++)
-      {
-        /* Colour correction: vignetting */
-        // actually this way row stride does not matter.
-        float *buf = tmpbuf + (size_t)y * ch * roi_out->width;
-        for(int k = 0; k < ch * roi_out->width; k++)
-          buf[k] = 0.5f;
-        modifier->ApplyColorModification(buf, roi_out->x, roi_out->y + y,
-                                         roi_out->width, 1,
-                                         pixelformat, ch * roi_out->width);
-      }
-
-      const size_t bsize =
-        (size_t)ch * roi_out->width * roi_out->height * sizeof(float);
-      err = dt_opencl_write_buffer_to_device(devid, tmpbuf, dev_tmpbuf, 0, bsize, TRUE);
-      if(err != CL_SUCCESS) goto error;
-
       err = dt_opencl_enqueue_kernel_2d_args
         (devid,
          gd->kernel_lens_vignette,
          owidth, oheight,
          CLARG(dev_tmp), CLARG(dev_out),
          CLARG(owidth), CLARG(oheight),
-         CLARG(dev_tmpbuf));
+         CLARG(dev_vig), CLARG(vig_step), CLARG(vig_gwidth));
       if(err != CL_SUCCESS) goto error;
     }
     else
@@ -1445,35 +1785,14 @@ static int _process_cl_lf(dt_iop_module_t *self,
 
   else // correct distortions:
   {
-    if(!pass_mode && (modflags & LF_MODIFY_VIGNETTING))
+    if(dev_vig)
     {
-      DT_OMP_FOR(shared(tmpbuf, modifier, d))
-      for(int y = 0; y < roi_in->height; y++)
-      {
-        /* Colour correction: vignetting */
-        // actually this way row stride does not matter.
-        float *buf = tmpbuf + (size_t)y * ch * roi_in->width;
-        for(int k = 0; k < ch * roi_in->width; k++) buf[k] = 0.5f;
-        modifier->ApplyColorModification(buf,
-                                         roi_in->x,
-                                         roi_in->y + y,
-                                         roi_in->width, 1,
-                                         pixelformat,
-                                         ch * roi_in->width);
-      }
-
-      const size_t bsize =
-        (size_t)ch * roi_in->width * roi_in->height * sizeof(float);
-      err = dt_opencl_write_buffer_to_device(devid, tmpbuf,
-                                             dev_tmpbuf, 0, bsize, TRUE);
-      if(err != CL_SUCCESS) goto error;
-
       err = dt_opencl_enqueue_kernel_2d_args
         (devid,
          gd->kernel_lens_vignette, iwidth, iheight,
          CLARG(dev_in), CLARG(dev_tmp),
          CLARG(iwidth), CLARG(iheight),
-         CLARG(dev_tmpbuf));
+         CLARG(dev_vig), CLARG(vig_step), CLARG(vig_gwidth));
       if(err != CL_SUCCESS) goto error;
     }
     else
@@ -1483,32 +1802,16 @@ static int _process_cl_lf(dt_iop_module_t *self,
       if(err != CL_SUCCESS) goto error;
     }
 
-    if(modflags & (LF_MODIFY_TCA
-                   | LF_MODIFY_DISTORTION
-                   | LF_MODIFY_GEOMETRY
-                   | LF_MODIFY_SCALE))
+    if(dev_coords)
     {
-      DT_OMP_FOR(dt_omp_sharedconst(raw_monochrome) shared(tmpbuf, d, modifier))
-      for(int y = 0; y < roi_out->height; y++)
-      {
-        float *pi = tmpbuf + (size_t)y * tmpbufwidth;
-        modifier->ApplySubpixelGeometryDistortion(roi_out->x,
-                                                  roi_out->y + y,
-                                                  roi_out->width, 1, pi);
-      }
-
-      err = dt_opencl_write_buffer_to_device(devid, tmpbuf,
-                                             dev_tmpbuf, 0,
-                                             tmpbufsize, TRUE);
-      if(err != CL_SUCCESS) goto error;
-
       err = dt_opencl_enqueue_kernel_2d_args
         (devid, ldkernel, owidth, oheight,
          CLARG(dev_tmp), CLARG(dev_out),
          CLARG(owidth), CLARG(oheight),
          CLARG(iwidth), CLARG(iheight),
          CLARG(roi_in_x), CLARG(roi_in_y),
-         CLARG(dev_tmpbuf), CLARG((d->do_nan_checks)));
+         CLARG(dev_coords), CLARG((d->do_nan_checks)),
+         CLARG(coord_step), CLARG(coord_gwidth));
     }
     else
     {
@@ -1519,8 +1822,9 @@ static int _process_cl_lf(dt_iop_module_t *self,
 
 error:
   dt_opencl_release_mem_object(dev_tmp);
-  dt_opencl_release_mem_object(dev_tmpbuf);
-  dt_free_align(tmpbuf);
+  dt_opencl_release_mem_object(dev_coords);
+  dt_opencl_release_mem_object(dev_vig);
+  _lens_grid_cache_release(d);
   if(modifier != NULL) delete modifier;
   return err;
 }
@@ -1661,17 +1965,26 @@ static void _distort_mask_lf(dt_iop_module_t *self,
 
   const dt_interpolation_t *const interpolation = dt_interpolation_new(DT_INTERPOLATION_USERPREF_WARP);
 
+  // the same coordinates as the image, see _lens_grid_build()
+  dt_iop_lens_grid_t grid = { NULL, 0, 0, 0, 0, 0, 0 };
+  if(!_lens_grid_build(modifier, FALSE, FALSE, roi_out->x, roi_out->y,
+                       roi_out->width, roi_out->height, &grid))
+  {
+    dt_iop_image_copy_by_size(out, in, roi_out->width, roi_out->height, 1);
+    delete modifier;
+    return;
+  }
+
   // acquire temp memory for distorted pixel coords
   const size_t bufsize = (size_t)roi_out->width * 2 * 3;
   size_t padded_bufsize;
   float *const buf = dt_alloc_perthread_float(bufsize, &padded_bufsize);
 
-  DT_OMP_FOR(dt_omp_sharedconst(buf) shared(modifier))
+  DT_OMP_FOR(dt_omp_sharedconst(buf) shared(grid, modifier))
   for(int y = 0; y < roi_out->height; y++)
   {
     float *bufptr = (float*)dt_get_perthread(buf, padded_bufsize);
-    modifier->ApplySubpixelGeometryDistortion(roi_out->x, roi_out->y + y,
-                                              roi_out->width, 1, bufptr);
+    _lens_grid_row(&grid, modifier, y, roi_out->width, bufptr);
 
     // reverse transform the global coords from lf to our buffer
     float *_out = out + (size_t)y * roi_out->width;
@@ -1692,6 +2005,7 @@ static void _distort_mask_lf(dt_iop_module_t *self,
     }
   }
   dt_free_align(buf);
+  dt_free_align(grid.data);
   delete modifier;
 }
 
@@ -1732,7 +2046,7 @@ static void _modify_roi_in_lf(dt_iop_module_t *self,
 
     float *const buf = (float *)dt_alloc_align_float(nbpoints * 2 * 3);
 
-    DT_OMP_PRAGMA(parallel default(none)
+    DT_OMP_PRAGMA(parallel num_threads(darktable.num_openmp_threads) default(none)
                   dt_omp_firstprivate(aheight, awidth, buf, height, nbpoints, width,
                                       xoff, xstep, yoff, ystep)
                   shared(modifier) reduction(min : xm, ym) reduction(max : xM, yM))
@@ -1815,9 +2129,6 @@ static void _commit_params_lf(dt_iop_module_t *self,
   lfDatabase *dt_iop_lensfun_db = (lfDatabase *)gd->db;
   const lfCamera *camera = NULL;
   const lfCamera **cam = NULL;
-  // A manually selected lens can be used with an unknown camera body. Keep
-  // the image/user crop factor as a fallback until a camera match overrides it.
-  d->crop = p->crop;
   if(d->lens)
   {
     delete d->lens;
@@ -1926,11 +2237,6 @@ static void _commit_params_lf(dt_iop_module_t *self,
 }
 /* Lensfun processing end*/
 
-#ifdef __GNUC__
-  #pragma GCC push_options
-  #pragma GCC optimize ("fast-math", "fp-contract=fast", "finite-math-only", "no-math-errno")
-#endif
-
 static void _init_vignette_spline(dt_iop_lens_data_t *d)
 {
   dt_hash_t vhash = dt_hash(DT_INITHASH, &d->v_radius, 2 * sizeof(float));
@@ -1959,7 +2265,7 @@ static inline float _calc_vignette_spline(const float radius,
   const int i = (int)r;
 
   const float p0 = spline[i];
-  return p0 + (spline[i+1] - p0) * frac;
+  return fmaf(spline[i+1] - p0, frac, p0);
 }
 
 
@@ -1975,7 +2281,7 @@ static void _preprocess_vignette(dt_iop_module_t *self,
 
   const float w2 = 0.5f * roi->scale * piece->buf_in.width;
   const float h2 = 0.5f * roi->scale * piece->buf_in.height;
-  const float inv_maxr = 1.0f / dt_fast_hypotf(w2, h2);
+  const float inv_maxr = 1.0f / _radius_hypotf(w2, h2);
   const float strength = 2.0f * d->v_strength;
   const float *spline = d->vigspline;
 
@@ -1987,7 +2293,7 @@ static void _preprocess_vignette(dt_iop_module_t *self,
       const size_t idx = 4 * (size_t)(row * roi->width + col);
       const float dx = ((float)(roi->x + col) - w2);
       const float dy = ((float)(roi->y + row) - h2);
-      const float radius = dt_fast_hypotf(dx, dy) * inv_maxr;
+      const float radius = _radius_hypotf(dx, dy) * inv_maxr;
       const float val = MAX(0.0f, strength * _calc_vignette_spline(radius, spline));
 
       for_three_channels(c)
@@ -2017,9 +2323,11 @@ static inline float _interpolate_linear_spline(const float *xi,
   {
     if(x >= xi[i - 1] && x <= xi[i])
     {
-      const float dydx = (yi[i] - yi[i - 1]) / (xi[i] - xi[i - 1]);
-
-      return yi[i - 1] + (x - xi[i - 1]) * dydx;
+      const float dx = x - xi[i - 1];
+      const float dy = yi[i] - yi[i - 1];
+      const float span = xi[i] - xi[i - 1];
+      const float dydx = dy / span;
+      return fmaf(dx, dydx, yi[i - 1]);
     }
   }
 
@@ -2479,7 +2787,7 @@ static int _init_coeffs_md_v2(const dt_image_t *img,
   const float iwd2 = 0.5f * img->p_width;
   const float iht2 = 0.5f * img->p_height;
 
-  const float r = dt_fast_hypotf(iwd2, iht2);
+  const float r = _radius_hypotf(iwd2, iht2);
   const float sr = MIN(iwd2, iht2);
   const float srr = sr / r;
 
@@ -2543,11 +2851,12 @@ static int _check_corrections_md(dt_iop_lens_data_t *d)
   {
     if(!(feqf(d->vig[i], 1.0f, 1e-7)))
        has_vignette |= TRUE;
-    for(int c = 0; c < 3; c++)
-    {
-      if(!(feqf(d->cor_rgb[c][i], 1.0f, 1e-7)))
-         has_distort |= TRUE;
-    }
+    // green is the reference plane: chromatic aberration correction
+    // alone moves red and blue away from it. both algorithms divide every
+    // channel by an autoscale, so a constant green is scaling, and only a
+    // green that varies with the radius is distortion
+    if(!(feqf(d->cor_rgb[1][i], d->cor_rgb[1][0], 1e-7)))
+       has_distort |= TRUE;
     if((d->cor_rgb[0][i] != d->cor_rgb[1][i])
        || (d->cor_rgb[0][i] != d->cor_rgb[2][i])
        || (d->cor_rgb[1][i] != d->cor_rgb[2][i]))
@@ -2672,7 +2981,7 @@ static gboolean _distort_transform_md(dt_iop_module_t *self,
   const float inv_scale_md = 1.0f / d->scale_md;
   const float w2 = 0.5f * piece->buf_in.width;
   const float h2 = 0.5f * piece->buf_in.height;
-  const float r = 1.0f / dt_fast_hypotf(w2, h2);
+  const float r = 1.0f / _radius_hypotf(w2, h2);
 
   for(size_t i = 0; i < 2*points_count; i += 2)
   {
@@ -2685,7 +2994,7 @@ static gboolean _distort_transform_md(dt_iop_module_t *self,
       const float cy = (p2 - h2) * inv_scale_md;
       const float dr =
         _interpolate_linear_spline(d->knots_dist, d->cor_rgb[1],
-                                   d->nc, r * dt_fast_hypotf(cx, cy));
+                                   d->nc, r * _radius_hypotf(cx, cy));
 
       const float dist1 = points[i] - (dr*cx + w2);
       const float dist2 = points[i + 1] - (dr*cy + h2);
@@ -2718,7 +3027,7 @@ static gboolean _distort_backtransform_md(dt_iop_module_t *self,
   const float inv_scale_md = 1.0f / d->scale_md;
   const float w2 = 0.5f * piece->buf_in.width;
   const float h2 = 0.5f * piece->buf_in.height;
-  const float r = 1.0f / dt_fast_hypotf(w2, h2);
+  const float r = 1.0f / _radius_hypotf(w2, h2);
 
   for(size_t i = 0; i < 2*points_count; i += 2)
   {
@@ -2726,7 +3035,7 @@ static gboolean _distort_backtransform_md(dt_iop_module_t *self,
     const float cy = (points[i + 1] - h2) * inv_scale_md;
     const float dr =
       _interpolate_linear_spline(d->knots_dist, d->cor_rgb[1],
-                                 d->nc, r * dt_fast_hypotf(cx, cy));
+                                 d->nc, r * _radius_hypotf(cx, cy));
 
     points[i] = dr*cx + w2;
     points[i + 1] = dr*cy + h2;
@@ -2752,7 +3061,7 @@ static void _distort_mask_md(dt_iop_module_t *self,
   const float inv_scale_md = 1.0f / d->scale_md;
   const float w2 = 0.5f * roi_in->scale * piece->buf_in.width;
   const float h2 = 0.5f * roi_in->scale * piece->buf_in.height;
-  const float r = 1.0f / dt_fast_hypotf(w2, h2);
+  const float r = 1.0f / _radius_hypotf(w2, h2);
 
   const float limw = roi_in->width - 1;
   const float limh = roi_in->height - 1;
@@ -2768,9 +3077,9 @@ static void _distort_mask_md(dt_iop_module_t *self,
       const float cy = (roi_out->y + y - h2) * inv_scale_md;
       const float dr =
         _interpolate_linear_spline(d->knots_dist, d->cor_rgb[1],
-                                   d->nc, r*dt_fast_hypotf(cx, cy));
-      const float xs = CLAMP(dr*cx + w2 - roi_in->x, 0.0f, limw);
-      const float ys = CLAMP(dr*cy + h2 - roi_in->y, 0.0f, limh);
+                                   d->nc, r*_radius_hypotf(cx, cy));
+      const float xs = CLAMP(fmaf(dr, cx, w2) - roi_in->x, 0.0f, limw);
+      const float ys = CLAMP(fmaf(dr, cy, h2) - roi_in->y, 0.0f, limh);
       out[y * roi_out->width + x] = CLIP(dt_interpolation_compute_sample(interpolation, in,
                                                                          xs, ys,
                                                                          roi_in->width, roi_in->height, 1, roi_in->width));
@@ -2795,7 +3104,7 @@ static void _process_md(dt_iop_module_t *self,
   const float inv_scale_md = 1.0f / d->scale_md;
   const float w2 = 0.5f * roi_in->scale * piece->buf_in.width;
   const float h2 = 0.5f * roi_in->scale * piece->buf_in.height;
-  const float r = 1.0f / dt_fast_hypotf(w2, h2);
+  const float r = 1.0f / _radius_hypotf(w2, h2);
 
   const dt_interpolation_t *interpolation = dt_interpolation_new(DT_INTERPOLATION_USERPREF_WARP);
   const gboolean pass_mode = piece->pipe->mask_display == DT_DEV_PIXELPIPE_DISPLAY_PASSTHRU;
@@ -2822,10 +3131,10 @@ static void _process_md(dt_iop_module_t *self,
         const float cy = roi_in->y + y - h2;
         const float sf =
           _interpolate_linear_spline(d->knots_vig, d->vig,
-                                     d->nc, r*dt_fast_hypotf(cx, cy));
+                                     d->nc, r*_radius_hypotf(cx, cy));
 
         for_each_channel(c)
-          buf[idx + c] /= MAX(1e-4, sf);
+          buf[idx + c] /= MAX(1e-4f, sf);
       }
     }
   }
@@ -2844,7 +3153,7 @@ static void _process_md(dt_iop_module_t *self,
       const float cx = (roi_out->x + x - w2) * inv_scale_md;
       const float cy = (roi_out->y + y - h2) * inv_scale_md;
 
-      const float radius = r*dt_fast_hypotf(cx, cy);
+      const float radius = r*_radius_hypotf(cx, cy);
 
       for_each_channel(c)
       {
@@ -2852,8 +3161,8 @@ static void _process_md(dt_iop_module_t *self,
         const int plane = (c == 3 || pass_mode) ? 1 : c;
         const float dr =
           _interpolate_linear_spline(d->knots_dist, d->cor_rgb[plane], d->nc, radius);
-        const float xs = CLAMP(dr*cx + w2 - roi_in->x, 0.0f, limw);
-        const float ys = CLAMP(dr*cy + h2 - roi_in->y, 0.0f, limh);
+        const float xs = CLAMP(fmaf(dr, cx, w2) - roi_in->x, 0.0f, limw);
+        const float ys = CLAMP(fmaf(dr, cy, h2) - roi_in->y, 0.0f, limh);
         out[odx+c] = dt_interpolation_compute_sample(interpolation, buf + c,
                                                      xs, ys,
                                                      roi_in->width, roi_in->height, 4, 4*roi_in->width);
@@ -2887,7 +3196,7 @@ static int _process_cl_md(dt_iop_module_t *self,
 
   const float w2 = 0.5f * roi_in->scale * piece->buf_in.width;
   const float h2 = 0.5f * roi_in->scale * piece->buf_in.height;
-  const float r = 1.0f / dt_fast_hypotf(w2, h2);
+  const float r = 1.0f / _radius_hypotf(w2, h2);
   const int knots = d->nc;
 
   const dt_interpolation_t *itor = dt_interpolation_new(DT_INTERPOLATION_USERPREF_WARP);
@@ -2960,7 +3269,7 @@ static void _modify_roi_in_md(dt_iop_module_t *self,
   const float orig_h = roi_in->scale * piece->buf_in.height;
   const float w2 = 0.5f * orig_w;
   const float h2 = 0.5f * orig_h;
-  const float r = 1.0f / dt_fast_hypotf(w2, h2);
+  const float r = 1.0f / _radius_hypotf(w2, h2);
 
   const int xoff = roi_in->x;
   const int yoff = roi_in->y;
@@ -2984,7 +3293,7 @@ static void _modify_roi_in_md(dt_iop_module_t *self,
       {
         const float dr = _interpolate_linear_spline(d->knots_dist,
                                                     d->cor_rgb[c], d->nc,
-                                                    r*dt_fast_hypotf(cx, cy));
+                                                    r*_radius_hypotf(cx, cy));
         const float xs = dr*cx + w2;
         const float ys = dr*cy + h2;
         xm = MIN(xm, xs);
@@ -3006,7 +3315,7 @@ static void _modify_roi_in_md(dt_iop_module_t *self,
       {
         const float dr = _interpolate_linear_spline(d->knots_dist,
                                                     d->cor_rgb[c], d->nc,
-                                                    r*dt_fast_hypotf(cx, cy));
+                                                    r*_radius_hypotf(cx, cy));
         const float xs = dr*cx + w2;
         const float ys = dr*cy + h2;
         xm = MIN(xm, xs);
@@ -3043,10 +3352,6 @@ static void _modify_roi_in_vg(dt_iop_module_t *self,
 
 /* embedded metadata processing end */
 
-#ifdef __GNUC__
-  #pragma GCC pop_options
-#endif
-
 void process(dt_iop_module_t *self,
              dt_dev_pixelpipe_iop_t *piece,
              const void *const ivoid,
@@ -3056,7 +3361,14 @@ void process(dt_iop_module_t *self,
 {
   dt_iop_lens_data_t *d = (dt_iop_lens_data_t *)piece->data;
   dt_iop_lens_gui_data_t *g = (dt_iop_lens_gui_data_t *)self->gui_data;
-  const gboolean mask = g && g->vig_masking && dt_pipe_is_full(piece->pipe);
+  gboolean mask = FALSE;
+  if(g && dt_pipe_is_full(piece->pipe))
+  {
+    dt_iop_gui_enter_critical_section(self);
+    mask = g->vig_masking;
+    dt_iop_gui_leave_critical_section(self);
+  }
+
   const gboolean pre_vignette = mask || (d->v_strength > 0.0f);
   const gboolean pass_mode = piece->pipe->mask_display == DT_DEV_PIXELPIPE_DISPLAY_PASSTHRU;
   float *data = (float *)ivoid;
@@ -3107,7 +3419,7 @@ cl_int _preprocess_vignette_cl(dt_iop_module_t *self,
 
   const float w2 = 0.5f * roi->scale * piece->buf_in.width;
   const float h2 = 0.5f * roi->scale * piece->buf_in.height;
-  const float inv_maxr = 1.0f / dt_fast_hypotf(w2, h2);
+  const float inv_maxr = 1.0f / _radius_hypotf(w2, h2);
   const float strength = 2.0f * d->v_strength;
   const int splinesize = VIGSPLINES;
 
@@ -3135,7 +3447,14 @@ int process_cl(dt_iop_module_t *self,
 
   dt_iop_lens_data_t *d = (dt_iop_lens_data_t *)piece->data;
   dt_iop_lens_gui_data_t *g = (dt_iop_lens_gui_data_t *)self->gui_data;
-  const gboolean mask = g && g->vig_masking && dt_pipe_is_full(piece->pipe);
+
+  gboolean mask = FALSE;
+  if(g && dt_pipe_is_full(piece->pipe))
+  {
+    dt_iop_gui_enter_critical_section(self);
+    mask = g->vig_masking ;
+    dt_iop_gui_leave_critical_section(self);
+  }
   const gboolean pre_vignette = mask || (d->v_strength > 0.0f);
   const gboolean pass_mode = piece->pipe->mask_display == DT_DEV_PIXELPIPE_DISPLAY_PASSTHRU;
 
@@ -3319,11 +3638,18 @@ void commit_params(dt_iop_module_t *self,
     p->method = _get_method(self, method);
   }
 
+  // stored params need not terminate the camera and lens names
+  p->camera[sizeof(p->camera) - 1] = '\0';
+  p->lens[sizeof(p->lens) - 1] = '\0';
+
   d->method = p->method;
   d->modify_flags = p->modify_flags;
 
   if(dt_image_is_monochrome(&self->dev->image_storage))
     d->modify_flags &= ~DT_IOP_LENS_MODIFY_FLAG_TCA;
+
+  d->params_hash = dt_hash(DT_INITHASH, p, sizeof(dt_iop_lens_params_t));
+  d->params_hash = dt_hash(d->params_hash, &d->modify_flags, sizeof(d->modify_flags));
 
   d->v_strength = p->v_strength;
   d->v_radius = p->v_radius;
@@ -3361,6 +3687,7 @@ void cleanup_pipe(dt_iop_module_t *self,
     delete d->lens;
     d->lens = NULL;
   }
+  _lens_grid_cache_free(d);
 
   free(piece->data);
   piece->data = NULL;
@@ -3641,448 +3968,6 @@ void cleanup_global(dt_iop_module_so_t *self)
   self->data = NULL;
 }
 
-/* Headless document-editor bridge. Resolve the same image defaults as
- * gui_update before editing; setting has_been_set on an uninitialized history
- * blob otherwise freezes missing EXIF/profile values into every later commit.
- * No replacement correction algorithm is used here. */
-static void _mobile_lens_normalize_auto(dt_iop_module_t *self, dt_iop_lens_params_t *p);
-
-static dt_iop_lens_params_t _mobile_lens_effective(dt_iop_module_t *self)
-{
-  dt_iop_lens_params_t p = *(dt_iop_lens_params_t *)self->params;
-  if(!p.has_been_set)
-  {
-    const dt_iop_lens_method_t method = p.method;
-    p = *(dt_iop_lens_params_t *)self->default_params;
-    p.method = _get_method(self, method);
-    p.has_been_set = FALSE;
-    _mobile_lens_normalize_auto(self, &p);
-  }
-  return p;
-}
-
-static lfDatabase *_mobile_lens_db(dt_iop_module_t *self)
-{
-  const dt_iop_lens_global_data_t *gd = (const dt_iop_lens_global_data_t *)self->global_data;
-  return gd ? gd->db : NULL;
-}
-
-static const lfCamera *_mobile_lens_camera(lfDatabase *db, const dt_iop_lens_params_t *p)
-{
-  const lfCamera *camera = NULL;
-  if(db && p->camera[0])
-  {
-    const lfCamera **matches = db->FindCamerasExt(NULL, p->camera, 0);
-    if(matches) camera = matches[0];
-    lf_free(matches);
-  }
-  return camera;
-}
-
-static void _mobile_lens_normalize_auto(dt_iop_module_t *self, dt_iop_lens_params_t *p)
-{
-  if(p->has_been_set || p->method != DT_IOP_LENS_METHOD_LENSFUN) return;
-  dt_pthread_mutex_lock(&darktable.plugin_threadsafe);
-  const gboolean matched = _mobile_lens_camera(_mobile_lens_db(self), p) != NULL;
-  dt_pthread_mutex_unlock(&darktable.plugin_threadsafe);
-  // EXIF may contain a generic/older lens name. Without a known body, that
-  // string must not automatically select an unrelated database calibration.
-  if(!matched) p->lens[0] = '\0';
-}
-
-G_MODULE_EXPORT int dt_iop_mobile_lens_prepare(dt_iop_module_t *self)
-{
-  if(!self || !self->params || !self->default_params || !self->dev) return 0;
-  if(((const dt_iop_lens_params_t *)self->params)->has_been_set) return 0;
-  dt_iop_lens_params_t p = _mobile_lens_effective(self);
-  p.has_been_set = TRUE;
-  memcpy(self->params, &p, sizeof(p));
-  return 1;
-}
-
-static const lfLens *_mobile_lens_profile(lfDatabase *db, const lfCamera *camera,
-                                        const dt_iop_lens_params_t *p)
-{
-  const lfLens *lens = NULL;
-  if(db && p->lens[0])
-  {
-    const lfLens **matches = db->FindLenses(camera, NULL, p->lens, 0);
-    if(matches) lens = matches[0];
-    lf_free(matches);
-  }
-  return lens;
-}
-
-static gboolean _mobile_lens_profile_ready(const dt_iop_lens_params_t *p, const lfCamera *camera,
-                                          const lfLens *lens)
-{
-  return lens && lens->Maker && isfinite(p->crop) && (camera ? camera->CropFactor : p->crop) > 0
-    && isfinite(p->focal) && p->focal > 0 && isfinite(p->aperture) && p->aperture > 0
-    && isfinite(p->distance) && p->distance > 0;
-}
-
-/* Report what the original DNG spline processor actually consumes. Three
- * planes can encode chromatic scale differences with an identity green plane;
- * that is not a fisheye/distortion calibration. Tangential terms [4..5] are
- * not consumed by the original radial spline and cannot advertise support. */
-G_MODULE_EXPORT int dt_iop_mobile_lens_dng_capabilities(const dt_image_correction_data_t *cd)
-{
-  if(!cd) return 0;
-  int supported = 0;
-  if(cd->dng.has_warp && (cd->dng.planes == 1 || cd->dng.planes == 3))
-  {
-    gboolean finite = TRUE;
-    for(int plane = 0; plane < cd->dng.planes; plane++)
-      for(int term = 0; term < 4; term++)
-        finite = finite && isfinite(cd->dng.cwarp[plane][term]);
-    if(finite)
-    {
-      const int green = cd->dng.planes == 3 ? 1 : 0;
-      for(int term = 0; term < 4; term++)
-      {
-        if(cd->dng.cwarp[green][term] != (term == 0 ? 1.0f : 0.0f))
-          supported |= DT_IOP_LENS_MODIFY_FLAG_DISTORTION;
-        if(cd->dng.planes == 3
-           && (cd->dng.cwarp[0][term] != cd->dng.cwarp[green][term]
-               || cd->dng.cwarp[2][term] != cd->dng.cwarp[green][term]))
-          supported |= DT_IOP_LENS_MODIFY_FLAG_TCA;
-      }
-    }
-  }
-  if(cd->dng.has_vignette)
-  {
-    gboolean finite = TRUE, nonidentity = FALSE;
-    for(int term = 0; term < 5; term++)
-    {
-      finite = finite && isfinite(cd->dng.cvig[term]);
-      nonidentity = nonidentity || cd->dng.cvig[term] != 0.0f;
-    }
-    if(finite && nonidentity) supported |= DT_IOP_LENS_MODIFY_FLAG_VIGNETTING;
-  }
-  return supported;
-}
-
-/* Caller holds plugin_threadsafe, just like the normal Lensfun processor. */
-static int _mobile_lens_supported(dt_iop_module_t *self, const dt_iop_lens_params_t *p,
-                                 const lfCamera *camera, const lfLens *lens)
-{
-  int supported = 0;
-  const dt_image_t *image = &self->dev->image_storage;
-  if(p->method == DT_IOP_LENS_METHOD_EMBEDDED_METADATA && _have_embedded_metadata(self))
-  {
-    const gboolean dng = image->exif_correction_type == CORRECTION_TYPE_DNG;
-    supported = dng ? dt_iop_mobile_lens_dng_capabilities(&image->exif_correction_data)
-      : DT_IOP_LENS_MODFLAG_ALL;
-  }
-  else if(p->method == DT_IOP_LENS_METHOD_LENSFUN && _mobile_lens_profile_ready(p, camera, lens))
-  {
-    dt_iop_lens_data_t data = { 0 };
-    data.modify_flags = DT_IOP_LENS_MODFLAG_ALL;
-    data.lens = (lfLens *)lens; data.crop = camera ? camera->CropFactor : p->crop;
-    data.focal = p->focal; data.aperture = p->aperture; data.distance = p->distance;
-    data.scale = 1; data.inverse = p->inverse;
-    data.target_geom = _lenstype_to_lensfun_lenstype(p->target_geom);
-    int flags = 0;
-    lfModifier *modifier = _get_modifier(&flags, image->width, image->height, &data, LF_MODIFY_ALL, FALSE);
-    supported = _modflags_from_lensfun_mods(flags);
-    delete modifier;
-    if(p->tca_override) supported |= DT_IOP_LENS_MODIFY_FLAG_TCA;
-  }
-  if(dt_image_is_monochrome(image)) supported &= ~DT_IOP_LENS_MODIFY_FLAG_TCA;
-  return supported;
-}
-
-G_MODULE_EXPORT int dt_iop_mobile_lens_choice_allowed(dt_iop_module_t *self, const char *name, int value)
-{
-  if(!self || !name || !self->params || !self->default_params || !self->dev) return 0;
-  const dt_iop_lens_params_t p = _mobile_lens_effective(self);
-  if(!strcmp(name, "method")) return value >= (_have_embedded_metadata(self) ? 0 : 1) && value <= 2;
-  if(!strcmp(name, "inverse")) return value == 0 || value == 1;
-  if(!strcmp(name, "target_geom")) return value >= 1 && value <= 8;
-  if(strcmp(name, "modify_flags") || value < 0 || value > 7) return 0;
-  dt_pthread_mutex_lock(&darktable.plugin_threadsafe);
-  lfDatabase *db = _mobile_lens_db(self);
-  const lfCamera *camera = _mobile_lens_camera(db, &p);
-  const lfLens *lens = _mobile_lens_profile(db, camera, &p);
-  const int supported = _mobile_lens_supported(self, &p, camera, lens);
-  dt_pthread_mutex_unlock(&darktable.plugin_threadsafe);
-  if(!supported) return 0;
-  if(value == DT_IOP_LENS_MODFLAG_ALL) return 1;
-  if(value & ~supported) return 0;
-  if(p.method == DT_IOP_LENS_METHOD_EMBEDDED_METADATA
-     && self->dev->image_storage.exif_correction_type == CORRECTION_TYPE_DNG)
-  {
-    // The original processor applies the complete DNG warp when either of
-    // these bits is selected. Do not offer independent operations it cannot do.
-    const int warp = supported & (DT_IOP_LENS_MODIFY_FLAG_DISTORTION | DT_IOP_LENS_MODIFY_FLAG_TCA);
-    const int selected = value & (DT_IOP_LENS_MODIFY_FLAG_DISTORTION | DT_IOP_LENS_MODIFY_FLAG_TCA);
-    if(selected && selected != warp) return 0;
-  }
-  return 1;
-}
-
-/* kind: 0 float, 1 enum, 2 boolean, 3 action. This query is read-only and
- * returns effective image defaults, not a GUI's stale pre-initialization blob. */
-G_MODULE_EXPORT int dt_iop_mobile_lens_get_control(dt_iop_module_t *self, const char *name,
-    double *value, double *minimum, double *maximum, double *original, int *kind)
-{
-  if(!self || !self->params || !self->default_params || !self->dev || !name) return 0;
-  const dt_iop_lens_params_t p = _mobile_lens_effective(self);
-  const dt_iop_lens_params_t *d = (const dt_iop_lens_params_t *)self->default_params;
-  *kind = 0;
-  if(!strcmp(name, "method"))
-  {
-    *kind = 1; *value = p.method; *original = d->method;
-    *minimum = _have_embedded_metadata(self) ? 0 : 1; *maximum = 2; return 1;
-  }
-  if(!strcmp(name, "lens.autodetect"))
-  { *kind = 3; *value = *minimum = *maximum = 1; *original = NAN; return 1; }
-#define MOBILE_LENS_FLOAT(field, low, high) \
-  if(!strcmp(name, #field)) { *value = p.field; *original = d->field; *minimum = low; *maximum = high; return isfinite(*value); }
-  MOBILE_LENS_FLOAT(v_strength, 0, 1)
-  MOBILE_LENS_FLOAT(v_radius, 0, 1)
-  MOBILE_LENS_FLOAT(v_steepness, 0, 1)
-  const dt_image_t *image = &self->dev->image_storage;
-  if(p.method == DT_IOP_LENS_METHOD_EMBEDDED_METADATA && _have_embedded_metadata(self))
-  {
-    if(!strcmp(name, "modify_flags"))
-    {
-      if(!_mobile_lens_supported(self, &p, NULL, NULL)) return 0;
-      *kind = 1; *value = p.modify_flags; *original = d->modify_flags; *minimum = 0; *maximum = 7; return 1;
-    }
-    const gboolean dng = image->exif_correction_type == CORRECTION_TYPE_DNG;
-    const int supported = _mobile_lens_supported(self, &p, NULL, NULL);
-    if(!dng || (supported & (DT_IOP_LENS_MODIFY_FLAG_DISTORTION | DT_IOP_LENS_MODIFY_FLAG_TCA)))
-    { MOBILE_LENS_FLOAT(cor_dist_ft, 0, 2) }
-    if(!dng || (supported & DT_IOP_LENS_MODIFY_FLAG_VIGNETTING)) { MOBILE_LENS_FLOAT(cor_vig_ft, 0, 2) }
-    if(!dng && p.md_version >= DT_IOP_LENS_EMBEDDED_METADATA_VERSION_2)
-    { MOBILE_LENS_FLOAT(cor_ca_r_ft, 0, 2) MOBILE_LENS_FLOAT(cor_ca_b_ft, 0, 2) }
-    MOBILE_LENS_FLOAT(scale_md, .1f, 2)
-    return 0;
-  }
-  if(p.method != DT_IOP_LENS_METHOD_LENSFUN) return 0;
-  dt_pthread_mutex_lock(&darktable.plugin_threadsafe);
-  lfDatabase *db = _mobile_lens_db(self);
-  const lfCamera *camera = _mobile_lens_camera(db, &p);
-  const lfLens *lens = _mobile_lens_profile(db, camera, &p);
-  const gboolean matched = lens && lens->Maker;
-  const gboolean ready = _mobile_lens_profile_ready(&p, camera, lens);
-  const int supported = !strcmp(name, "modify_flags") ? _mobile_lens_supported(self, &p, camera, lens) : 0;
-  dt_pthread_mutex_unlock(&darktable.plugin_threadsafe);
-  if(!matched) return 0;
-  if(!strcmp(name, "crop") && !camera)
-  { *value = p.crop; *original = d->crop; *minimum = .1f; *maximum = 20; return isfinite(*value); }
-  MOBILE_LENS_FLOAT(focal, .1f, 4000)
-  MOBILE_LENS_FLOAT(aperture, .1f, 128)
-  MOBILE_LENS_FLOAT(distance, .01f, 10000)
-  if(!ready) return 0;
-  if(!strcmp(name, "modify_flags"))
-  {
-    if(!supported) return 0;
-    *kind = 1; *value = p.modify_flags; *original = d->modify_flags; *minimum = 0; *maximum = 7; return 1;
-  }
-  MOBILE_LENS_FLOAT(scale, .1f, 2)
-  if(!strcmp(name, "lens.autoscale"))
-  { *kind = 3; *value = *minimum = *maximum = 1; *original = NAN; return 1; }
-  if(!strcmp(name, "inverse"))
-  { *kind = 1; *value = p.inverse; *original = d->inverse; *minimum = 0; *maximum = 1; return 1; }
-  if(!strcmp(name, "target_geom"))
-  { *kind = 1; *value = p.target_geom; *original = d->target_geom; *minimum = 1; *maximum = 8; return 1; }
-  if(!dt_image_is_monochrome(image))
-  {
-    if(!strcmp(name, "tca_override"))
-    { *kind = 2; *value = p.tca_override; *original = d->tca_override; *minimum = 0; *maximum = 1; return 1; }
-    if(p.tca_override) { MOBILE_LENS_FLOAT(tca_r, .99f, 1.01f) MOBILE_LENS_FLOAT(tca_b, .99f, 1.01f) }
-  }
-#undef MOBILE_LENS_FLOAT
-  return 0;
-}
-
-G_MODULE_EXPORT int dt_iop_mobile_lens_set_number(dt_iop_module_t *self, const char *name, double value)
-{
-  if(!self || !name || !isfinite(value)) return -1;
-  dt_iop_lens_params_t p = _mobile_lens_effective(self);
-  double current, minimum, maximum, original;
-  int kind;
-  {
-    if(!dt_iop_mobile_lens_get_control(self, name, &current, &minimum, &maximum, &original, &kind)) return -1;
-    if(kind != 0 && value != trunc(value)) return -1;
-    if(kind == 0)
-    {
-      if(value < -FLT_MAX || value > FLT_MAX) return -1;
-      value = (double)(float)value;
-    }
-    if(value < minimum || value > maximum) return -1;
-    if(kind == 1 && !dt_iop_mobile_lens_choice_allowed(self, name, (int)value)) return -1;
-    if(!strcmp(name, "lens.autodetect"))
-    {
-      p = *(dt_iop_lens_params_t *)self->default_params;
-      p.has_been_set = FALSE;
-      _mobile_lens_normalize_auto(self, &p);
-    }
-    else if(!strcmp(name, "lens.autoscale"))
-    {
-      dt_pthread_mutex_lock(&darktable.plugin_threadsafe);
-      const lfCamera *camera = _mobile_lens_camera(_mobile_lens_db(self), &p);
-      dt_pthread_mutex_unlock(&darktable.plugin_threadsafe);
-      const float scale = _get_autoscale_lf(self, &p, camera);
-      if(!isfinite(scale) || scale < .1f || scale > 2) return -1;
-      p.scale = scale;
-    }
-    else if(!strcmp(name, "method"))
-    {
-      if(p.method != value && value == DT_IOP_LENS_METHOD_LENSFUN)
-      {
-        p.method = DT_IOP_LENS_METHOD_LENSFUN;
-        p.has_been_set = FALSE;
-        _mobile_lens_normalize_auto(self, &p);
-      }
-      else p.method = (dt_iop_lens_method_t)(int)value;
-    }
-    else if(!strcmp(name, "modify_flags")) p.modify_flags = (dt_iop_lens_modflag_t)(int)value;
-    else if(!strcmp(name, "inverse")) p.inverse = (dt_iop_lens_mode_t)(int)value;
-    else if(!strcmp(name, "target_geom")) p.target_geom = (dt_iop_lens_lenstype_t)(int)value;
-    else if(!strcmp(name, "tca_override")) p.tca_override = value != 0;
-#define MOBILE_LENS_SET(field) else if(!strcmp(name, #field)) p.field = (float)value;
-    MOBILE_LENS_SET(scale) MOBILE_LENS_SET(crop) MOBILE_LENS_SET(focal) MOBILE_LENS_SET(aperture)
-    MOBILE_LENS_SET(distance) MOBILE_LENS_SET(tca_r) MOBILE_LENS_SET(tca_b)
-    MOBILE_LENS_SET(cor_dist_ft) MOBILE_LENS_SET(cor_vig_ft) MOBILE_LENS_SET(cor_ca_r_ft)
-    MOBILE_LENS_SET(cor_ca_b_ft) MOBILE_LENS_SET(scale_md) MOBILE_LENS_SET(v_strength)
-    MOBILE_LENS_SET(v_radius) MOBILE_LENS_SET(v_steepness)
-#undef MOBILE_LENS_SET
-    else return -1;
-  }
-  p.has_been_set = TRUE;
-  memcpy(self->params, &p, sizeof(p));
-  return 1;
-}
-
-G_MODULE_EXPORT int dt_iop_mobile_lens_set_text(dt_iop_module_t *self, const char *name, const char *value)
-{
-  if(!self || !name || !value || strlen(value) >= 128 || !g_utf8_validate(value, -1, NULL)) return -1;
-  dt_iop_lens_params_t p = _mobile_lens_effective(self);
-  const gboolean camera = !strcmp(name, "camera") || !strcmp(name, "lens.camera_profile");
-  const gboolean lens = !strcmp(name, "lens") || !strcmp(name, "lens.profile");
-  if(!camera && !lens) return -1;
-  const gboolean canonical = !strncmp(name, "lens.", 5);
-  if(canonical && (p.method != DT_IOP_LENS_METHOD_LENSFUN || !value[0])) return -1;
-  dt_pthread_mutex_lock(&darktable.plugin_threadsafe);
-  lfDatabase *db = _mobile_lens_db(self);
-  if(camera)
-  {
-    g_strlcpy(p.camera, value, sizeof(p.camera));
-    const lfCamera *match = _mobile_lens_camera(db, &p);
-    if(canonical && (!match || strcmp(match->Model, value)))
-    { dt_pthread_mutex_unlock(&darktable.plugin_threadsafe); return -1; }
-    if(match) p.crop = match->CropFactor;
-  }
-  else
-  {
-    g_strlcpy(p.lens, value, sizeof(p.lens));
-    const lfCamera *body = _mobile_lens_camera(db, &p);
-    // The normal profile picker is a camera-compatible selector. An unknown
-    // EXIF model must not unlock every lens in the database. The legacy text
-    // API still preserves explicit advanced/manual settings in old histories.
-    if(canonical && !body)
-    { dt_pthread_mutex_unlock(&darktable.plugin_threadsafe); return -1; }
-    const lfLens *match = _mobile_lens_profile(db, body, &p);
-    if(canonical && (!match || strcmp(match->Model, value)))
-    { dt_pthread_mutex_unlock(&darktable.plugin_threadsafe); return -1; }
-    if(match)
-    {
-      p.target_geom = _lenstype_from_lensfun_lenstype(match->Type);
-      if(!isfinite(p.focal) || p.focal <= 0 || match->MinFocal >= match->MaxFocal) p.focal = match->MinFocal;
-      if(!isfinite(p.aperture) || p.aperture <= 0) p.aperture = match->MinAperture > 0 ? match->MinAperture : 4;
-      if(!isfinite(p.distance) || p.distance <= 0) p.distance = 1000;
-      if(!isfinite(p.crop) || p.crop <= 0) p.crop = body ? body->CropFactor : match->CropFactor;
-    }
-  }
-  dt_pthread_mutex_unlock(&darktable.plugin_threadsafe);
-  p.has_been_set = TRUE;
-  memcpy(self->params, &p, sizeof(p));
-  return 1;
-}
-
-static void _mobile_lens_json_string(GString *json, const char *value)
-{
-  g_string_append_c(json, '"');
-  for(const unsigned char *c = (const unsigned char *)(value ? value : ""); *c; c++)
-  {
-    if(*c == '"' || *c == '\\') g_string_append_c(json, '\\');
-    if(*c < 0x20) g_string_append_printf(json, "\\u%04x", *c);
-    else g_string_append_c(json, *c);
-  }
-  g_string_append_c(json, '"');
-}
-
-static void _mobile_lens_catalog_item(GString *json, const char *model, const char *maker,
-                                      GHashTable *seen, gboolean *first)
-{
-  if(!model || strlen(model) >= 128 || !g_utf8_validate(model, -1, NULL)
-     || g_hash_table_contains(seen, model)) return;
-  g_hash_table_add(seen, (gpointer)model);
-  if(!*first) g_string_append_c(json, ',');
-  *first = FALSE;
-  g_string_append(json, "{\"value\":"); _mobile_lens_json_string(json, model);
-  g_string_append(json, ",\"label\":");
-  gchar *label = maker && maker[0] ? g_strdup_printf("%s · %s", maker, model) : g_strdup(model);
-  _mobile_lens_json_string(json, label); g_free(label);
-  g_string_append_c(json, '}');
-}
-
-G_MODULE_EXPORT char *dt_iop_mobile_lens_metadata(dt_iop_module_t *self)
-{
-  if(!self || !self->params || !self->default_params || !self->dev) return NULL;
-  const dt_iop_lens_params_t p = _mobile_lens_effective(self);
-  dt_pthread_mutex_lock(&darktable.plugin_threadsafe);
-  lfDatabase *db = _mobile_lens_db(self);
-  const lfCamera *const *cameras = db ? db->GetCameras() : NULL;
-  const lfLens *const *lenses = db ? db->GetLenses() : NULL;
-  const gboolean database = cameras && cameras[0] && lenses && lenses[0];
-  const lfCamera *camera = _mobile_lens_camera(db, &p);
-  const lfLens *lens = _mobile_lens_profile(db, camera, &p);
-  const gboolean ready = _mobile_lens_profile_ready(&p, camera, lens);
-  const gboolean embedded = _have_embedded_metadata(self);
-  const int supported = _mobile_lens_supported(self, &p, camera, lens);
-  const char *status = p.method == DT_IOP_LENS_METHOD_ONLYVIGNETTE ? "manual"
-    : p.method == DT_IOP_LENS_METHOD_EMBEDDED_METADATA ? (supported ? "ready" : "no_calibration")
-    : !database ? "missing_database" : !camera ? (lens ? "unverified_camera" : "missing_camera")
-    : !lens ? "missing_lens" : !ready ? "missing_settings"
-    : supported ? "ready" : "no_calibration";
-  GString *json = g_string_new("{\"status\":"); _mobile_lens_json_string(json, status);
-  g_string_append_printf(json, ",\"method\":%d,\"embeddedAvailable\":%s,\"databaseAvailable\":%s,"
-    "\"cameraMatched\":%s,\"lensMatched\":%s,\"supportedFlags\":%d,\"camera\":",
-    p.method, embedded ? "true" : "false", database ? "true" : "false",
-    camera ? "true" : "false", lens ? "true" : "false", supported);
-  // These are verified database selections; source EXIF/requested strings are
-  // diagnostics, not evidence that a calibration exists for that camera.
-  _mobile_lens_json_string(json, camera ? camera->Model : "");
-  g_string_append(json, ",\"lens\":"); _mobile_lens_json_string(json, lens ? lens->Model : "");
-  g_string_append(json, ",\"requestedCamera\":"); _mobile_lens_json_string(json, p.camera);
-  g_string_append(json, ",\"requestedLens\":"); _mobile_lens_json_string(json, p.lens);
-  g_string_append(json, ",\"imageCamera\":"); _mobile_lens_json_string(json, self->dev->image_storage.exif_model);
-  g_string_append(json, ",\"imageLens\":"); _mobile_lens_json_string(json, self->dev->image_storage.exif_lens);
-  g_string_append(json, ",\"cameras\":[");
-  GHashTable *seen = g_hash_table_new(g_str_hash, g_str_equal);
-  gboolean first = TRUE;
-  if(self->enabled && p.method == DT_IOP_LENS_METHOD_LENSFUN && cameras)
-    for(unsigned index = 0; cameras[index]; index++)
-      _mobile_lens_catalog_item(json, cameras[index]->Model, lf_mlstr_get(cameras[index]->Maker), seen, &first);
-  g_hash_table_remove_all(seen);
-  g_string_append(json, "],\"lenses\":["); first = TRUE;
-  const lfLens **compatible = self->enabled && p.method == DT_IOP_LENS_METHOD_LENSFUN && db && camera
-    ? db->FindLenses(camera, NULL, NULL, 0) : NULL;
-  const lfLens *const *catalog = compatible;
-  if(self->enabled && p.method == DT_IOP_LENS_METHOD_LENSFUN && catalog)
-    for(unsigned index = 0; catalog[index]; index++)
-      _mobile_lens_catalog_item(json, catalog[index]->Model, lf_mlstr_get(catalog[index]->Maker), seen, &first);
-  lf_free(compatible);
-  g_hash_table_destroy(seen);
-  dt_pthread_mutex_unlock(&darktable.plugin_threadsafe);
-  g_string_append(json, "]}");
-  return g_string_free(json, FALSE);
-}
-
 /* Lensfun GUI start */
 
 /// ############################################################
@@ -4272,27 +4157,33 @@ static void _camera_set(dt_iop_module_t *self, const lfCamera *cam)
   g_free(fm);
 }
 
-static void _camera_menu_select(GtkMenuItem *menuitem, dt_iop_module_t *self)
+static void _camera_menu_select(GSimpleAction *action,
+                                GVariant *parameter,
+                                gpointer user_data)
 {
-  _camera_set(self, (lfCamera *)g_object_get_data(G_OBJECT(menuitem),
-                                                  "lfCamera"));
-  DT_GUARD_GUI_UPDATE();
+  dt_iop_module_t *self = (dt_iop_module_t *)user_data;
   dt_iop_lens_params_t *p = (dt_iop_lens_params_t *)self->params;
+  
+  const lfCamera *cam = (lfCamera *)g_variant_get_uint64(parameter);
+  _camera_set(self, cam);
+
+  DT_GUARD_GUI_UPDATE();
   p->has_been_set = TRUE;
   dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
 
-static GtkMenu *camera_menu_fill(dt_iop_module_t *self,
-                                 const lfCamera *const *camlist)
+static GMenu *camera_menu_fill(dt_iop_module_t *self,
+                               const lfCamera *const *camlist)
 {
-  GtkMenu *camera_menu = GTK_MENU(gtk_menu_new());
+  GMenu *camera_menu = g_menu_new();
 
   /* Count all existing camera makers and create a sorted list */
   GPtrArray *makers = g_ptr_array_new();
   GPtrArray *submenus = g_ptr_array_new();
   for(unsigned i = 0; camlist[i]; i++)
   {
-    GtkWidget *submenu, *item;
+    GMenuItem *item;
+    GMenu *submenu;
     const char *m = lf_mlstr_get(camlist[i]->Maker);
     int idx = _ptr_array_find_sorted(makers, m, (GCompareFunc)g_utf8_collate);
     if(idx < 0)
@@ -4300,36 +4191,40 @@ static GtkMenu *camera_menu_fill(dt_iop_module_t *self,
       /* No such maker yet, insert it into the array */
       idx = _ptr_array_insert_sorted(makers, m, (GCompareFunc)g_utf8_collate);
       /* Create a submenu for cameras by this maker */
-      submenu = gtk_menu_new();
+      submenu = g_menu_new();
       _ptr_array_insert_index(submenus, submenu, idx);
     }
 
-    submenu = (GtkWidget *)g_ptr_array_index(submenus, idx);
+    submenu = (GMenu *)g_ptr_array_index(submenus, idx);
     /* Append current camera name to the submenu */
     m = lf_mlstr_get(camlist[i]->Model);
     if(!camlist[i]->Variant)
-      item = gtk_menu_item_new_with_label(m);
+    {
+      item = g_menu_item_new(m, NULL);
+      g_menu_item_set_action_and_target_value(item,
+                                              "camera.activate",
+                                              g_variant_new("t", (guintptr)camlist[i]));
+    }
     else
     {
       gchar *fm = g_strdup_printf("%s (%s)", m, camlist[i]->Variant);
-      item = gtk_menu_item_new_with_label(fm);
+      item = g_menu_item_new(fm, NULL);
+      g_menu_item_set_action_and_target_value(item,
+                                              "camera.activate",
+                                              g_variant_new("t", (guintptr)camlist[i]));
       g_free(fm);
     }
-    gtk_widget_show(item);
-    g_object_set_data(G_OBJECT(item), "lfCamera", (void *)camlist[i]);
-    g_signal_connect(G_OBJECT(item), "activate",
-                     G_CALLBACK(_camera_menu_select), self);
-    gtk_menu_shell_append(GTK_MENU_SHELL(submenu), item);
+    g_menu_append_item(submenu, item);
+    g_object_unref(item);
   }
 
+  // create the submenus for the makers
   for(unsigned i = 0; i < makers->len; i++)
   {
-    GtkWidget *item = (GtkWidget *)
-      gtk_menu_item_new_with_label((const gchar *)g_ptr_array_index(makers, i));
-    gtk_widget_show(item);
-    gtk_menu_shell_append(GTK_MENU_SHELL(camera_menu), item);
-    gtk_menu_item_set_submenu(GTK_MENU_ITEM(item),
-                              (GtkWidget *)g_ptr_array_index(submenus, i));
+    GMenuItem *item = g_menu_item_new_submenu((const gchar *)g_ptr_array_index(makers, i),
+                                              G_MENU_MODEL(g_ptr_array_index(submenus, i)));
+    g_menu_append_item(camera_menu, item);
+    g_object_unref(item);
   }
 
   g_ptr_array_free(submenus, TRUE);
@@ -4349,8 +4244,34 @@ static void _parse_model(const char *txt,
   model[len] = 0;
 }
 
-static void _camera_menusearch_clicked(GtkWidget *button, dt_iop_module_t *self)
+static void _set_camera_action_group(GtkWidget *button,
+                                     dt_iop_module_t *self)
 {
+  GActionGroup *action_group = gtk_widget_get_action_group(button, "camera");
+  if(action_group == NULL)
+  {
+    GActionEntry action_entries[] =
+    {
+      { "activate", _camera_menu_select, "t", NULL }
+    };
+
+    action_group = G_ACTION_GROUP(g_simple_action_group_new());
+    g_action_map_add_action_entries(G_ACTION_MAP(action_group),
+                                    action_entries,
+                                    G_N_ELEMENTS(action_entries),
+                                    self);
+    gtk_widget_insert_action_group(button,
+                                   "camera",
+                                   G_ACTION_GROUP(action_group));
+    g_object_unref(action_group);
+  }
+}
+
+static void _camera_menusearch_clicked(GtkWidget *button,
+                                       dt_iop_module_t *self)
+{
+  _set_camera_action_group(button, self);
+
   dt_iop_lens_global_data_t *gd = (dt_iop_lens_global_data_t *)self->global_data;
   lfDatabase *dt_iop_lensfun_db = (lfDatabase *)gd->db;
 
@@ -4359,21 +4280,25 @@ static void _camera_menusearch_clicked(GtkWidget *button, dt_iop_module_t *self)
   camlist = dt_iop_lensfun_db->GetCameras();
   dt_pthread_mutex_unlock(&darktable.plugin_threadsafe);
   if(!camlist) return;
-  GtkMenu *menu = camera_menu_fill(self, camlist);
+  GMenu *menu = camera_menu_fill(self, camlist);
 
-  // dt_gui_menu_popup unrefs the menu
-  dt_gui_menu_popup(menu, button, GDK_GRAVITY_SOUTH, GDK_GRAVITY_NORTH);
+  GtkWidget *popover_menu = dt_gui_popover_menu_from_model(button, menu);
+  g_object_unref(menu);
+  gtk_popover_popup(GTK_POPOVER(popover_menu));
 }
 
-static void _camera_autosearch_clicked(GtkWidget *button, dt_iop_module_t *self)
+static void _camera_autosearch_clicked(GtkWidget *button,
+                                       dt_iop_module_t *self)
 {
+  _set_camera_action_group(button, self);
+
   dt_iop_lens_global_data_t *gd = (dt_iop_lens_global_data_t *)self->global_data;
   lfDatabase *dt_iop_lensfun_db = (lfDatabase *)gd->db;
 
   char make[200], model[200];
   const gchar *txt = (const gchar *)((dt_iop_lens_params_t *)self->default_params)->camera;
 
-  GtkMenu *menu;
+  GMenu *menu;
   if(txt[0] == '\0')
   {
     const lfCamera *const *camlist;
@@ -4394,8 +4319,9 @@ static void _camera_autosearch_clicked(GtkWidget *button, dt_iop_module_t *self)
     lf_free(camlist);
   }
 
-  // dt_gui_menu_popup unrefs the menu
-  dt_gui_menu_popup(menu, button, GDK_GRAVITY_SOUTH_EAST, GDK_GRAVITY_NORTH_EAST);
+  GtkWidget *popover_menu = dt_gui_popover_menu_from_model(button, menu);
+  g_object_unref(menu);
+  gtk_popover_popup(GTK_POPOVER(popover_menu));
 }
 
 /* -- end camera -- */
@@ -4621,12 +4547,16 @@ static void _lens_set(dt_iop_module_t *self,
   }
 }
 
-static void _lens_menu_select(GtkMenuItem *menuitem,
-                              dt_iop_module_t *self)
+static void _lens_menu_select(GSimpleAction *action,
+                              GVariant *parameter,
+                              gpointer user_data)
 {
+  dt_iop_module_t *self = (dt_iop_module_t *)user_data;
   dt_iop_lens_gui_data_t *g = (dt_iop_lens_gui_data_t *)self->gui_data;
   dt_iop_lens_params_t *p = (dt_iop_lens_params_t *)self->params;
-  _lens_set(self, (lfLens *)g_object_get_data(G_OBJECT(menuitem), "lfLens"));
+
+  const lfLens *lens = (lfLens *)g_variant_get_uint64(parameter);
+  _lens_set(self, lens);
   DT_GUARD_GUI_UPDATE();
   p->has_been_set = TRUE;
 
@@ -4635,17 +4565,18 @@ static void _lens_menu_select(GtkMenuItem *menuitem,
   dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
 
-static GtkMenu *_lens_menu_fill(dt_iop_module_t *self,
+static GMenu *_lens_menu_fill(dt_iop_module_t *self,
                                 const lfLens *const *lenslist)
 {
-  GtkMenu *lens_menu = GTK_MENU(gtk_menu_new());
+  GMenu *lens_menu = g_menu_new();
 
   /* Count all existing lens makers and create a sorted list */
   GPtrArray *makers = g_ptr_array_new();
   GPtrArray *submenus = g_ptr_array_new();
   for(unsigned i = 0; lenslist[i]; i++)
   {
-    GtkWidget *submenu, *item;
+    GMenuItem *item;
+    GMenu *submenu;
     const char *m = lf_mlstr_get(lenslist[i]->Maker);
     int idx = _ptr_array_find_sorted(makers, m, (GCompareFunc)g_utf8_collate);
     if(idx < 0)
@@ -4653,28 +4584,27 @@ static GtkMenu *_lens_menu_fill(dt_iop_module_t *self,
       /* No such maker yet, insert it into the array */
       idx = _ptr_array_insert_sorted(makers, m, (GCompareFunc)g_utf8_collate);
       /* Create a submenu for lenses by this maker */
-      submenu = gtk_menu_new();
+      submenu = g_menu_new();
       _ptr_array_insert_index(submenus, submenu, idx);
     }
 
-    submenu = (GtkWidget *)g_ptr_array_index(submenus, idx);
+    submenu = (GMenu *)g_ptr_array_index(submenus, idx);
     /* Append current lens name to the submenu */
-    item = gtk_menu_item_new_with_label(lf_mlstr_get(lenslist[i]->Model));
-    gtk_widget_show(item);
-    g_object_set_data(G_OBJECT(item), "lfLens", (void *)lenslist[i]);
-    g_signal_connect(G_OBJECT(item), "activate",
-                     G_CALLBACK(_lens_menu_select), self);
-    gtk_menu_shell_append(GTK_MENU_SHELL(submenu), item);
+    item = g_menu_item_new(lf_mlstr_get(lenslist[i]->Model), NULL);
+    g_menu_item_set_action_and_target_value(item,
+                                            "lens.activate",
+                                            g_variant_new("t", (guintptr)lenslist[i]));
+    g_menu_append_item(submenu, item);    
+    g_object_unref(item);
   }
 
+  // create the submenus for the makers
   for(unsigned i = 0; i < makers->len; i++)
   {
-    GtkWidget *item = gtk_menu_item_new_with_label
-      ((const gchar *)g_ptr_array_index(makers, i));
-    gtk_widget_show(item);
-    gtk_menu_shell_append(GTK_MENU_SHELL(lens_menu), item);
-    gtk_menu_item_set_submenu(GTK_MENU_ITEM(item),
-                              (GtkWidget *)g_ptr_array_index(submenus, i));
+    GMenuItem *item = g_menu_item_new_submenu((const gchar *)g_ptr_array_index(makers, i),
+                                              G_MENU_MODEL(g_ptr_array_index(submenus, i)));
+    g_menu_append_item(lens_menu, item);
+    g_object_unref(item);
   }
 
   g_ptr_array_free(submenus, TRUE);
@@ -4682,14 +4612,38 @@ static GtkMenu *_lens_menu_fill(dt_iop_module_t *self,
   return lens_menu;
 }
 
-static void _lens_menusearch_clicked(GtkWidget *button, dt_iop_module_t *self)
+static void _set_lens_action_group(GtkWidget *button,
+                                   dt_iop_module_t *self)
 {
+  GActionGroup *action_group = gtk_widget_get_action_group(button, "lens");
+  if(action_group == NULL)
+  {
+    GActionEntry action_entries[] =
+    {
+      { "activate", _lens_menu_select, "t", NULL }
+    };
+
+    action_group = G_ACTION_GROUP(g_simple_action_group_new());
+    g_action_map_add_action_entries(G_ACTION_MAP(action_group),
+                                    action_entries,
+                                    G_N_ELEMENTS(action_entries),
+                                    self);
+    gtk_widget_insert_action_group(button,
+                                   "lens",
+                                   G_ACTION_GROUP(action_group));
+    g_object_unref(action_group);
+  }
+}
+
+static void _lens_menusearch_clicked(GtkWidget *button,
+                                     dt_iop_module_t *self)
+{
+  _set_lens_action_group(button, self);
+
   dt_iop_lens_global_data_t *gd = (dt_iop_lens_global_data_t *)self->global_data;
   lfDatabase *dt_iop_lensfun_db = (lfDatabase *)gd->db;
   dt_iop_lens_gui_data_t *g = (dt_iop_lens_gui_data_t *)self->gui_data;
   const lfLens **lenslist;
-
-  (void)button;
 
   dt_pthread_mutex_lock(&darktable.plugin_threadsafe);
   lenslist = dt_iop_lensfun_db->FindLenses(g->camera, NULL, NULL,
@@ -4697,23 +4651,24 @@ static void _lens_menusearch_clicked(GtkWidget *button, dt_iop_module_t *self)
   dt_pthread_mutex_unlock(&darktable.plugin_threadsafe);
 
   if(!lenslist) return;
-  GtkMenu *menu = _lens_menu_fill(self, lenslist);
+  GMenu *menu = _lens_menu_fill(self, lenslist);
   lf_free(lenslist);
 
-  // dt_gui_menu_popup unrefs the menu
-  dt_gui_menu_popup(menu, button, GDK_GRAVITY_SOUTH, GDK_GRAVITY_NORTH);
+  GtkWidget *popover_menu = dt_gui_popover_menu_from_model(button, menu);
+  g_object_unref(menu);
+  gtk_popover_popup(GTK_POPOVER(popover_menu));
 }
 
 static void _lens_autosearch_clicked(GtkWidget *button, dt_iop_module_t *self)
 {
+  _set_lens_action_group(button, self);
+
   dt_iop_lens_global_data_t *gd = (dt_iop_lens_global_data_t *)self->global_data;
   lfDatabase *dt_iop_lensfun_db = (lfDatabase *)gd->db;
   dt_iop_lens_gui_data_t *g = (dt_iop_lens_gui_data_t *)self->gui_data;
   const lfLens **lenslist;
   char model[200];
   const gchar *txt = ((dt_iop_lens_params_t *)self->default_params)->lens;
-
-  (void)button;
 
   _parse_model(txt, model, sizeof(model));
   dt_pthread_mutex_lock(&darktable.plugin_threadsafe);
@@ -4722,11 +4677,12 @@ static void _lens_autosearch_clicked(GtkWidget *button, dt_iop_module_t *self)
                                            LF_SEARCH_SORT_AND_UNIQUIFY);
   dt_pthread_mutex_unlock(&darktable.plugin_threadsafe);
   if(!lenslist) return;
-  GtkMenu *menu = _lens_menu_fill(self, lenslist);
+  GMenu *menu = _lens_menu_fill(self, lenslist);
   lf_free(lenslist);
 
-  // dt_gui_menu_popup unrefs the menu
-  dt_gui_menu_popup(menu, button, GDK_GRAVITY_SOUTH_EAST, GDK_GRAVITY_NORTH_EAST);
+  GtkWidget *popover_menu = dt_gui_popover_menu_from_model(button, menu);
+  g_object_unref(menu);
+  gtk_popover_popup(GTK_POPOVER(popover_menu));
 }
 
 /* -- end lens -- */
@@ -4748,22 +4704,35 @@ static void _display_errors(dt_iop_module_t *self)
   dt_iop_lens_gui_data_t *g = (dt_iop_lens_gui_data_t *)self->gui_data;
   dt_iop_lens_params_t *p = (dt_iop_lens_params_t *)self->params;
 
-  if(g->lensfun_trouble
+  g->shading_warned = _shading_overcorrected(self);
+
+  if(g->shading_warned)
+  {
+    dt_iop_set_module_trouble_message(self,
+       _("vignetting may be overcorrected"),
+       _("the camera's shading compensation already corrected vignetting\n"
+         "in the raw data, and Lensfun corrects it again on top of that,\n"
+         "possibly brightening the corners\n"
+         "leave vignetting out of the corrections, or turn shading\n"
+         "compensation off in the camera for future shots"),
+       "");
+  }
+  else if(g->lensfun_trouble
      && self->enabled
      && p->method == DT_IOP_LENS_METHOD_LENSFUN)
   {
-    dt_iop_set_module_trouble_message
-      (self, _("camera/lens not found"),
+    dt_iop_set_module_trouble_message(self,
+       _("camera/lens not found"),
        _("pick a camera or lens from the buttons below --\n"
          "the lens button lists the whole database when the body is unknown\n"
          "scale, target geometry and the TCA override work without a profile\n"
          "you might also want to check if your Lensfun database is up-to-date\n"
          "by running lensfun-update-data"),
-       "camera/lens not found");
+       "");
   }
   else
   {
-    dt_iop_set_module_trouble_message(self, NULL, NULL, NULL);
+    dt_iop_clear_module_trouble_message(self);
   }
 
   gtk_widget_queue_draw(self->widget);
@@ -4874,12 +4843,11 @@ static void _have_corrections_done(gpointer instance, dt_iop_module_t *self)
 
   gtk_label_set_text(g->message, Q_(message));
   gtk_widget_set_tooltip_text(GTK_WIDGET(g->message), Q_(message));
-}
 
-static void _develop_ui_pipe_finished_callback(gpointer instance,
-                                               dt_iop_module_t *self)
-{
-  _display_errors(self);
+  // the shading compensation warning depends on what the preview applied.
+  // only on a change: every trouble message is also printed to stderr
+  if(_shading_overcorrected(self) != g->shading_warned)
+    _display_errors(self);
 }
 
 static void _visualize_callback(GtkWidget *quad,
@@ -4887,15 +4855,17 @@ static void _visualize_callback(GtkWidget *quad,
 {
   DT_GUARD_GUI_UPDATE();
   dt_iop_lens_gui_data_t *g = (dt_iop_lens_gui_data_t *)self->gui_data;
+
+  dt_iop_gui_enter_critical_section(self);
   g->vig_masking = dt_bauhaus_widget_get_quad_active(quad);
+  dt_iop_gui_leave_critical_section(self);
+
   dt_dev_reprocess_center(self->dev, self->iop_order);
 }
 
 void gui_init(dt_iop_module_t *self)
 {
   dt_iop_lens_gui_data_t *g = IOP_GUI_ALLOC(lens);
-
-  DT_CONTROL_SIGNAL_HANDLE(DT_SIGNAL_DEVELOP_UI_PIPE_FINISHED, _develop_ui_pipe_finished_callback);
 
   dt_iop_gui_enter_critical_section(self); // not actually needed,
                                            // we're the only one with
@@ -5141,9 +5111,12 @@ void gui_focus(dt_iop_module_t *self, gboolean in)
   dt_iop_lens_gui_data_t *g = (dt_iop_lens_gui_data_t *)self->gui_data;
   if(!in)
   {
+    dt_iop_gui_enter_critical_section(self);
     const gboolean was_visualize = g->vig_masking;
     dt_bauhaus_widget_set_quad_active(g->v_strength, FALSE);
     g->vig_masking = FALSE;
+    dt_iop_gui_leave_critical_section(self);
+
     if(was_visualize)
       dt_dev_reprocess_center(self->dev, self->iop_order);
   }
@@ -5167,6 +5140,10 @@ void gui_update(dt_iop_module_t *self)
     memcpy(self->params, self->default_params, sizeof(dt_iop_lens_params_t));
     p->method = _get_method(self, method);
   }
+
+  // the GUI handlers read the stored camera and lens names as C strings
+  p->camera[sizeof(p->camera) - 1] = '\0';
+  p->lens[sizeof(p->lens) - 1] = '\0';
 
   dt_iop_lens_global_data_t *gd = (dt_iop_lens_global_data_t *)self->global_data;
   lfDatabase *dt_iop_lensfun_db = (lfDatabase *)gd->db;

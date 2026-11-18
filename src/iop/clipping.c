@@ -34,7 +34,6 @@
 #include "gui/presets.h"
 #include "iop/iop_api.h"
 
-#include <assert.h>
 #include <gdk/gdkkeysyms.h>
 #include <gtk/gtk.h>
 #include <inttypes.h>
@@ -2136,6 +2135,7 @@ void gui_init(dt_iop_module_t *self)
                                          { _("golden cut"), 16180340, 10000000 },
                                          { _("16:9, HDTV"), 16, 9 },
                                          { _("widescreen"), 185, 100 },
+                                         { _("1.91:1"), 1080, 566 },
                                          { _("2:1, univisium"), 2, 1 },
                                          { _("cinemascope"), 235, 100 },
                                          { _("21:9"), 237, 100 },
@@ -2305,7 +2305,7 @@ static void gui_draw_sym(cairo_t *cr, const float x, const float y, const float 
 {
   PangoLayout *layout;
   PangoRectangle ink;
-  PangoFontDescription *desc = pango_font_description_copy_static(darktable.bauhaus->pango_font_desc);
+  PangoFontDescription *desc = dt_gui_get_font();
   pango_font_description_set_weight(desc, PANGO_WEIGHT_BOLD);
   pango_font_description_set_absolute_size(desc, DT_PIXEL_APPLY_DPI(16) * PANGO_SCALE * scale);
   layout = pango_cairo_create_layout(cr);
@@ -2327,6 +2327,11 @@ static void gui_draw_sym(cairo_t *cr, const float x, const float y, const float 
 }
 
 // draw guides and handles over the image
+gboolean canvas_overlay_active(dt_iop_module_t *self)
+{
+  return TRUE;
+}
+
 void gui_post_expose(dt_iop_module_t *self,
                      cairo_t *cr,
                      const float wd,
@@ -2373,7 +2378,7 @@ void gui_post_expose(dt_iop_module_t *self,
     dimensions[0] = '\0';
     PangoLayout *layout;
     PangoRectangle ext;
-    PangoFontDescription *desc = pango_font_description_copy_static(darktable.bauhaus->pango_font_desc);
+    PangoFontDescription *desc = dt_gui_get_font();
     pango_font_description_set_weight(desc, PANGO_WEIGHT_BOLD);
     pango_font_description_set_absolute_size(desc, DT_PIXEL_APPLY_DPI(16) * PANGO_SCALE / zoom_scale);
     layout = pango_cairo_create_layout(cr);
@@ -2417,7 +2422,7 @@ void gui_post_expose(dt_iop_module_t *self,
   {
     PangoRectangle ink;
     PangoLayout *layout;
-    PangoFontDescription *desc = pango_font_description_copy_static(darktable.bauhaus->pango_font_desc);
+    PangoFontDescription *desc = dt_gui_get_font();
     pango_font_description_set_weight(desc, PANGO_WEIGHT_BOLD);
     pango_font_description_set_absolute_size(desc, DT_PIXEL_APPLY_DPI(16) * PANGO_SCALE / zoom_scale);
     layout = pango_cairo_create_layout(cr);
@@ -2658,7 +2663,7 @@ void gui_post_expose(dt_iop_module_t *self,
       // draw the apply "button"
       PangoLayout *layout;
       PangoRectangle ink;
-      PangoFontDescription *desc = pango_font_description_copy_static(darktable.bauhaus->pango_font_desc);
+      PangoFontDescription *desc = dt_gui_get_font();
       pango_font_description_set_weight(desc, PANGO_WEIGHT_BOLD);
       pango_font_description_set_absolute_size(desc, DT_PIXEL_APPLY_DPI(16) * PANGO_SCALE);
       layout = pango_cairo_create_layout(cr);
@@ -2747,7 +2752,7 @@ int mouse_moved(dt_iop_module_t *self,
   else if(darktable.control->button_down && darktable.control->button_down_which == 1)
   {
     // case when we drag a point for keystone
-    if(g->k_drag == TRUE && g->k_selected >= 0)
+    if(g->k_drag && g->k_selected >= 0)
     {
       float pts[2] = { pzx * wd, pzy * ht };
       dt_dev_distort_backtransform_plus(self->dev, self->dev->preview_pipe, self->iop_order, DT_DEV_TRANSFORM_DIR_FORW_EXCL, pts, 1);
@@ -2802,7 +2807,7 @@ int mouse_moved(dt_iop_module_t *self,
     }
 
     // case when we drag a segment for keystone
-    if(g->k_drag == TRUE && g->k_selected_segment >= 0)
+    if(g->k_drag && g->k_selected_segment >= 0)
     {
       float decalx = pzx - g->button_down_zoom_x;
       float decaly = pzy - g->button_down_zoom_y;

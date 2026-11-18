@@ -25,7 +25,6 @@
 #include "common/matrices.h"
 #include "control/control.h"
 #include "develop/develop.h"
-#include "develop/blend.h"
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
 #include "gui/accelerators.h"
@@ -35,14 +34,11 @@
 #include "gui/presets.h"
 #include "iop/iop_api.h"
 #include <gtk/gtk.h>
-#include <float.h>
-#include <gmodule.h>
-#include <limits.h>
 #include <math.h>
 #include <pango/pangocairo.h>
 #include <stdlib.h>
 
-DT_MODULE_INTROSPECTION(7, dt_iop_agx_params_t)
+DT_MODULE_INTROSPECTION(8, dt_iop_agx_params_t)
 
 const char *name()
 {
@@ -67,7 +63,7 @@ const char **description(dt_iop_module_t *self)
 
 int flags()
 {
-  return IOP_FLAGS_INCLUDE_IN_STYLES | IOP_FLAGS_SUPPORTS_BLENDING;
+  return IOP_FLAGS_INCLUDE_IN_STYLES | IOP_FLAGS_SUPPORTS_BLENDING | IOP_FLAGS_ALLOW_TILING;
 }
 
 int default_group()
@@ -156,6 +152,10 @@ typedef struct dt_iop_agx_params_t
 
   // v5
   gboolean completely_reverse_primaries; // $DEFAULT: FALSE $DESCRIPTION: "reverse all"
+
+  // v8
+  gboolean target_white_from_output; // $DEFAULT: TRUE $DESCRIPTION: "follow output peak"
+  float hdr_purity;                  // $MIN: 0.f $MAX: 1.f $DEFAULT: 0.5f $DESCRIPTION: "HDR purity"
 } dt_iop_agx_params_t;
 
 typedef struct dt_iop_basic_curve_controls_t
@@ -172,7 +172,12 @@ typedef struct dt_iop_agx_gui_data_t
   GtkNotebook *notebook;
   GtkWidget *auto_gamma;
   GtkWidget *curve_gamma;
+  GtkWidget *target_white_from_output;
+  GtkWidget *hdr_purity;
   GtkDrawingArea *graph_drawing_area;
+
+  // the darkroom full pipe's headroom, see _ui_pipe_finished()
+  float output_headroom;
 
   dt_gui_collapsible_section_t look_section;
   dt_gui_collapsible_section_t graph_section;
@@ -204,6 +209,19 @@ typedef struct dt_iop_agx_gui_data_t
   GtkWidget *post_curve_primaries_controls_vbox;
   GtkWidget *set_post_curve_primaries_from_pre_button;
 } dt_iop_agx_gui_data_t;
+
+// HDR output, see _set_hdr_params()
+typedef struct hdr_params_t
+{
+  gboolean enabled;
+  float headroom;
+  float purity;
+  float log_min;
+  float pivot_x;
+  float pivot_y;
+  float toe_scale;
+  float shoulder_scale;
+} hdr_params_t;
 
 typedef struct tone_mapping_params_t
 {
@@ -253,6 +271,8 @@ typedef struct tone_mapping_params_t
   float look_original_hue_mix_ratio;
   gboolean look_tuned;
   gboolean restore_hue;
+
+  hdr_params_t hdr;
 } tone_mapping_params_t;
 
 typedef struct primaries_params_t
@@ -273,6 +293,8 @@ typedef struct dt_iop_agx_data_t
 {
   tone_mapping_params_t tone_mapping_params;
   primaries_params_t primaries_params;
+  // to rebuild the curve for the output headroom, only known at process time
+  dt_iop_agx_params_t params;
 } dt_iop_agx_data_t;
 
 static void _set_scene_referred_default_params(dt_iop_agx_params_t *p);
@@ -294,6 +316,21 @@ int legacy_params(dt_iop_module_t *self,
     *new_params = np;
     *new_params_size = sizeof(dt_iop_agx_params_t);
     *new_version = self->so->version(); // SPECIAL CASE: jump directly to latest version
+
+    return 0;
+  }
+
+  if(old_version == 7)
+  {
+    dt_iop_agx_params_t *np = calloc(1, sizeof(dt_iop_agx_params_t));
+    memcpy(np, old_params, offsetof(dt_iop_agx_params_t, target_white_from_output));
+    // existing edits keep their white at the reference white and do not
+    // follow the output's peak, so that they render as before
+    np->target_white_from_output = FALSE;
+    np->hdr_purity = 0.5f;
+    *new_params = np;
+    *new_params_size = sizeof(dt_iop_agx_params_t);
+    *new_version = 8;
 
     return 0;
   }
@@ -545,12 +582,15 @@ static inline float _line(const float x,
   // the actual 'rise' the curve needs to cover.
   const float actual_rise = fmaxf(_epsilon, limit_y - transition_y);
 
-  const float transformed_projected_rise = powf(projected_rise, -power);
-  const float transformed_actual_rise = powf(actual_rise, -power);
+  // in double: when the pivot reaches target white, the rise is clamped to
+  // _epsilon and powf() overflows to inf for powers above about 6.4, which
+  // gives a zero scale and NaN in _scaled_sigmoid()
+  const double transformed_projected_rise = pow(projected_rise, -power);
+  const double transformed_actual_rise = pow(actual_rise, -power);
 
-  const float base = fmaxf(_epsilon, transformed_actual_rise - transformed_projected_rise);
+  const double base = fmax(_epsilon, transformed_actual_rise - transformed_projected_rise);
 
-  const float scale_value = powf(base, -1.f / power);
+  const float scale_value = pow(base, -1.0 / power);
 
   // avoid 'explosions'
   return fminf(1e9f, scale_value);
@@ -783,23 +823,26 @@ static inline float _calculate_pivot_y_at_gamma(const dt_iop_agx_params_t * p,
               1.f / gamma);
 }
 
+static float _calculate_auto_gamma(const dt_iop_agx_params_t *p, const float pivot_x)
+{
+  if(!p->auto_gamma)
+    return p->curve_gamma;
+
+  const float gamma =
+    pivot_x > 0.f && p->curve_pivot_y_linear_output > 0.f
+    ? log2f(p->curve_pivot_y_linear_output) / log2f(pivot_x)
+    : p->curve_gamma;
+
+  return CLAMPF(gamma, 0.01f, 100.f);
+}
+
 static void _adjust_pivot(const dt_iop_agx_params_t *p,
                           tone_mapping_params_t *tone_mapping_params)
 {
   // don't allow pivot_x to touch the endpoints
   tone_mapping_params->pivot_x = CLAMPF(p->curve_pivot_x, _epsilon, 1.f - _epsilon);
 
-  if(p->auto_gamma)
-  {
-    tone_mapping_params->curve_gamma =
-      tone_mapping_params->pivot_x > 0.f && p->curve_pivot_y_linear_output > 0.f
-      ? log2f(p->curve_pivot_y_linear_output) / log2f(tone_mapping_params->pivot_x)
-      : p->curve_gamma;
-  }
-  else
-  {
-    tone_mapping_params->curve_gamma = p->curve_gamma;
-  }
+  tone_mapping_params->curve_gamma = _calculate_auto_gamma(p, tone_mapping_params->pivot_x);
 
   tone_mapping_params->pivot_y = _calculate_pivot_y_at_gamma(p, tone_mapping_params->curve_gamma);
 }
@@ -840,7 +883,8 @@ static inline float _calculate_slope_gamma_compensation(const float gamma,
 
 static tone_mapping_params_t _calculate_tone_mapping_params(const dt_iop_agx_params_t *p)
 {
-  tone_mapping_params_t tone_mapping_params;
+  tone_mapping_params_t tone_mapping_params = { 0 };
+  tone_mapping_params.hdr.headroom = 1.f;
 
   // look
   tone_mapping_params.look_lift = p->look_lift;
@@ -961,6 +1005,53 @@ static tone_mapping_params_t _calculate_tone_mapping_params(const dt_iop_agx_par
   return tone_mapping_params;
 }
 
+// Blender's AgX HDR (AgXHLG.py in github.com/EaryChow/AgX_LUT_Gen) darkens
+// the linear curve output with a second sigmoid in log2 space: 20 EV below
+// the pivot up to 1.0, the peak, maps to [0, 1]. It moves the pivot output
+// down by the headroom, so the pivot keeps its SDR brightness, with slope 1
+// and power 3 below it and power 1 above it
+static void _set_hdr_params(hdr_params_t *hdr,
+                            const dt_iop_agx_params_t *p,
+                            const float headroom)
+{
+  const float pivot = CLAMPF(p->curve_pivot_y_linear_output, _epsilon, 0.99f);
+
+  hdr->enabled = TRUE;
+  hdr->headroom = headroom;
+  hdr->purity = p->hdr_purity;
+  hdr->log_min = log2f(pivot) - 20.f;
+  hdr->pivot_x = 1.f - log2f(pivot) / hdr->log_min;
+  hdr->pivot_y = 1.f - log2f(pivot / headroom) / hdr->log_min;
+  hdr->toe_scale = -_scale(1.f, 1.f, 1.f - hdr->pivot_x, 1.f - hdr->pivot_y, 1.f, 3.f);
+  // _scale() cannot give the negative scale of a convex segment: with
+  // power 1 the shoulder is the hyperbola through the pivot and (1, 1)
+  const float dx = 1.f - hdr->pivot_x;
+  const float dy = 1.f - hdr->pivot_y;
+  hdr->shoulder_scale = -dx * dy / (dy - dx);
+}
+
+// when following the output, the curve's output, target white included,
+// is relative to the output's peak, and HDR output gets a harder shoulder
+// and _agx_hdr(), as in Blender's AgX HDR. SDR output is unchanged
+static tone_mapping_params_t _pipe_tone_mapping_params(const dt_iop_agx_params_t *p,
+                                                       const float headroom)
+{
+  if(!p->target_white_from_output)
+    return _calculate_tone_mapping_params(p);
+
+  const float hdr_headroom = fmaxf(1.f, headroom);
+  dt_iop_agx_params_t pipe_p = *p;
+  // capped at the slider's maximum: well above it, powf() in _sigmoid()
+  // overflows, e.g. for a high pivot target and the highest PQ peaks
+  pipe_p.curve_shoulder_power = fminf(pipe_p.curve_shoulder_power
+                                      * powf(hdr_headroom, log10f(2.f)), 10.f);
+
+  tone_mapping_params_t tone_mapping_params = _calculate_tone_mapping_params(&pipe_p);
+  if(hdr_headroom > 1.f)
+    _set_hdr_params(&tone_mapping_params.hdr, &pipe_p, hdr_headroom);
+  return tone_mapping_params;
+}
+
 static primaries_params_t _get_primaries_params(const dt_iop_agx_params_t *p)
 {
   primaries_params_t primaries_params;
@@ -1022,10 +1113,10 @@ static void _update_pivot_slider_settings(GtkWidget* const slider,
   DT_LEAVE_GUI_UPDATE();
 }
 
-/* Keep the parameter transformation independent of the desktop slider. */
-static void _update_pivot_x(const float old_black_ev, const float old_white_ev,
-                            dt_iop_agx_params_t *const p)
+static void _update_pivot_x(const float old_black_ev, const float old_white_ev, dt_iop_module_t *self, dt_iop_agx_params_t *const p)
 {
+  const dt_iop_agx_gui_data_t *g = self->gui_data;
+
   const float new_black_ev = p->range_black_relative_ev;
   const float new_white_ev = p->range_white_relative_ev;
   const float new_range = new_white_ev - new_black_ev;
@@ -1039,33 +1130,60 @@ static void _update_pivot_x(const float old_black_ev, const float old_white_ev,
 
   // new_range is ensured to be > 0 due to hard limits on sliders
   p->curve_pivot_x = (clamped_pivot_ev - new_black_ev) / new_range;
-}
 
-static void _update_pivot_x_and_slider(const float old_black_ev, const float old_white_ev,
-                                      dt_iop_module_t *self, dt_iop_agx_params_t *const p)
-{
-  _update_pivot_x(old_black_ev, old_white_ev, p);
-  const dt_iop_agx_gui_data_t *g = self->gui_data;
-  if(g) _update_pivot_slider_settings(g->basic_curve_controls.curve_pivot_x, p);
-}
-
-static void _adjust_relative_exposure(const float exposure, dt_iop_agx_params_t *const p)
-{
-  const float old_black_ev = p->range_black_relative_ev;
-  const float old_white_ev = p->range_white_relative_ev;
-  p->range_black_relative_ev = CLAMPF((-8.f + 0.5f * exposure) * (1.f + p->dynamic_range_scaling), -20.f, -0.1f);
-  p->range_white_relative_ev = CLAMPF((4.f + 0.8 * exposure) * (1.f + p->dynamic_range_scaling), 0.1f, 20.f);
-  _update_pivot_x(old_black_ev, old_white_ev, p);
+  _update_pivot_slider_settings(g->basic_curve_controls.curve_pivot_x, p);
 }
 
 static void _adjust_relative_exposure_from_exposure_params(dt_iop_module_t *self)
 {
   dt_iop_agx_params_t *p = self->params;
 
+  const float old_black_ev = p->range_black_relative_ev;
+  const float old_white_ev = p->range_white_relative_ev;
+
   const float exposure = dt_dev_exposure_get_effective_exposure(self->dev);
-  _adjust_relative_exposure(exposure, p);
-  const dt_iop_agx_gui_data_t *g = self->gui_data;
-  if(g) _update_pivot_slider_settings(g->basic_curve_controls.curve_pivot_x, p);
+
+  p->range_black_relative_ev = CLAMPF((-8.f + 0.5f * exposure) * (1.f + p->dynamic_range_scaling), -20.f, -0.1f);
+  p->range_white_relative_ev = CLAMPF((4.f + 0.8 * exposure) * (1.f + p->dynamic_range_scaling), 0.1f, 20.f);
+
+  _update_pivot_x(old_black_ev, old_white_ev, self, p);
+}
+
+// x is linear, relative to the peak
+static inline float _hdr_darken(const float x,
+                                const hdr_params_t *hdr)
+{
+  const float log_x = CLIP(1.f - log2f(fmaxf(x, 1e-12f)) / hdr->log_min);
+  const float u = log_x - hdr->pivot_x;
+  const float log_y =
+    u < 0.f
+    ? _scaled_sigmoid(log_x, hdr->toe_scale, 1.f, 3.f,
+                      hdr->pivot_x, hdr->pivot_y)
+    : hdr->pivot_y
+      + hdr->shoulder_scale * u / (hdr->shoulder_scale + u);
+  return x > 0.f ? exp2f(hdr->log_min * (1.f - log_y)) : 0.f;
+}
+
+static inline void _agx_hdr(dt_aligned_pixel_t pixel_in_out,
+                            const hdr_params_t *hdr)
+{
+  dt_aligned_pixel_t hsv_before = { 0.f };
+  dt_aligned_pixel_t hsv_after = { 0.f };
+  dt_aligned_pixel_t darkened = { 0.f };
+
+  dt_RGB_2_HSV(pixel_in_out, hsv_before);
+  for_three_channels(k, aligned(pixel_in_out, darkened : 16))
+    darkened[k] = _hdr_darken(pixel_in_out[k], hdr);
+  dt_RGB_2_HSV(darkened, hsv_after);
+
+  // keep part of the hue and saturation shift of the per-channel darkening
+  hsv_after[0] = _lerp_hue(hsv_before[0], hsv_after[0], 1.f - hdr->purity);
+  hsv_after[1] = hsv_before[1] + hdr->purity * (hsv_after[1] - hsv_before[1]);
+  dt_HSV_2_RGB(hsv_after, darkened);
+
+  // back to 1.0 = reference white
+  for_three_channels(k, aligned(pixel_in_out, darkened : 16))
+    pixel_in_out[k] = hdr->headroom * darkened[k];
 }
 
 static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out,
@@ -1095,6 +1213,9 @@ static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out,
     transformed_pixel[k] = powf(fmaxf(0.f, transformed_pixel[k]), params->curve_gamma);
   }
 
+  if(params->hdr.enabled)
+    _agx_hdr(transformed_pixel, &params->hdr);
+
   // get post-curve chroma angle
   if(params->restore_hue)
   {
@@ -1112,6 +1233,16 @@ static void _agx_tone_mapping(dt_aligned_pixel_t rgb_in_out,
   {
     copy_pixel(rgb_in_out, transformed_pixel);
   }
+}
+
+// the curve, plus the darkening of HDR output, gamma-encoded and relative to the peak
+static float _rendered_curve(const float x,
+                             const tone_mapping_params_t *params)
+{
+  const float y = _apply_curve(x, params);
+  return params->hdr.enabled
+    ? powf(_hdr_darken(powf(y, params->curve_gamma), &params->hdr), 1.f / params->curve_gamma)
+    : y;
 }
 
 static void _apply_auto_black_exposure(const dt_iop_module_t *self)
@@ -1176,6 +1307,10 @@ static void _read_exposure_params_callback(GtkWidget *widget,
   if(g)
   {
     _adjust_relative_exposure_from_exposure_params(self);
+    dt_iop_agx_params_t *p = self->params;
+    const float pivot_x = CLAMPF(p->curve_pivot_x, _epsilon, 1.f - _epsilon);
+    p->curve_gamma = _calculate_auto_gamma(p, pivot_x);
+
     dt_iop_gui_update(self);
     dt_dev_add_history_item(darktable.develop, self, TRUE);
   }
@@ -1195,6 +1330,8 @@ static void _apply_auto_pivot_xy(dt_iop_module_t *self, const dt_iop_order_iccpr
   const float range = p->range_white_relative_ev - p->range_black_relative_ev;
   const float picked_pivot_x = (picked_ev - p->range_black_relative_ev) / range;
 
+  // the SDR curve, also with HDR output: pivot target output is an SDR
+  // value, and the pick must not depend on the display it was made on
   const tone_mapping_params_t tone_mapping_params =
      _calculate_tone_mapping_params(p);
 
@@ -1385,6 +1522,9 @@ void process(dt_iop_module_t *self,
   rendering_profile.nonlinearlut = FALSE; // no LUT for this linear transform
 
   const gboolean base_working_same_profile = pipe_work_profile == base_profile;
+  const tone_mapping_params_t tone_mapping_params = d->params.target_white_from_output
+    ? _pipe_tone_mapping_params(&d->params, piece->pipe->output_headroom)
+    : d->tone_mapping_params;
 
   DT_OMP_FOR()
   for(size_t k = 0; k < 4 * n_pixels; k += 4)
@@ -1416,7 +1556,7 @@ void process(dt_iop_module_t *self,
     dt_apply_transposed_color_matrix(base_rgb, base_to_rendering_transposed, rendering_rgb);
 
     // Apply the tone mapping curve and look adjustments
-    _agx_tone_mapping(rendering_rgb, &d->tone_mapping_params,
+    _agx_tone_mapping(rendering_rgb, &tone_mapping_params,
                       rendering_profile.matrix_in_transposed);
 
     // Convert from internal rendering space back to pipe working space
@@ -1434,14 +1574,16 @@ static gboolean _agx_draw_curve(GtkWidget *widget,
   const dt_iop_agx_params_t *p = self->params;
   dt_iop_agx_gui_data_t *g = self->gui_data;
 
-  const tone_mapping_params_t tone_mapping_params = _calculate_tone_mapping_params(p);
+  // draw the curve the center view renders
+  const tone_mapping_params_t tone_mapping_params =
+    _pipe_tone_mapping_params(p, g->output_headroom);
 
   gtk_widget_get_allocation(widget, &g->allocation);
   g->allocation.height -= DT_RESIZE_HANDLE_SIZE;
 
   cairo_surface_t *cst = dt_cairo_image_surface_create(CAIRO_FORMAT_ARGB32, g->allocation.width,
                                                        g->allocation.height);
-  PangoFontDescription *desc = pango_font_description_copy_static(darktable.bauhaus->pango_font_desc);
+  PangoFontDescription *desc = dt_gui_get_font();
   cairo_t *cr = cairo_create(cst);
   PangoLayout *layout = pango_cairo_create_layout(cr);
 
@@ -1537,7 +1679,8 @@ static gboolean _agx_draw_curve(GtkWidget *widget,
     cairo_identity_matrix(cr);                  // Reset transformations for text
     set_color(cr, darktable.bauhaus->graph_fg); // Use standard text color
 
-    snprintf(text, sizeof(text), "%.0f%%", 100.0f * y_linear); // Format the linear value
+    // the top of the graph is the peak, so HDR output labels it above 100%
+    snprintf(text, sizeof(text), "%.0f%%", 100.0f * y_linear * tone_mapping_params.hdr.headroom);
     pango_layout_set_text(layout, text, -1);
     pango_layout_get_pixel_extents(layout, &g->ink, NULL);
 
@@ -1621,11 +1764,11 @@ static gboolean _agx_draw_curve(GtkWidget *widget,
   const int steps = 200;
 
   // draw the main curve
-  cairo_move_to(cr, 0, _apply_curve(0, &tone_mapping_params) * graph_height);
+  cairo_move_to(cr, 0, _rendered_curve(0, &tone_mapping_params) * graph_height);
   for(int k = 1; k <= steps; k++)
   {
     const float x_norm = (float)k / steps;
-    const float y_norm = _apply_curve(x_norm, &tone_mapping_params);
+    const float y_norm = _rendered_curve(x_norm, &tone_mapping_params);
     cairo_line_to(cr, x_norm * graph_width, y_norm * graph_height);
   }
   cairo_stroke(cr);
@@ -1635,11 +1778,11 @@ static gboolean _agx_draw_curve(GtkWidget *widget,
   {
     cairo_set_source_rgb(cr, 0.75, .5, 0.);
     const int toe_end_step = ceilf(tone_mapping_params.toe_transition_x * steps);
-    cairo_move_to(cr, 0, _apply_curve(0, &tone_mapping_params) * graph_height);
+    cairo_move_to(cr, 0, _rendered_curve(0, &tone_mapping_params) * graph_height);
     for(int k = 1; k <= toe_end_step; k++)
     {
       const float x_norm = (float)k / steps;
-      const float y_norm = _apply_curve(x_norm, &tone_mapping_params);
+      const float y_norm = _rendered_curve(x_norm, &tone_mapping_params);
       cairo_line_to(cr, x_norm * graph_width, y_norm * graph_height);
     }
     cairo_stroke(cr);
@@ -1650,18 +1793,18 @@ static gboolean _agx_draw_curve(GtkWidget *widget,
     cairo_set_source_rgb(cr, 0.75, .5, 0.);
     const int shoulder_start_step = floorf(tone_mapping_params.shoulder_transition_x * steps);
     float x_norm = (float)shoulder_start_step / steps;
-    float y_norm = _apply_curve(x_norm, &tone_mapping_params);
+    float y_norm = _rendered_curve(x_norm, &tone_mapping_params);
     cairo_move_to(cr, x_norm * graph_width, y_norm * graph_height);
     for(int k = shoulder_start_step + 1; k <= steps; k++)
     {
       x_norm = (float)k / steps;
-      y_norm = _apply_curve(x_norm, &tone_mapping_params);
+      y_norm = _rendered_curve(x_norm, &tone_mapping_params);
       cairo_line_to(cr, x_norm * graph_width, y_norm * graph_height);
     }
     cairo_stroke(cr);
   }
 
-  // draw the toe start, shoulder start, pivot
+  // draw the toe start, shoulder start, pivot, on the curve as rendered
   cairo_save(cr);
   // restore line width and color for points
   cairo_set_line_width(cr, line_width);
@@ -1673,21 +1816,24 @@ static gboolean _agx_draw_curve(GtkWidget *widget,
   cairo_clip(cr);
 
   const float x_toe_graph = tone_mapping_params.toe_transition_x * graph_width;
-  const float y_toe_graph = tone_mapping_params.toe_transition_y * graph_height;
+  const float y_toe_graph =
+    _rendered_curve(tone_mapping_params.toe_transition_x, &tone_mapping_params) * graph_height;
   set_color(cr, darktable.bauhaus->graph_fg_active);
   cairo_arc(cr, x_toe_graph, y_toe_graph, DT_PIXEL_APPLY_DPI(4), 0, 2. * M_PI);
   cairo_fill(cr);
   cairo_stroke(cr);
 
   const float x_shoulder_graph = tone_mapping_params.shoulder_transition_x * graph_width;
-  const float y_shoulder_graph = tone_mapping_params.shoulder_transition_y * graph_height;
+  const float y_shoulder_graph =
+    _rendered_curve(tone_mapping_params.shoulder_transition_x, &tone_mapping_params) * graph_height;
   set_color(cr, darktable.bauhaus->graph_fg_active);
   cairo_arc(cr, x_shoulder_graph, y_shoulder_graph, DT_PIXEL_APPLY_DPI(4), 0, 2. * M_PI);
   cairo_fill(cr);
   cairo_stroke(cr);
 
   const float x_pivot_graph = tone_mapping_params.pivot_x * graph_width;
-  const float y_pivot_graph = tone_mapping_params.pivot_y * graph_height;
+  const float y_pivot_graph =
+    _rendered_curve(tone_mapping_params.pivot_x, &tone_mapping_params) * graph_height;
   set_color(cr, darktable.bauhaus->graph_fg_active);
   cairo_arc(cr, x_pivot_graph, y_pivot_graph, DT_PIXEL_APPLY_DPI(4), 0, 2. * M_PI);
   cairo_fill(cr);
@@ -1739,7 +1885,8 @@ static void _update_curve_warnings(dt_iop_module_t *self)
   if(!g) return;
 
   const gboolean warnings_enabled = dt_conf_get_bool("plugins/darkroom/agx/enable_curve_warnings");
-  const tone_mapping_params_t params = _calculate_tone_mapping_params(p);
+  const tone_mapping_params_t params =
+    _pipe_tone_mapping_params(p, g->output_headroom);
 
   dt_bauhaus_widget_set_quad_paint(g->basic_curve_controls.curve_toe_power,
                                     params.need_convex_toe && warnings_enabled
@@ -1754,6 +1901,9 @@ static void _update_redraw_dynamic_gui(dt_iop_module_t* const self,
                                        const dt_iop_agx_params_t* const p)
 {
   gtk_widget_set_visible(g->curve_gamma, !p->auto_gamma);
+  // only edits made before HDR output existed have it off
+  gtk_widget_set_visible(g->target_white_from_output, !p->target_white_from_output);
+  gtk_widget_set_visible(g->hdr_purity, p->target_white_from_output);
   gtk_widget_set_visible(g->primaries_controls_vbox, !p->disable_primaries_adjustments);
   const gboolean post_curve_primaries_available = !p->completely_reverse_primaries && !p->disable_primaries_adjustments;
   gtk_widget_set_visible(g->post_curve_primaries_controls_vbox, post_curve_primaries_available);
@@ -1780,7 +1930,7 @@ void gui_changed(dt_iop_module_t *self,
       const float old_black_ev = *(float*)previous;
       const float old_white_ev = p->range_white_relative_ev;
 
-      _update_pivot_x_and_slider(old_black_ev, old_white_ev, self, p);
+      _update_pivot_x(old_black_ev, old_white_ev, self, p);
     }
 
     if(widget == g->white_exposure_picker)
@@ -1788,7 +1938,7 @@ void gui_changed(dt_iop_module_t *self,
       const float old_black_ev = p->range_black_relative_ev;
       const float old_white_ev = *(float*)previous;
 
-      _update_pivot_x_and_slider(old_black_ev, old_white_ev, self, p);
+      _update_pivot_x(old_black_ev, old_white_ev, self, p);
     }
 
     if(widget == g->security_factor)
@@ -1801,7 +1951,7 @@ void gui_changed(dt_iop_module_t *self,
 
       p->range_black_relative_ev = old_black_ev * (1.f + ratio);
       p->range_white_relative_ev = old_white_ev * (1.f + ratio);
-      _update_pivot_x_and_slider(old_black_ev, old_white_ev, self, p);
+      _update_pivot_x(old_black_ev, old_white_ev, self, p);
 
       DT_ENTER_GUI_UPDATE();
       dt_bauhaus_slider_set(g->black_exposure_picker, p->range_black_relative_ev);
@@ -1820,9 +1970,8 @@ void gui_changed(dt_iop_module_t *self,
 
   // unconditionally update visibilities / redraw the curve, required to support updates
   // when called from gui_update
-  if (g) {
+  if(g)
     _update_redraw_dynamic_gui(self, g, p);
-  }
 }
 
 static GtkWidget* _create_basic_curve_controls_box(dt_iop_module_t *self,
@@ -2007,7 +2156,24 @@ static GtkWidget* _create_advanced_box(dt_iop_module_t *self,
   dt_bauhaus_slider_set_format(slider, "%");
   dt_bauhaus_slider_set_digits(slider, 2);
   dt_bauhaus_slider_set_factor(slider, 100.f);
-  gtk_widget_set_tooltip_text(slider, _("max linear output power"));
+  gtk_widget_set_tooltip_text(slider, _("max linear output power, relative to the peak of the output"));
+
+  g->target_white_from_output =
+    dt_bauhaus_toggle_from_params(section, "target_white_from_output");
+  gtk_widget_set_tooltip_text
+    (g->target_white_from_output,
+     _("this edit predates HDR output and keeps its white at the 203 nit\n"
+       "reference white. turn on to extend the highlights to the peak of\n"
+       "an HDR output (1000 nits for HLG, the PQ peak set in export),\n"
+       "as in Blender's AgX HDR. SDR output does not change"));
+
+  g->hdr_purity = dt_bauhaus_slider_from_params(section, "hdr_purity");
+  dt_bauhaus_slider_set_format(g->hdr_purity, "%");
+  dt_bauhaus_slider_set_digits(g->hdr_purity, 0);
+  dt_bauhaus_slider_set_factor(g->hdr_purity, 100.f);
+  gtk_widget_set_tooltip_text(g->hdr_purity,
+                              _("for HDR output, how much of the extra saturation and hue shift\n"
+                                "from extending the highlights to the peak is kept"));
 
   // Toe length
   slider = dt_bauhaus_slider_from_params(section, "curve_linear_ratio_below_pivot");
@@ -2085,23 +2251,33 @@ static void _add_exposure_box(dt_iop_module_t *self, dt_iop_agx_gui_data_t *g, d
   GtkWidget *auto_tune_label = dt_ui_label_new(_("auto tune levels"));
   g->range_exposure_picker = dt_color_picker_new(self, DT_COLOR_PICKER_AREA | DT_COLOR_PICKER_DENOISE, NULL);
   gtk_widget_set_tooltip_text(g->range_exposure_picker, _("set black and white relative exposure using the selected area"));
-  dt_action_define_iop(real_self, N_("exposure range"), N_("auto tune levels"), g->range_exposure_picker, &dt_action_def_toggle);
+  dt_action_define_iop(real_self, N_("exposure range"), N_("auto tune levels"), g->range_exposure_picker, &dt_action_def_color_picker);
   dt_gui_box_add(auto_tune_box, dt_gui_expand(auto_tune_label), g->range_exposure_picker);
   dt_gui_box_add(g->range_exposure_picker_group, auto_tune_box);
 
-  g->btn_read_exposure = dtgtk_button_new(dtgtk_cairo_paint_camera, 0, NULL);
-  gtk_widget_set_tooltip_text(g->btn_read_exposure, _("read exposure from metadata and exposure module"));
-  g_signal_connect(G_OBJECT(g->btn_read_exposure), "clicked", G_CALLBACK(_read_exposure_params_callback), real_self);
-  dt_action_define_iop(real_self, N_("exposure range"), N_("read exposure"), g->btn_read_exposure, &dt_action_def_button);
+  g->btn_read_exposure = dtgtk_button_new_full(dtgtk_cairo_paint_camera, 0, NULL,
+      &(dtgtk_button_config_t){
+        .tooltip = _("read exposure from metadata and exposure module"),
+        .action = DT_ACTION(real_self),
+        .action_section = N_("exposure range"),
+        .action_label = N_("read exposure"),
+        .action_def = &dt_action_def_button,
+        .clicked_cb = G_CALLBACK(_read_exposure_params_callback),
+        .clicked_data = real_self,
+      });
   dt_gui_box_add(g->range_exposure_picker_group, g->btn_read_exposure);
 
   dt_gui_box_add(self->widget, g->range_exposure_picker_group);
 }
 
-static void _apply_primaries_from_menu_callback(GtkMenuItem *menuitem, dt_iop_module_t *self)
+static void _apply_primaries_from_menu_callback(GSimpleAction *action,
+                                                GVariant *parameter,
+                                                gpointer user_data)
 {
-  const char *preset_id = gtk_widget_get_name(GTK_WIDGET(menuitem));
+  dt_iop_module_t *self = (dt_iop_module_t *)user_data;
   dt_iop_agx_params_t *p = self->params;
+
+  const gchar *preset_id = g_variant_get_string(parameter, NULL);
 
   if(strcmp(preset_id, "blender") == 0) _set_blenderlike_primaries(p);
   else if(strcmp(preset_id, "smooth") == 0) _set_smooth_primaries(p);
@@ -2111,31 +2287,42 @@ static void _apply_primaries_from_menu_callback(GtkMenuItem *menuitem, dt_iop_mo
   dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
 
-static void _primaries_popupmenu_callback(GtkWidget *button, dt_iop_module_t *self)
+static void _primaries_popupmenu_callback(GtkWidget *button,
+                                          dt_iop_module_t *self)
 {
-  GtkWidget *menu = gtk_menu_new();
+  GActionGroup *action_group = gtk_widget_get_action_group(button, "agx-primaries");
+  if(action_group == NULL)
+  {
+    GActionEntry action_entries[] =
+    {
+      { "activate", _apply_primaries_from_menu_callback, "s", NULL }
+    };
 
-  GtkWidget *blender_item = gtk_menu_item_new_with_mnemonic(_("blender-like"));
-  gtk_widget_set_name(blender_item, "blender");
-  g_signal_connect(blender_item, "activate", G_CALLBACK(_apply_primaries_from_menu_callback), self);
-  gtk_menu_shell_append(GTK_MENU_SHELL(menu), blender_item);
+    action_group = G_ACTION_GROUP(g_simple_action_group_new());
+    g_action_map_add_action_entries(G_ACTION_MAP(action_group),
+                                    action_entries,
+                                    G_N_ELEMENTS(action_entries),
+                                    self);
+    gtk_widget_insert_action_group(button,
+                                   "agx-primaries",
+                                   G_ACTION_GROUP(action_group));
+    g_object_unref(action_group);
+  }
 
-  GtkWidget *smooth_item = gtk_menu_item_new_with_mnemonic(_("smooth"));
-  gtk_widget_set_name(smooth_item, "smooth");
-  g_signal_connect(smooth_item, "activate", G_CALLBACK(_apply_primaries_from_menu_callback), self);
-  gtk_menu_shell_append(GTK_MENU_SHELL(menu), smooth_item);
+  GMenu *menu = g_menu_new();
+  g_menu_append(menu, _("blender-like"), "agx-primaries.activate::blender");
+  g_menu_append(menu, _("smooth"), "agx-primaries.activate::smooth");
+  g_menu_append(menu, _("unmodified"), "agx-primaries.activate::unmodified");
 
-  GtkWidget *unmodified_item = gtk_menu_item_new_with_mnemonic(_("unmodified"));
-  gtk_widget_set_name(unmodified_item, "unmodified");
-  g_signal_connect(unmodified_item, "activate", G_CALLBACK(_apply_primaries_from_menu_callback), self);
-  gtk_menu_shell_append(GTK_MENU_SHELL(menu), unmodified_item);
-
-  gtk_widget_show_all(menu);
-  dt_gui_menu_popup(GTK_MENU(menu), button, GDK_GRAVITY_SOUTH_WEST, GDK_GRAVITY_NORTH_WEST);
+  GtkWidget *popover_menu = dt_gui_popover_menu_from_model(button, menu);
+  g_object_unref(menu);
+  gtk_popover_popup(GTK_POPOVER(popover_menu));
 }
 
-static void _set_post_curve_primaries_from_pre(dt_iop_agx_params_t *p)
+static void _set_post_curve_primaries_from_pre_callback(GtkWidget *widget, dt_iop_module_t *self)
 {
+  dt_iop_agx_params_t *p = self->params;
+
   p->master_outset_ratio = 1.0f;
   p->master_unrotation_ratio = 1.0f;
 
@@ -2146,11 +2333,6 @@ static void _set_post_curve_primaries_from_pre(dt_iop_agx_params_t *p)
   p->red_unrotation = p->red_rotation;
   p->green_unrotation = p->green_rotation;
   p->blue_unrotation = p->blue_rotation;
-}
-
-static void _set_post_curve_primaries_from_pre_callback(GtkWidget *widget, dt_iop_module_t *self)
-{
-  _set_post_curve_primaries_from_pre(self->params);
 
   dt_iop_gui_update(self);
   dt_dev_add_history_item(darktable.develop, self, TRUE);
@@ -2294,11 +2476,15 @@ static void _create_primaries_page(dt_iop_module_t *main,
        "especially with bright, saturated lights (e.g. LEDs).\n"
        "mainly intended to be used for experimenting."));
 
-  GtkWidget *primaries_button = dtgtk_button_new(dtgtk_cairo_paint_styles, 0, NULL);
-  gtk_widget_set_tooltip_text(primaries_button, _("reset primaries to a predefined configuration"));
-  g_signal_connect(primaries_button, "clicked", G_CALLBACK(_primaries_popupmenu_callback), main);
-  dt_action_define_iop(main, NULL, N_("reset primaries"),
-                       primaries_button, &dt_action_def_button);
+  GtkWidget *primaries_button = dtgtk_button_new_full(dtgtk_cairo_paint_styles, 0, NULL,
+      &(dtgtk_button_config_t){
+        .tooltip = _("reset primaries to a predefined configuration"),
+        .action = DT_ACTION(main),
+        .action_label = N_("reset primaries"),
+        .action_def = &dt_action_def_button,
+        .clicked_cb = G_CALLBACK(_primaries_popupmenu_callback),
+        .clicked_data = main,
+      });
 
   g->primaries_controls_vbox = dt_gui_vbox(dt_gui_hbox(dt_ui_label_new(_("reset primaries")),
                                                        dt_gui_align_right(primaries_button)));
@@ -2463,9 +2649,33 @@ static void _notebook_page_changed(GtkNotebook *notebook,
   }
 }
 
+// a new display profile or PQ peak changes the curve of the darkroom view
+static void _ui_pipe_finished(gpointer instance,
+                              dt_iop_module_t *self)
+{
+  dt_iop_agx_gui_data_t *g = self->gui_data;
+  dt_dev_pixelpipe_t *pipe = self->dev->full.pipe;
+  if(!g || !pipe) return;
+
+  // read on every finished run, cache hits included, since AgX's
+  // process() does not run then. colorout sets the headroom while
+  // synching under busy_mutex; a pipe that is busy again will signal
+  // once more, and a blocking lock could deadlock against process()
+  if(dt_pthread_mutex_trylock(&pipe->busy_mutex)) return;
+  const float headroom = pipe->output_headroom;
+  dt_pthread_mutex_unlock(&pipe->busy_mutex);
+
+  if(headroom == g->output_headroom) return;
+
+  g->output_headroom = headroom;
+  _update_curve_warnings(self);
+  gtk_widget_queue_draw(GTK_WIDGET(g->graph_drawing_area));
+}
+
 void gui_init(dt_iop_module_t *self)
 {
   dt_iop_agx_gui_data_t *g = IOP_GUI_ALLOC(agx);
+  g->output_headroom = 1.f;
 
   static dt_action_def_t notebook_def = {};
   g->notebook = dt_ui_notebook_new(&notebook_def);
@@ -2497,10 +2707,14 @@ void gui_init(dt_iop_module_t *self)
   // Finally, add the remaining sections to the settings page
   _add_look_box(settings_section, g);
   _create_primaries_page(self, g);
+
+  DT_CONTROL_SIGNAL_HANDLE(DT_SIGNAL_DEVELOP_UI_PIPE_FINISHED, _ui_pipe_finished);
 }
 
 static void _set_default_curve_and_look_params(dt_iop_agx_params_t *p)
 {
+  p->target_white_from_output = TRUE;
+  p->hdr_purity = 0.5f;
   p->look_slope = 1.f;
   p->look_brightness = 1.f;
   p->look_lift = 0.f;
@@ -2535,7 +2749,7 @@ static void _set_neutral_params(dt_iop_agx_params_t *p)
   _set_unmodified_primaries(p);
 }
 
-void _set_smooth_params(dt_iop_agx_params_t *p)
+static void _set_smooth_params(dt_iop_agx_params_t *p)
 {
   _set_default_curve_and_look_params(p);
   _set_smooth_primaries(p);
@@ -2689,7 +2903,7 @@ void color_picker_apply(dt_iop_module_t *self,
   else if(picker == g->basic_curve_controls.curve_pivot_x) _apply_auto_pivot_x(self, dt_ioppr_get_pipe_work_profile_info(pipe));
   else if(picker == g->basic_curve_controls.curve_pivot_y_linear) _apply_auto_pivot_xy(self, dt_ioppr_get_pipe_work_profile_info(pipe));
 
-  _update_pivot_x_and_slider(old_black_ev, old_white_ev, self, p);
+  _update_pivot_x(old_black_ev, old_white_ev, self, p);
 
   if(p->auto_gamma)
   {
@@ -2706,155 +2920,6 @@ void color_picker_apply(dt_iop_module_t *self,
   dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
 
-/* Resolve the desktop preference within this editor's develop, rather than
- * darktable.develop or the current view. A masked later instance must not
- * silently override the first enabled unmasked exposure instance. */
-static int _mobile_agx_effective_exposure(dt_iop_module_t *self, float *exposure)
-{
-  if(!self || !self->dev || !exposure) return 0;
-  dt_iop_module_t *preferred = NULL;
-  gboolean preferred_unmasked = FALSE;
-  for(GList *item = self->dev->iop; item; item = g_list_next(item))
-  {
-    dt_iop_module_t *candidate = item->data;
-    if(!candidate || candidate->dev != self->dev || strcmp(candidate->op, "exposure") || !candidate->enabled
-       || candidate->iop_order == INT_MAX || !candidate->module || !candidate->params) continue;
-    const gboolean unmasked = !candidate->blend_params
-      || candidate->blend_params->mask_mode == DEVELOP_MASK_DISABLED
-      || candidate->blend_params->mask_mode == DEVELOP_MASK_ENABLED;
-    if(!preferred || (unmasked && !preferred_unmasked)
-       || (unmasked == preferred_unmasked && candidate->multi_priority < preferred->multi_priority))
-    {
-      preferred = candidate;
-      preferred_unmasked = unmasked;
-    }
-  }
-  if(!preferred) return 0;
-  typedef int (*effective_function)(dt_iop_module_t *, float *);
-  effective_function get = NULL;
-  if(!g_module_symbol(preferred->module, "dt_iop_mobile_exposure_get_effective_exposure", (gpointer *)&get)
-     || !get) return 0;
-  return get(preferred, exposure) == 1 && isfinite(*exposure);
-}
-
-/* kind: 0 float, 2 boolean, 3 action. Values retain the original parameter
- * units used by the mobile scalar API. Queries never update params/history. */
-G_MODULE_EXPORT int dt_iop_mobile_editor_get_control(dt_iop_module_t *self, const char *name,
-    double *value, double *minimum, double *maximum, double *original, int *kind)
-{
-  if(!self || !self->params || !self->default_params || !name || !value || !minimum
-     || !maximum || !original || !kind || self->params_size != sizeof(dt_iop_agx_params_t)) return 0;
-  const dt_iop_agx_params_t *p = self->params, *d = self->default_params;
-  *kind = 0;
-#define MOBILE_AGX_FLOAT(field, low, high) \
-  if(!strcmp(name, #field)) { *value = p->field; *original = d->field; \
-    *minimum = low; *maximum = high; return isfinite(*value); }
-  MOBILE_AGX_FLOAT(range_black_relative_ev, -20.f, -0.1f)
-  MOBILE_AGX_FLOAT(range_white_relative_ev, 0.1f, 20.f)
-  MOBILE_AGX_FLOAT(dynamic_range_scaling, -0.5f, 2.f)
-  MOBILE_AGX_FLOAT(curve_pivot_x, 0.f, 1.f)
-  MOBILE_AGX_FLOAT(curve_pivot_y_linear_output, 0.f, 1.f)
-#undef MOBILE_AGX_FLOAT
-  if(!strcmp(name, "auto_gamma"))
-  { *kind = 2; *value = p->auto_gamma; *original = d->auto_gamma; *minimum = 0; *maximum = 1; return 1; }
-  if(!strcmp(name, "agx.range_from_exposure"))
-  {
-    float exposure;
-    if(!_mobile_agx_effective_exposure(self, &exposure)) return 0;
-  }
-  else if(!strcmp(name, "agx.copy_pre_to_post"))
-  {
-    if(p->disable_primaries_adjustments || p->completely_reverse_primaries) return 0;
-  }
-  else if(strcmp(name, "agx.primaries_blender") && strcmp(name, "agx.primaries_smooth")
-          && strcmp(name, "agx.primaries_unmodified")) return 0;
-  *kind = 3; *value = *minimum = *maximum = 1; *original = NAN;
-  return 1;
-}
-
-static int _mobile_agx_coupled_valid(const dt_iop_agx_params_t *p)
-{
-  if(!isfinite(p->range_black_relative_ev) || p->range_black_relative_ev < -20.f
-     || p->range_black_relative_ev > -0.1f || !isfinite(p->range_white_relative_ev)
-     || p->range_white_relative_ev < 0.1f || p->range_white_relative_ev > 20.f
-     || !isfinite(p->dynamic_range_scaling) || p->dynamic_range_scaling < -0.5f
-     || p->dynamic_range_scaling > 2.f || !isfinite(p->curve_pivot_x)
-     || p->curve_pivot_x < 0.f || p->curve_pivot_x > 1.f
-     || !isfinite(p->curve_pivot_y_linear_output)
-     || !(p->curve_target_display_black_ratio < p->curve_pivot_y_linear_output
-          && p->curve_pivot_y_linear_output < p->curve_target_display_white_ratio)
-     || !isfinite(p->curve_gamma) || p->curve_gamma < 0.01f || p->curve_gamma > 100.f) return 0;
-  return 1;
-}
-
-/* Apply original desktop coupling to a local copy. The adapter owns the one
- * history item and pipeline invalidation after this complete batch succeeds. */
-G_MODULE_EXPORT int dt_iop_mobile_editor_set_number(dt_iop_module_t *self, const char *name, double value)
-{
-  if(!name) return -1;
-  if(!strcmp(name, "curve_gamma"))
-  {
-    if(!self || !self->params || self->params_size != sizeof(dt_iop_agx_params_t)) return -1;
-    return ((dt_iop_agx_params_t *)self->params)->auto_gamma ? -1 : 0;
-  }
-  const gboolean owned = !strcmp(name, "range_black_relative_ev") || !strcmp(name, "range_white_relative_ev")
-    || !strcmp(name, "dynamic_range_scaling") || !strcmp(name, "curve_pivot_x")
-    || !strcmp(name, "curve_pivot_y_linear_output") || !strcmp(name, "auto_gamma")
-    || !strncmp(name, "agx.", 4);
-  if(!owned) return 0;
-  if(!isfinite(value)) return -1;
-  double current, minimum, maximum, original;
-  int kind;
-  if(!dt_iop_mobile_editor_get_control(self, name, &current, &minimum, &maximum, &original, &kind)) return -1;
-  if(kind == 0)
-  {
-    if(value < -FLT_MAX || value > FLT_MAX) return -1;
-    value = (double)(float)value;
-  }
-  else if(value != trunc(value)) return -1;
-  if(value < minimum || value > maximum) return -1;
-  dt_iop_agx_params_t p = *(dt_iop_agx_params_t *)self->params;
-  const float old_black = p.range_black_relative_ev, old_white = p.range_white_relative_ev;
-  if(!strcmp(name, "range_black_relative_ev"))
-  { p.range_black_relative_ev = value; _update_pivot_x(old_black, old_white, &p); }
-  else if(!strcmp(name, "range_white_relative_ev"))
-  { p.range_white_relative_ev = value; _update_pivot_x(old_black, old_white, &p); }
-  else if(!strcmp(name, "dynamic_range_scaling"))
-  {
-    const float previous = p.dynamic_range_scaling;
-    p.dynamic_range_scaling = value;
-    const float ratio = (p.dynamic_range_scaling - previous) / (previous + 1.f);
-    p.range_black_relative_ev = old_black * (1.f + ratio);
-    p.range_white_relative_ev = old_white * (1.f + ratio);
-    _update_pivot_x(old_black, old_white, &p);
-  }
-  else if(!strcmp(name, "curve_pivot_x")) p.curve_pivot_x = value;
-  else if(!strcmp(name, "curve_pivot_y_linear_output")) p.curve_pivot_y_linear_output = value;
-  else if(!strcmp(name, "auto_gamma")) p.auto_gamma = value;
-  else if(!strcmp(name, "agx.range_from_exposure"))
-  {
-    float exposure;
-    if(!_mobile_agx_effective_exposure(self, &exposure)) return -1;
-    _adjust_relative_exposure(exposure, &p);
-  }
-  else if(!strcmp(name, "agx.primaries_blender")) _set_blenderlike_primaries(&p);
-  else if(!strcmp(name, "agx.primaries_smooth")) _set_smooth_primaries(&p);
-  else if(!strcmp(name, "agx.primaries_unmodified")) _set_unmodified_primaries(&p);
-  else if(!strcmp(name, "agx.copy_pre_to_post")) _set_post_curve_primaries_from_pre(&p);
-  else return -1;
-  if(p.auto_gamma)
-  {
-    tone_mapping_params_t curve = { 0 };
-    _set_log_mapping_params(&p, &curve);
-    _adjust_pivot(&p, &curve);
-    if(!isfinite(curve.curve_gamma)) return -1;
-    p.curve_gamma = CLAMPF(curve.curve_gamma, 0.01f, 100.f);
-  }
-  if(!_mobile_agx_coupled_valid(&p)) return -1;
-  memcpy(self->params, &p, sizeof(p));
-  return 1;
-}
-
 void commit_params(dt_iop_module_t *self,
                    dt_iop_params_t *gui_params,
                    dt_dev_pixelpipe_t *pipe,
@@ -2866,6 +2931,7 @@ void commit_params(dt_iop_module_t *self,
   // Calculate curve parameters once
   processing_params->tone_mapping_params = _calculate_tone_mapping_params(p);
   processing_params->primaries_params = _get_primaries_params(p);
+  processing_params->params = *p;
 }
 
 void reload_defaults(dt_iop_module_t *self)
@@ -2980,11 +3046,14 @@ int process_cl(dt_iop_module_t *self,
   }
 
   const int base_working_same_profile = pipe_work_profile == base_profile;
+  const tone_mapping_params_t tone_mapping_params = d->params.target_white_from_output
+    ? _pipe_tone_mapping_params(&d->params, piece->pipe->output_headroom)
+    : d->tone_mapping_params;
 
   err = dt_opencl_enqueue_kernel_2d_args(
     devid, gd->kernel_agx, width, height,
     CLARG(dev_in), CLARG(dev_out), CLARG(width), CLARG(height),
-    CLARG(d->tone_mapping_params),
+    CLARG(tone_mapping_params),
     CLARG(dev_pipe_to_base),
     CLARG(dev_base_to_rendering),
     CLARG(dev_rendering_to_pipe),

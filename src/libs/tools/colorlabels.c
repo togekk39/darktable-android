@@ -126,22 +126,36 @@ void gui_init(dt_lib_module_t *self)
 
   for(int k = 0; k < 6; k++)
   {
-    GtkWidget *button =
-      dtgtk_button_new(dtgtk_cairo_paint_label, (k | 8 | CPF_LABEL_PURPLE), NULL);
-    d->buttons[k] = button;
-    dt_gui_add_class(d->buttons[k], "dt_no_hover");
-    dt_gui_add_class(d->buttons[k], "dt_dimmed");
     // Only the first 5 buttons are color label togglers, the last one clears all labels
     char *tooltip = k < 5
                     ? _get_tooltip_for(k)
                     : g_strdup(_("clear color labels of selected images"));
-    gtk_widget_set_tooltip_markup(button, tooltip);
+    GtkWidget *button =
+      dtgtk_button_new_full(dtgtk_cairo_paint_label, (k | 8 | CPF_LABEL_PURPLE), NULL,
+        &(dtgtk_button_config_t){
+          .tooltip_markup = tooltip,
+          .action = &darktable.control->actions_thumb,
+          .action_label = N_("color label"),
+          .action_def = &dt_action_def_color_label,
+        });
     g_free(tooltip);
+    d->buttons[k] = button;
+    dt_gui_add_class(d->buttons[k], "dt_no_hover");
+    dt_gui_add_class(d->buttons[k], "dt_dimmed");
     gtk_box_pack_start(GTK_BOX(self->widget), button, TRUE, TRUE, 0);
-    dt_gui_connect_click_all(button, _lib_colorlabels_button_press_callback, NULL, self);
+    {
+      GtkGesture *gesture = gtk_gesture_multi_press_new(button);
+      gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(gesture),
+                                                   GTK_PHASE_CAPTURE);
+      dt_gui_add_controller(button, gesture);
+      g_signal_connect(gesture, "pressed",
+                       G_CALLBACK(_lib_colorlabels_button_press_callback), self);
+      g_signal_connect(gesture, "begin", G_CALLBACK(dt_gui_gesture_claim), NULL);
+      gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(gesture), 0);
+      g_object_set_data(G_OBJECT(button), DT_ACTION_GESTURE_KEY, gesture);
+    }
     dt_gui_connect_motion(button, NULL, _lib_colorlabels_enter_notify_callback, NULL, self);
-    ac = dt_action_define(&darktable.control->actions_thumb, NULL,
-                          N_("color label"), button, &dt_action_def_color_label);
+    ac = dt_action_widget(button);
   }
 
   dt_shortcut_register(ac, 1, 0, GDK_KEY_F1, 0);
@@ -199,14 +213,12 @@ static gboolean _lib_colorlabels_key_press_cb(GtkEventControllerKey *controller,
   return FALSE; /* event not handled */
 }
 
-static gboolean _lib_colorlabels_destroy(GtkWidget *widget,
-                                         GdkEvent *event,
-                                         dt_lib_module_t *self)
+static void _lib_colorlabels_destroy(GtkEventController *controller,
+                                     dt_lib_module_t *self)
 {
   dt_lib_colorlabels_t *d = self->data;
 
   gtk_widget_destroy(d->floating_window);
-  return FALSE;
 }
 
 static void _lib_colorlabels_edit(dt_lib_module_t *self,
@@ -225,7 +237,7 @@ static void _lib_colorlabels_edit(dt_lib_module_t *self,
   gtk_widget_set_size_request(entry, FLOATING_ENTRY_WIDTH, -1);
   gtk_widget_add_events(entry, GDK_FOCUS_CHANGE_MASK);
   gtk_editable_select_region(GTK_EDITABLE(entry), 0, -1);
-  g_signal_connect(entry, "focus-out-event", G_CALLBACK(_lib_colorlabels_destroy), self);
+  dt_gui_connect_focus(entry, NULL, _lib_colorlabels_destroy, self);
   dt_gui_connect_key(entry, _lib_colorlabels_key_press_cb, self);
   gtk_widget_set_tooltip_text(entry, _("enter a description of how you use this color label"));
 
@@ -282,11 +294,11 @@ static void _lib_colorlabels_button_press_callback(GtkGestureSingle *gesture, in
      && colorlabel != 5)  // The button to reset colorlabels needs no description
   {
     d->colorlabel = colorlabel;
-    GdkEvent *ev = gtk_get_current_event();
-    if(ev)
+    gdouble root_x, root_y;
+    const GdkEvent *event = gtk_gesture_get_last_event(GTK_GESTURE(gesture), NULL);
+    if(event)
     {
-      gdouble root_x, root_y;
-      gdk_event_get_root_coords(ev, &root_x, &root_y);
+      dt_gui_get_event_coords(event, &root_x, &root_y);
       _lib_colorlabels_edit(self, root_x, root_y);
     }
   }

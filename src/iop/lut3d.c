@@ -15,6 +15,7 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
+
 #include "common/gdk_event_utils.h"
 
 #include "bauhaus/bauhaus.h"
@@ -25,6 +26,7 @@
 #include "common/iop_profile.h"
 #include "common/utility.h"
 #include "develop/imageop.h"
+#include "develop/tiling.h"
 #include "develop/imageop_gui.h"
 #include "dtgtk/button.h"
 #include "gui/gtk.h"
@@ -39,6 +41,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <dirent.h>
+
 #if defined (_WIN32)
 #include "win/getdelim.h"
 #include "win/scandir.h"
@@ -188,7 +191,8 @@ int legacy_params(dt_iop_module_t *self,
 
     const dt_iop_lut3d_params_v1_t *o = (dt_iop_lut3d_params_v1_t *)old_params;
     dt_iop_lut3d_params_v3_t *n = calloc(1, sizeof(dt_iop_lut3d_params_v3_t));
-    g_strlcpy(n->filepath, o->filepath, sizeof(n->filepath));
+    dt_strlcpy_fixed_to_fixed(n->filepath, sizeof(n->filepath),
+                              o->filepath, sizeof(o->filepath));
     n->colorspace = o->colorspace;
     n->interpolation = o->interpolation;
     n->nb_keypoints = 0;
@@ -464,12 +468,16 @@ static void _correct_pixel_pyramid(const float *const in,
 static void _get_cache_filename(const char *const lutname,
                                 char *const cache_filename)
 {
+  // the name comes from stored params and the file name is inserted into a
+  // G'MIC command: a digest cannot carry quotes or path separators
+  gchar *digest = g_compute_checksum_for_string(G_CHECKSUM_SHA1, lutname, -1);
   char *cache_dir = g_build_filename(g_get_user_cache_dir(), "gmic", NULL);
-  char *cache_file = g_build_filename(cache_dir, lutname, NULL);
+  char *cache_file = g_build_filename(cache_dir, digest, NULL);
   g_strlcpy(cache_filename, cache_file, DT_IOP_LUT3D_MAX_PATHNAME);
   g_strlcpy(&cache_filename[strlen(cache_filename)], ".cimgz", DT_IOP_LUT3D_MAX_PATHNAME-strlen(cache_file));
   g_free(cache_dir);
   g_free(cache_file);
+  g_free(digest);
 }
 
 static uint8_t _calculate_clut_compressed(dt_iop_lut3d_params_t *const p,
@@ -1032,6 +1040,7 @@ int process_cl(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_
     = dt_ioppr_get_iop_work_profile_info(self, self->dev->iop);
   gboolean transform = (work_profile != NULL && lut_profile != NULL) ? TRUE : FALSE;
   cl_mem clut_cl = NULL;
+  cl_mem scratch = NULL;
   const int devid = piece->pipe->devid;
   const int width = roi_in->width;
   const int height = roi_in->height;
@@ -1044,18 +1053,28 @@ int process_cl(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_
       err = CL_MEM_OBJECT_ALLOCATION_FAILURE;
       goto cleanup;
     }
+    /* A kernel may not take one image object as both its read_only source and its
+       write_only target, so the profile conversions and the lookup cannot pass dev_out
+       for both. dev_out belongs to the caller and cannot be swapped for another buffer,
+       so a scratch image carries the intermediate: convert into it, apply the lookup
+       from it back into dev_out, then convert dev_out into it and back once more. */
     if(transform)
     {
-      const gboolean success = dt_ioppr_transform_image_colorspace_rgb_cl(devid,
-        dev_in, dev_out, width, height,
-        work_profile, lut_profile, "work profile to LUT profile");
-      if(!success)
-       transform = FALSE;
+      scratch = dt_opencl_alloc_device(devid, width, height, 4 * sizeof(float));
+      if(scratch == NULL)
+      {
+        err = CL_MEM_OBJECT_ALLOCATION_FAILURE;
+        goto cleanup;
+      }
+
+      if(!dt_ioppr_transform_image_colorspace_rgb_cl(devid, dev_in, scratch, width, height,
+        work_profile, lut_profile, "work profile to LUT profile"))
+        transform = FALSE;
     }
+
     if(transform)
-      // FIXME OPENCL is this safe here ?
       err = dt_opencl_enqueue_kernel_2d_args(devid, kernel, width, height,
-              CLARG(dev_out), CLARG(dev_out), CLARG(width), CLARG(height), CLARG(clut_cl), CLARG(level));
+              CLARG(scratch), CLARG(dev_out), CLARG(width), CLARG(height), CLARG(clut_cl), CLARG(level));
     else
       err = dt_opencl_enqueue_kernel_2d_args(devid, kernel, width, height,
               CLARG(dev_in), CLARG(dev_out), CLARG(width), CLARG(height), CLARG(clut_cl), CLARG(level));
@@ -1064,9 +1083,15 @@ int process_cl(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_
 
     if(transform)
     {
-      if(!dt_ioppr_transform_image_colorspace_rgb_cl(devid, dev_out, dev_out, width, height,
-        lut_profile, work_profile, "LUT profile to work profile"))
+      if(!dt_ioppr_transform_image_colorspace_rgb_cl(devid, dev_out, scratch, width, height,
+           lut_profile, work_profile, "LUT profile to work profile"))
         err = DT_OPENCL_PROCESS_CL;
+      else
+      {
+        const size_t region[2] = { width, height };
+        err = dt_opencl_enqueue_copy_image(devid, scratch, dev_out,
+                                           CLIMG_ORIGIN, CLIMG_ORIGIN, region);
+      }
     }
   }
   else
@@ -1077,9 +1102,32 @@ int process_cl(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, cl_mem dev_
 
 cleanup:
   dt_opencl_release_mem_object(clut_cl);
+  dt_opencl_release_mem_object(scratch);
   return err;
 }
 #endif
+
+void tiling_callback(dt_iop_module_t *self,
+                     dt_dev_pixelpipe_iop_t *piece,
+                     const dt_iop_roi_t *roi_in,
+                     const dt_iop_roi_t *roi_out,
+                     dt_develop_tiling_t *tiling)
+{
+  const float ioratio = ((float)roi_out->width * roi_out->height)
+                      / ((float)roi_in->width * roi_in->height);
+
+  tiling->factor = 1.0f + ioratio;
+  /* The OpenCL path carries the profile-converted intermediates in a scratch image the
+     size of the input, since the lookup kernel and the conversions cannot read and write
+     one image object. Only allocated when a profile conversion is needed, so this is the
+     worst case. */
+  tiling->factor_cl = tiling->factor + 1.0f;
+  tiling->maxbuf = 1.0f;
+  tiling->maxbuf_cl = tiling->maxbuf;
+  tiling->overhead = 0;
+  tiling->overlap = 0;
+  tiling->align = 1;
+}
 
 void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ibuf, void *const obuf,
              const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
@@ -1171,11 +1219,37 @@ void cleanup_global(dt_iop_module_so_t *self)
   self->data = NULL;
 }
 
+// a stored relative path must not leave the LUT folder it is joined to
+static gboolean _filepath_is_safe(const char *const filepath)
+{
+  for(const char *part = filepath; *part;)
+  {
+    const char *end = part;
+    while(*end && *end != '/' && *end != '\\') end++;
+    if(end - part == 2 && part[0] == '.' && part[1] == '.')
+      return FALSE;
+    part = *end ? end + 1 : end;
+  }
+  return TRUE;
+}
+
+#ifdef HAVE_GMIC
+// a path inserted into a G'MIC command must carry none of its syntax: a quote
+// breaks out of the quoted argument, and {}, $ and \ are substitution and escape
+static gboolean _gmic_arg_is_safe(const char *const arg)
+{
+  return !strpbrk(arg, "\"\\{}$");
+}
+#endif
+
 static int _calculate_clut(dt_iop_lut3d_params_t *const p, float **clut)
 {
   uint16_t level = 0;
   const char *filepath = p->filepath;
+  if(!_filepath_is_safe(filepath)) return level;
 #ifdef HAVE_GMIC
+  // the stored count bounds the read of c_clut
+  if(p->nb_keypoints < 0 || p->nb_keypoints > DT_IOP_LUT3D_MAX_KEYPOINTS) return level;
   if(p->nb_keypoints && filepath[0])
   {
     // compressed in params. no need to read the file
@@ -1185,22 +1259,18 @@ static int _calculate_clut(dt_iop_lut3d_params_t *const p, float **clut)
   { // read the file
 #endif  // HAVE_GMIC
     gchar *lutfolder = dt_conf_get_string("plugins/darkroom/lut3d/def_path");
-    const gboolean absolute = g_path_is_absolute(filepath);
-    if(filepath[0] && (absolute || lutfolder[0]))
+    if(filepath[0] && lutfolder[0])
     {
-      // A mobile document import supplies its retained private cache path.
-      // Existing desktop relative paths still resolve beneath the LUT folder.
-      char *fullpath = absolute ? g_strdup(filepath) : g_build_filename(lutfolder, filepath, NULL);
-      const char *extension = strrchr(filepath, '.');
-      if(extension && !g_ascii_strcasecmp(extension, ".png"))
+      char *fullpath = g_build_filename(lutfolder, filepath, NULL);
+      if(g_str_has_suffix (filepath, ".png") || g_str_has_suffix (filepath, ".PNG"))
       {
         level = _calculate_clut_haldclut(p, fullpath, clut);
       }
-      else if(extension && !g_ascii_strcasecmp(extension, ".cube"))
+      else if(g_str_has_suffix (filepath, ".cube") || g_str_has_suffix (filepath, ".CUBE"))
       {
         level = _calculate_clut_cube(fullpath, clut);
       }
-      else if(extension && !g_ascii_strcasecmp(extension, ".3dl"))
+      else if(g_str_has_suffix (filepath, ".3dl") || g_str_has_suffix (filepath, ".3DL"))
       {
         level = _calculate_clut_3dl(fullpath, clut);
       }
@@ -1324,11 +1394,22 @@ static void _get_compressed_clut(dt_iop_module_t *self, gboolean newlutname)
   dt_iop_lut3d_params_t *p = self->params;
   int nb_lut = 0;
   char *lutfolder = dt_conf_get_string("plugins/darkroom/lut3d/def_path");
-  if(p->filepath[0] && lutfolder[0])
+  if(p->filepath[0] && lutfolder[0] && _filepath_is_safe(p->filepath))
   {
     if(g_str_has_suffix (p->filepath, ".gmz") || g_str_has_suffix (p->filepath, ".GMZ"))
     {
       char *fullpath = g_build_filename(lutfolder, p->filepath, NULL);
+      // the path goes into a quoted G'MIC command; convert Windows separators
+      // first so a native backslash is not read as an escape, then reject
+      // anything that could still be G'MIC syntax
+      filepath_set_unix_separator(fullpath);
+      if(!_gmic_arg_is_safe(fullpath))
+      {
+        dt_print(DT_DEBUG_ALWAYS, "[lut3d] refusing G'MIC LUT path containing command syntax");
+        g_free(fullpath);
+        g_free(lutfolder);
+        return;
+      }
       gboolean lut_found = lut3d_read_gmz(&p->nb_keypoints, (unsigned char *const)p->c_clut, fullpath,
               &nb_lut, (void *)g, p->lutname, newlutname);
       // to be able to fix evolution issue, keep the gmic version with the compressed lut
@@ -1385,6 +1466,10 @@ void commit_params(dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_
 {
   dt_iop_lut3d_params_t *p = (dt_iop_lut3d_params_t *)p1;
   dt_iop_lut3d_data_t *d = piece->data;
+
+  // stored params need not terminate the path and LUT name
+  p->filepath[sizeof(p->filepath) - 1] = '\0';
+  p->lutname[sizeof(p->lutname) - 1] = '\0';
 
   if(strcmp(p->filepath, d->params.filepath) != 0 || strcmp(p->lutname, d->params.lutname) != 0 )
   { // new clut file
@@ -1663,6 +1748,9 @@ void gui_update(dt_iop_module_t *self)
 {
   dt_iop_lut3d_gui_data_t *g = self->gui_data;
   dt_iop_lut3d_params_t *p = self->params;
+  // the GUI handlers read the stored path and LUT name as C strings
+  p->filepath[sizeof(p->filepath) - 1] = '\0';
+  p->lutname[sizeof(p->lutname) - 1] = '\0';
   gchar *lutfolder = dt_conf_get_string("plugins/darkroom/lut3d/def_path");
   if(!lutfolder[0])
   {
@@ -1674,7 +1762,8 @@ void gui_update(dt_iop_module_t *self)
   {
     gtk_widget_set_sensitive(g->button, TRUE);
     gtk_widget_set_sensitive(g->filepath, p->filepath[0]);
-    _update_filepath_combobox(g, p->filepath, lutfolder);
+    if(_filepath_is_safe(p->filepath))
+      _update_filepath_combobox(g, p->filepath, lutfolder);
   }
   g_free(lutfolder);
 
@@ -1698,17 +1787,21 @@ void gui_init(dt_iop_module_t *self)
 {
   dt_iop_lut3d_gui_data_t *g = IOP_GUI_ALLOC(lut3d);
 
-  g->button = dtgtk_button_new(dtgtk_cairo_paint_directory, CPF_NONE, NULL);
-  gtk_widget_set_name(g->button, "non-flat");
 #ifdef HAVE_GMIC
-  gtk_widget_set_tooltip_text(g->button, _("select a png (haldclut)"
+  const gchar *tooltip = _("select a png (haldclut)"
       ", a cube, a 3dl or a gmz (compressed LUT) file "
-      "CAUTION: 3D LUT folder must be set in preferences/processing before choosing the LUT file"));
+      "CAUTION: 3D LUT folder must be set in preferences/processing before choosing the LUT file");
 #else
-  gtk_widget_set_tooltip_text(g->button, _("select a png (haldclut)"
+  const gchar *tooltip = _("select a png (haldclut)"
       ", a cube or a 3dl file "
-      "CAUTION: 3D LUT folder must be set in preferences/processing before choosing the LUT file"));
+      "CAUTION: 3D LUT folder must be set in preferences/processing before choosing the LUT file");
 #endif // HAVE_GMIC
+
+  g->button = dtgtk_button_new_full(dtgtk_cairo_paint_directory, CPF_NONE, NULL,
+      &(dtgtk_button_config_t){
+        .tooltip = tooltip,
+      });
+  gtk_widget_set_name(g->button, "non-flat");
 
   g->filepath = dt_bauhaus_combobox_new(self);
   dt_bauhaus_combobox_set_entries_ellipsis(g->filepath, PANGO_ELLIPSIZE_MIDDLE);

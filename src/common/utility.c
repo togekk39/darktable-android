@@ -362,6 +362,29 @@ size_t dt_strlcpy_to_fixed(char *dest, const char *src, const size_t dest_size)
   return g_strlcpy(dest, src, dest_size);
 }
 
+void dt_strlcpy_fixed_to_fixed(char *dest,
+                               const size_t dest_size,
+                               const char *src,
+                               const size_t src_size)
+{
+  memset(dest, 0, dest_size);
+  if(dest_size == 0) return;
+  const char *const end = memchr(src, '\0', src_size);
+  const size_t len = end ? (size_t)(end - src) : src_size;
+  memcpy(dest, src, MIN(len, dest_size - 1));
+}
+
+gboolean dt_util_blob_has_fixed_string(const void *blob,
+                                       const size_t blob_size,
+                                       const size_t field_offset,
+                                       const size_t field_size)
+{
+  // compare by subtraction: field_offset + field_size can wrap around
+  if(!blob || field_size > blob_size || field_offset > blob_size - field_size)
+    return FALSE;
+  return memchr((const char *)blob + field_offset, '\0', field_size) != NULL;
+}
+
 
 gboolean dt_util_test_image_file(const char *filename)
 {
@@ -770,8 +793,8 @@ gchar *dt_util_normalize_path(const gchar *_input)
     if(g_str_has_prefix(input, "file://")) // in this case we should take care of %XX encodings in the string
                                            // (for example %20 = ' ')
     {
-      input += strlen("file://");
-      filename = g_uri_unescape_string(input, NULL);
+      // don't advance input itself: on Windows it owns the allocation freed below
+      filename = g_uri_unescape_string(input + strlen("file://"), NULL);
     }
     else
       filename = g_strdup(input);
@@ -1196,10 +1219,19 @@ gchar *dt_str_replace(const char *string,
   return res;
 }
 
+gchar *dt_str_unmnemonic(const char *string)
+{
+  gchar **parts = g_strsplit(string, "_", -1);
+  gchar *res = g_strjoinv("__", parts);
+  g_strfreev(parts);
+  return res;
+}
+
+
 gboolean dt_str_commasubstring(const char *list,
                                const char *search)
 {
-  if(search == NULL)
+  if(list == NULL || search == NULL)
     return FALSE;
 
   gchar *nlist = g_strdup(list);
@@ -1224,7 +1256,8 @@ gboolean dt_is_scene_referred(void)
 {
   return dt_conf_is_equal("plugins/darkroom/workflow", "scene-referred (filmic)")
     || dt_conf_is_equal("plugins/darkroom/workflow", "scene-referred (sigmoid)")
-    || dt_conf_is_equal("plugins/darkroom/workflow", "scene-referred (AgX)");
+    || dt_conf_is_equal("plugins/darkroom/workflow", "scene-referred (AgX)")
+    || dt_conf_is_equal("plugins/darkroom/workflow", "scene-referred (spektrafilm)");
 }
 
 gboolean dt_is_display_referred(void)

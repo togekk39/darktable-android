@@ -20,6 +20,10 @@
 
 #include "develop/blend.h"
 
+#include <sqlite3.h>
+
+struct dt_presets_params_t; // common/presets.h
+
 // format flags stored into the presets database; the FOR_NOT_
 // variants are negated to keep existing presets
 typedef enum dt_gui_presets_format_flag_t
@@ -139,13 +143,69 @@ void dt_gui_presets_update_filter(const char *name,
                                   const int filter);
 
 /** show the popup menu for the given module, with default behavior. */
-GtkMenu *dt_gui_presets_popup_menu_show_for_module(dt_iop_module_t *module);
+void dt_gui_presets_popup_menu_show_for_module(GtkWidget *button, dt_iop_module_t *module);
+
+/** ops for building a preset popup menu (dt_gui_presets_popup_menu_show()).
+ *  rows() returns the menu's presets as dt_presets_params_t (common/presets.h,
+ *  dt_presets_menu_rows_iop() or _lib()), name and writeprotect at least;
+ *  the callbacks get one row each. */
+typedef struct dt_gui_presets_menu_ops_t
+{
+  gpointer data;                     /* caller context, passed to every callback */
+  const gchar *hide_defaults_pref;   /* conf key: which default presets to hide */
+  GList *(*rows)(gpointer data);     /* the presets, freed with dt_presets_params_free */
+  gboolean (*is_default)(const struct dt_presets_params_t *row, gpointer data);   /* dimmed built-in; NULL = none */
+  gboolean (*is_disabled)(const struct dt_presets_params_t *row, gpointer data);  /* greyed out (wrong op version); NULL = none */
+  gboolean (*is_active)(const struct dt_presets_params_t *row, gpointer data,
+                        gboolean *writeprotect);               /* highlighted current-params match */
+  int params_size;               /* 0 disables "store new preset" */
+  void *activate_cb;             /* activate preset */
+  void *manage_cb;               /* "manage presets..." item; NULL = none */
+  void *edit_cb;                 /* "edit this preset.." */
+  void *del_cb;                  /* "delete this preset" */
+  void *store_cb;                /* "store new preset.." */
+  void *update_cb;               /* "update preset" */
+  void (*prefs)(GMenu *menu, gpointer data); /* trailing prefs section; NULL = none */
+} dt_gui_presets_menu_ops_t;
+
+/** build the shared preset popup menu (the iop darkroom and lib header/
+ *  modulegroups presets menus are the same menu).  The caller owns popping
+ *  the menu up and any per-menu destroy cleanup; the menu is not popped and
+ *  not destroyed here. */
+GtkWidget *dt_gui_presets_popup_menu_show(GtkWidget *button,
+                                          const dt_gui_presets_menu_ops_t *ops);
 
 /** show popupmenu for favorite modules */
 void dt_gui_favorite_presets_menu_show(GtkWidget *w);
 
 /** apply a preset to the current module **/
 void dt_gui_presets_apply_preset(const gchar* name, dt_iop_module_t *module);
+
+/** the blend params of `module` as a preset stores them: with the forms of
+    its mask (dt_masks_blend_blob_encode()). g_free() the result **/
+void *dt_gui_presets_module_blend_blob(dt_iop_module_t *module, size_t *size);
+
+/** an AI object stored as pixels, in a mask a preset or a style is about to
+    store, applies to its own image only and is left out. TRUE to save without
+    it: the user is asked, or, without a GUI to ask in, the log says so. For a
+    style, `style_modules` names the modules whose masks hold one, one per line
+    (dt_styles_history_pixel_mask_modules()); NULL for a preset. Every
+    interactive save of a preset or style mask goes through here before it
+    changes anything **/
+gboolean dt_gui_presets_confirm_pixel_masks(const char *style_modules);
+
+/** dt_gui_presets_confirm_pixel_masks() for a preset of `module`, when its
+    mask holds such an object. TRUE to save the preset **/
+gboolean dt_gui_presets_confirm_module_mask(dt_iop_module_t *module);
+
+/** the blend part of dt_gui_presets_apply_preset(): commits a preset's stored
+    blend params to `module`, converted to the current version with its mask
+    migrated to flexi, or with the forms of its mask added to the image
+    (dt_develop_blend_params_read()), and keeps a locked mask. Needs no GUI **/
+void dt_gui_presets_apply_blend_params(dt_iop_module_t *module,
+                                       const void *blendop_params,
+                                       const int blendop_version,
+                                       const int bl_length);
 
 /** apply next or previous preset to the current module **/
 void dt_gui_presets_apply_adjacent_preset(dt_iop_module_t *module, const int direction);

@@ -15,6 +15,7 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
+
 #include "common/gdk_event_utils.h"
 
 #include "common/collection.h"
@@ -34,9 +35,11 @@
 
 #include <gdk/gdkkeysyms.h>
 #include <sys/param.h>
+
 #ifdef GDK_WINDOWING_QUARTZ
 #include "osx/osx.h"
 #endif
+
 #ifdef USE_LUA
 #include "lua/call.h"
 #include "lua/image.h"
@@ -177,8 +180,6 @@ static const char *_labels[] = {
 };
 
 
-static gboolean _dndactive = FALSE;
-
 const char *name(dt_lib_module_t *self)
 {
   return _("image information");
@@ -212,7 +213,7 @@ static void _lib_metadata_init_queue(dt_lib_module_t *self)
   uint32_t i = 0;
   while(i < md_xmp_metadata)
   {
-    dt_lib_metadata_info_t *m = g_malloc0(sizeof(dt_lib_metadata_info_t));
+    dt_lib_metadata_info_t *m = g_try_malloc0(sizeof(dt_lib_metadata_info_t));
     if(m)
     {
       m->name = g_strdup(_labels[i]);
@@ -235,7 +236,7 @@ static void _lib_metadata_init_queue(dt_lib_module_t *self)
 
     if(!metadata->internal)
     {
-      dt_lib_metadata_info_t *m = g_malloc0(sizeof(dt_lib_metadata_info_t));
+      dt_lib_metadata_info_t *m = g_try_malloc0(sizeof(dt_lib_metadata_info_t));
       if(m)
       {
         m->name = g_strdup(metadata->name);
@@ -512,21 +513,7 @@ void gui_update(dt_lib_module_t *self)
     else
     {
       images = dt_act_on_get_query(FALSE);
-      sqlite3_stmt *stmt;
-      // clang-format off
-      gchar *query = g_strdup_printf("SELECT id, COUNT(id) "
-                                     "FROM main.images "
-                                     "WHERE id IN (%s)",
-                                     images);
-      // clang-format on
-      DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), query, -1, &stmt, NULL);
-      if(sqlite3_step(stmt) == SQLITE_ROW)
-      {
-        mouse_over_id = sqlite3_column_int(stmt, 0);
-        count = sqlite3_column_int(stmt, 1);
-      }
-      sqlite3_finalize(stmt);
-      g_free(query);
+      count = dt_image_count_in_query(images, &mouse_over_id);
 
       // Still 0 => no selection in progress
       if(count == 0)
@@ -625,17 +612,6 @@ void gui_update(dt_lib_module_t *self)
 
     DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), query, -1, &stmt, NULL);
 
-    sqlite3_stmt *stmt_tags = NULL;
-    // clang-format off
-    gchar *tag_query = g_strdup_printf("SELECT flags, COUNT(DISTINCT imgid)"
-                                       " FROM main.tagged_images"
-                                       " JOIN data.tags"
-                                       " ON data.tags.id = main.tagged_images.tagid"
-                                       "   AND name NOT LIKE 'darktable|%%' "
-                                       " WHERE imgid in (%s) GROUP BY tagid", images);
-    // clang-format on
-    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), tag_query, -1, &stmt_tags, NULL);
-    g_free(tag_query);
     g_free(query);
 
     if(sqlite3_step(stmt) == SQLITE_ROW)
@@ -655,22 +631,23 @@ void gui_update(dt_lib_module_t *self)
     gboolean same_tags = TRUE;
     gboolean same_categories = TRUE;
 
-    while(sqlite3_step(stmt_tags) == SQLITE_ROW)
+    GList *tag_counts = dt_tag_get_flags_counts(images);
+    for(GList *iter = tag_counts; iter; iter = g_list_next(iter))
     {
-      if(sqlite3_column_int(stmt_tags, 0) & DT_TF_CATEGORY)
+      const dt_tag_flags_count_t *fc = iter->data;
+      if(fc->flags & DT_TF_CATEGORY)
       {
-        same_categories &= (sqlite3_column_int(stmt_tags, 1) == count);
+        same_categories &= (fc->count == count);
       }
       else
       {
-        same_tags &= (sqlite3_column_int(stmt_tags, 1) == count);
+        same_tags &= (fc->count == count);
       }
     }
+    g_list_free_full(tag_counts, g_free);
 
     skip[md_tag_names] = !same_tags;
     skip[md_categories] = !same_categories;
-
-    sqlite3_finalize(stmt_tags);
   }
 
   g_free(images);
@@ -689,7 +666,7 @@ void gui_update(dt_lib_module_t *self)
   // Update the metadata values
   for(int32_t md = 0; md < md_xmp_metadata + d->metadata_count; md++)
   {
-    if(skip[md] == TRUE)
+    if(skip[md])
     {
       if(md == md_internal_flags)
       {
@@ -1443,17 +1420,11 @@ static void _select_toggled_callback(GtkCellRendererToggle *cell_renderer,
   gtk_tree_path_free(path);
 }
 
-static void _drag_data_inserted(GtkTreeModel *tree_model,
-                                GtkTreePath *path,
-                                GtkTreeIter *iter,
-                                gpointer user_data)
+static void _menuitem_preferences(GSimpleAction *action,
+                                  GVariant *parameter,
+                                  gpointer user_data)
 {
-  _dndactive = TRUE;
-}
-
-void _menuitem_preferences(GtkMenuItem *menuitem,
-                           dt_lib_module_t *self)
-{
+  dt_lib_module_t *self = (dt_lib_module_t *)user_data;
   dt_lib_metadata_view_t *d = self->data;
 
   GtkWidget *win = dt_ui_main_window(darktable.gui->ui);
@@ -1463,7 +1434,7 @@ void _menuitem_preferences(GtkMenuItem *menuitem,
                                                   _("_cancel"), GTK_RESPONSE_NONE,
                                                   _("_save"), GTK_RESPONSE_ACCEPT, NULL);
   gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_ACCEPT);
-  g_signal_connect(dialog, "key-press-event", G_CALLBACK(dt_handle_dialog_enter), NULL);
+  dt_gui_connect_key(dialog, dt_handle_dialog_enter, NULL);
 
   GtkListStore *store = gtk_list_store_new(DT_METADATA_PREF_NUM_COLS,
                                            G_TYPE_INT, G_TYPE_STRING, G_TYPE_BOOLEAN);
@@ -1506,7 +1477,6 @@ void _menuitem_preferences(GtkMenuItem *menuitem,
 
   // drag & drop
   gtk_tree_view_set_reorderable(GTK_TREE_VIEW(view), TRUE);
-  g_signal_connect(G_OBJECT(model), "row-inserted", G_CALLBACK(_drag_data_inserted), NULL);
   GtkWidget *w = dt_gui_scroll_wrap(view);
   gtk_widget_set_size_request(w, -1, DT_PIXEL_APPLY_DPI(600));
   gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(w),
@@ -1569,12 +1539,12 @@ void _menuitem_preferences(GtkMenuItem *menuitem,
   gtk_widget_destroy(dialog);
 }
 
-void set_preferences(void *menu,
-                     dt_lib_module_t *self)
+void set_preferences(GMenu *menu, GActionGroup *action_group, dt_lib_module_t *self)
 {
-  GtkWidget *mi = gtk_menu_item_new_with_label(_("preferences..."));
-  g_signal_connect(G_OBJECT(mi), "activate", G_CALLBACK(_menuitem_preferences), self);
-  gtk_menu_shell_append(GTK_MENU_SHELL(menu), mi);
+  GSimpleAction *action = g_simple_action_new("preferences", NULL);
+  g_signal_connect(action, "activate", G_CALLBACK(_menuitem_preferences), self);
+  g_action_map_add_action(G_ACTION_MAP(action_group), G_ACTION(action));
+  g_menu_append(menu, _("preferences..."), "presets.preferences");
 }
 
 void *get_params(dt_lib_module_t *self,
@@ -1889,6 +1859,7 @@ void init(struct dt_lib_module_t *self)
   lua_pop(L, 2);
 }
 #endif
+
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent

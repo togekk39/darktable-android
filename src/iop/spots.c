@@ -27,6 +27,7 @@
 #include "gui/accelerators.h"
 #include "gui/gtk.h"
 #include "iop/iop_api.h"
+
 #include <gtk/gtk.h>
 #include <stdlib.h>
 
@@ -191,7 +192,7 @@ static void _resynch_params(dt_iop_module_t *self)
   int nalgo[64] = { 2 };
 
   // we go through all forms in blend params
-  dt_masks_form_t *grp = dt_masks_get_from_id(self->dev, bp->mask_id);
+  dt_masks_form_t *grp = dt_masks_get_from_id(darktable.develop, bp->mask_id);
   if(grp && (grp->type & DT_MASKS_GROUP))
   {
     int i = 0;
@@ -217,14 +218,6 @@ static void _resynch_params(dt_iop_module_t *self)
     p->clone_algo[i] = nalgo[i];
     p->clone_id[i] = nid[i];
   }
-}
-
-/* Native single-image clients share the original mask-to-parameter sync.
- * The owning engine serializes access and records masks/history atomically. */
-G_MODULE_EXPORT void dt_iop_mobile_sync_mask_forms(dt_iop_module_t *self)
-{
-  if(self && self->params && self->blend_params && self->dev
-     && self->params_size == sizeof(dt_iop_spots_params_t)) _resynch_params(self);
 }
 
 static gboolean _reset_form_creation(GtkWidget *widget, dt_iop_module_t *self)
@@ -348,13 +341,8 @@ static void _add_shape_callback(GtkGestureSingle *gesture,
   GtkWidget *widget = dt_gui_get_widget(gesture);
   const dt_iop_spots_gui_data_t *g = self->gui_data;
 
-  gboolean creation_continuous = FALSE;
-  GdkEvent *event = gtk_get_current_event();
-  if(event)
-  {
-    creation_continuous = dt_modifier_is(dt_gdk_event_get_state(event), GDK_CONTROL_MASK);
-    gdk_event_free(event);
-  }
+  const gboolean creation_continuous =
+    dt_modifier_is(dt_gui_current_state(gesture), GDK_CONTROL_MASK);
 
   _add_shape(widget, creation_continuous, self);
 
@@ -580,13 +568,13 @@ static int masks_get_delta(dt_iop_module_t *self,
   return res;
 }
 
-void _process(dt_iop_module_t *self,
-              dt_dev_pixelpipe_iop_t *piece,
-              const float *const in,
-              float *const out,
-              const dt_iop_roi_t *const roi_in,
-              const dt_iop_roi_t *const roi_out,
-              const int ch)
+static void _process(dt_iop_module_t *self,
+                     dt_dev_pixelpipe_iop_t *piece,
+                     const float *const in,
+                     float *const out,
+                     const dt_iop_roi_t *const roi_in,
+                     const dt_iop_roi_t *const roi_out,
+                     const int ch)
 {
   dt_iop_spots_params_t *d = piece->data;
   dt_develop_blend_params_t *bp = piece->blendop_data;

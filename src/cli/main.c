@@ -34,6 +34,8 @@
 #include "common/history.h"
 #include "common/image.h"
 #include "common/image_cache.h"
+#include "common/iop_profile.h"
+#include "common/mipmap_cache.h"
 #include "common/points.h"
 #include "control/conf.h"
 #include "develop/imageop.h"
@@ -102,6 +104,13 @@ fprintf(stderr, "darktable %s\n"
                 "   --icc-file <file> specify icc filename, default to NONE\n"
                 "   --icc-intent <intent> specify icc intent, default to LAST\n"
                 "                     use --help icc-intent for list of supported intents\n"
+                "   --pq-peak <nits>  peak luminance of PQ output, 203 to 10000,\n"
+                "                     default from the export module's setting\n"
+                "   --print-paths     print the resolved configdir, cachedir, tmpdir,\n"
+                "                     datadir, moduledir, localedir and library paths\n"
+                "                     for this install, then exit\n"
+                "   --print-paths-as-flags  like --print-paths, printed as a single\n"
+                "                     line of --flag value pairs\n"
                 "   --verbose\n"
                 "   -h, --help [option]\n"
                 "   -v, --version\n",
@@ -238,12 +247,14 @@ int main(int argc, char *arg[])
   gboolean verbose = FALSE, high_quality = TRUE, upscale = FALSE,
            style_overwrite = FALSE, custom_presets = TRUE, export_masks = FALSE,
            output_to_dir = FALSE;
+  gboolean print_paths = FALSE, print_paths_as_flags = FALSE;
 
   GList* inputs = NULL;
 
   dt_colorspaces_color_profile_type_t icc_type = DT_COLORSPACE_NONE;
   gchar *icc_filename = NULL;
   dt_iop_color_intent_t icc_intent = DT_INTENT_LAST;
+  int pq_peak_nits = 0;
 
   int k;
   for(k = 1; k < argc; k++)
@@ -432,6 +443,17 @@ int main(int argc, char *arg[])
           exit(1);
         }
       }
+      else if(!strcmp(arg[k], "--pq-peak") && argc > k + 1)
+      {
+        k++;
+        pq_peak_nits = atoi(arg[k]);
+        if(pq_peak_nits < DT_HDR_REFERENCE_WHITE_NITS || pq_peak_nits > 10000)
+        {
+          fprintf(stderr, _("incorrect PQ peak for --pq-peak: '%s'\n"), arg[k]);
+          usage(arg[0]);
+          exit(1);
+        }
+      }
       else if(!strcmp(arg[k], "-v") || !strcmp(arg[k], "--verbose"))
       {
         verbose = TRUE;
@@ -441,6 +463,16 @@ int main(int argc, char *arg[])
         // everything from here on should be passed to the core
         k++;
         break;
+      }
+      else if(!strcmp(arg[k], "--print-paths"))
+      {
+        print_paths = TRUE;
+        print_paths_as_flags = FALSE;
+      }
+      else if(!strcmp(arg[k], "--print-paths-as-flags"))
+      {
+        print_paths_as_flags = TRUE;
+        print_paths = FALSE;
       }
       else
       {
@@ -462,14 +494,26 @@ int main(int argc, char *arg[])
   }
 
   int m_argc = 0;
-  char **m_arg = malloc(sizeof(char *) * (5 + argc - k + 1));
+  char **m_arg = malloc(sizeof(char *) * (6 + argc - k + 1));
   m_arg[m_argc++] = "darktable-cli";
   m_arg[m_argc++] = "--library";
   m_arg[m_argc++] = library ? library : ":memory:";
   m_arg[m_argc++] = "--conf";
   m_arg[m_argc++] = "write_sidecar_files=never";
   for(; k < argc; k++) m_arg[m_argc++] = arg[k];
+  if(print_paths_as_flags)
+    m_arg[m_argc++] = "--print-paths-as-flags";
+  else if(print_paths)
+    m_arg[m_argc++] = "--print-paths";
   m_arg[m_argc] = NULL;
+
+  if(print_paths || print_paths_as_flags)
+  {
+    // dt_init() resolves and prints the paths, then exit()s directly -
+    // skip the input/output file requirements below, they don't apply
+    // to a paths query.
+    dt_init(m_argc, m_arg, FALSE, custom_presets, NULL);
+  }
 
   gboolean args_error = FALSE;
   if(inputs && file_counter < 1)
@@ -811,6 +855,7 @@ int main(int argc, char *arg[])
     g_free(output_ext);
     exit(1);
   }
+  g_free(output_ext);
 
   uint32_t w, h, fw, fh, sw, sh;
   fw = fh = sw = sh = 0;
@@ -852,6 +897,9 @@ int main(int argc, char *arg[])
 
   // TODO: add a callback to set the bpp without going through the config
 
+  // the exports below run in this thread
+  dt_ioppr_set_thread_pq_peak_nits(pq_peak_nits);
+
   int num = 1, res = 0;
   for(GList *iter = id_list; iter; iter = g_list_next(iter), num++)
   {
@@ -874,6 +922,10 @@ int main(int argc, char *arg[])
                       upscale, FALSE, 1.0, export_masks,
                       icc_type, icc_filename, icc_intent, &metadata) != 0)
       res = 1;
+
+    // a batch never comes back to an image, so its decoded raw would only
+    // keep memory from the next ones until the full cache fills up
+    dt_mipmap_cache_evict_at_size(id, DT_MIPMAP_FULL);
   }
 
   // cleanup time

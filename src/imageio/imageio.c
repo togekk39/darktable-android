@@ -53,14 +53,6 @@
 #include "imageio/imageio_rgbe.h"
 #include "imageio/imageio_tiff.h"
 
-struct dt_imageio_preview_cancel_t
-{
-  GMutex mutex;
-  dt_dev_pixelpipe_t *pipe;
-  gboolean cancelled;
-  dt_imageio_toneequal_sample_t *toneequal_sample;
-};
-
 #ifdef HAVE_LIBAVIF
 #include "imageio/imageio_avif.h"
 #endif
@@ -90,7 +82,6 @@ struct dt_imageio_preview_cancel_t
   #endif
 #endif
 
-#include <assert.h>
 #include <glib/gstdio.h>
 #include <inttypes.h>
 #include <math.h>
@@ -206,6 +197,28 @@ typedef struct {
   const char   *searchstring;	   // sub-signature which might be anywhere in first 512 bytes of file
 } dt_magic_bytes_t;
 
+// RawSpeed first. If it can't decode the file, LibRaw gets a chance for
+// the formats it supports and RawSpeed doesn't (see the fallback table
+// in imageio_libraw.c), e.g. Nikon HE/HE*, Sony ARW 6, Fujifilm lossy.
+static dt_imageio_retval_t _open_rawspeed(dt_image_t *img,
+                                          const char *filename,
+                                          dt_mipmap_buffer_t *mbuf)
+{
+  const dt_imageio_retval_t ret = dt_imageio_open_rawspeed(img, filename, mbuf);
+#ifdef HAVE_LIBRAW
+  if(ret != DT_IMAGEIO_OK
+     && ret != DT_IMAGEIO_IOERROR
+     && ret != DT_IMAGEIO_CACHE_FULL)
+  {
+    const dt_imageio_retval_t lr_ret =
+      dt_imageio_open_libraw_fallback(img, filename, mbuf, ret);
+    if(lr_ret != DT_IMAGEIO_UNSUPPORTED_FORMAT)
+      return lr_ret;
+  }
+#endif
+  return ret;
+}
+
 static dt_imageio_retval_t _try_open_as_tiff_on_failure_fallback_to_rawspeed
    (dt_image_t *img,
     const char *filename,
@@ -279,47 +292,47 @@ static const dt_magic_bytes_t _magic_signatures[] = {
   { DT_FILETYPE_RGBE, TRUE, 0, 7, dt_imageio_open_rgbe,
     { '#', '?', 'R', 'G', 'B', 'E', 0x0A } },
   // original v1 CRW
-  { DT_FILETYPE_CRW, TRUE, 0, 14, dt_imageio_open_rawspeed,
+  { DT_FILETYPE_CRW, TRUE, 0, 14, _open_rawspeed,
     { 'I', 'I', 0x1A, 0x00, 0x00, 0x00, 'H', 'E', 'A', 'P', 'C', 'C', 'D', 'R' } },
   // most CR2
-  { DT_FILETYPE_CR2, TRUE, 0, 10, dt_imageio_open_rawspeed,
+  { DT_FILETYPE_CR2, TRUE, 0, 10, _open_rawspeed,
     { 'I', 'I', '*', 0x00, 0x10, 0x00, 0x00, 0x00, 'C', 'R' } },
   // CR3 (ISOBMFF)
   { DT_FILETYPE_CR3, TRUE, 0, 24, dt_imageio_open_libraw,
     { 0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p', 'c', 'r', 'x', ' ',
       0x00, 0x00, 0x00, 0x01, 'c', 'r', 'x', ' ', 'i', 's', 'o', 'm' } },
   // older Canon RAW formats using TIF extension
-  { DT_FILETYPE_CRW, TRUE, 0, 10, dt_imageio_open_rawspeed,
+  { DT_FILETYPE_CRW, TRUE, 0, 10, _open_rawspeed,
     { 'I', 'I', '*', 0x00, 0x00, 0x03, 0x00, 0x00, 0xFF, 0x01 } }, // i.e. DCS1
-  { DT_FILETYPE_CRW, TRUE, 0, 10, dt_imageio_open_rawspeed,
+  { DT_FILETYPE_CRW, TRUE, 0, 10, _open_rawspeed,
     { 'M', 'M', 0x00, '*', 0x00, 0x00, 0x00, 0x10, 0xBA, 0xB0 } }, // i.e. 1D, 1Ds
-  { DT_FILETYPE_CRW, TRUE, 0, 10, dt_imageio_open_rawspeed,
+  { DT_FILETYPE_CRW, TRUE, 0, 10, _open_rawspeed,
     { 'M', 'M', 0x00, '*', 0x00, 0x00, 0x11, 0x34, 0x00, 0x04 } }, // i.e. D2000
   // older Kodak RAW formats using TIF extension
-  { DT_FILETYPE_KODAK, TRUE, 0, 10, dt_imageio_open_rawspeed,
+  { DT_FILETYPE_KODAK, TRUE, 0, 10, _open_rawspeed,
     { 'I', 'I', '*', 0x00, 0x00, 0x03, 0x00, 0x00, 0x7C, 0x01 } }, // i.e. DCS460D
-  { DT_FILETYPE_KODAK, TRUE, 0, 10, dt_imageio_open_rawspeed,
+  { DT_FILETYPE_KODAK, TRUE, 0, 10, _open_rawspeed,
     { 'M', 'M', 0x00, '*', 0x00, 0x00, 0x11, 0xA8, 0x00, 0x04 } }, // i.e. DCS520C
-  { DT_FILETYPE_KODAK, TRUE, 0, 10, dt_imageio_open_rawspeed,
+  { DT_FILETYPE_KODAK, TRUE, 0, 10, _open_rawspeed,
     { 'M', 'M', 0x00, '*', 0x00, 0x00, 0x11, 0x76, 0x00, 0x04 } }, // i.e. DCS560C
   // IIQ raw images, may use either .IIQ or .TIF extension
-  { DT_FILETYPE_IIQ, TRUE, 8, 4, dt_imageio_open_rawspeed,
+  { DT_FILETYPE_IIQ, TRUE, 8, 4, _open_rawspeed,
     { 'I', 'I', 'I', 'I' } },
   // Fujifilm RAF
-  { DT_FILETYPE_RAF, TRUE, 0, 15, dt_imageio_open_rawspeed,
+  { DT_FILETYPE_RAF, TRUE, 0, 15, _open_rawspeed,
     { 'F', 'U', 'J', 'I', 'F', 'I', 'L', 'M', 'C', 'C', 'D', '-', 'R', 'A', 'W' }},
   // Minolta MRW file
-  { DT_FILETYPE_MRW, TRUE, 0, 4, dt_imageio_open_rawspeed,
+  { DT_FILETYPE_MRW, TRUE, 0, 4, _open_rawspeed,
     { 0x00, 'M', 'R', 'M' } },
   // Olympus ORF file
-  { DT_FILETYPE_ORF, TRUE, 0, 4, dt_imageio_open_rawspeed,
+  { DT_FILETYPE_ORF, TRUE, 0, 4, _open_rawspeed,
     { 'I', 'I', 'R', 'O' } },   // most Olympus models
-  { DT_FILETYPE_ORF, TRUE, 0, 4, dt_imageio_open_rawspeed,
+  { DT_FILETYPE_ORF, TRUE, 0, 4, _open_rawspeed,
     { 'I', 'I', 'R', 'S' } },	// C7070WZ
-  { DT_FILETYPE_ORF, TRUE, 0, 4, dt_imageio_open_rawspeed,
+  { DT_FILETYPE_ORF, TRUE, 0, 4, _open_rawspeed,
     { 'M', 'M', 'O', 'R' } },   // E-10
   // Panasonic RW2 file
-  { DT_FILETYPE_RW2, TRUE, 0, 8, dt_imageio_open_rawspeed,
+  { DT_FILETYPE_RW2, TRUE, 0, 8, _open_rawspeed,
     { 'I', 'I', 'U', 0x00, 0x08, 0x00, 0x00, 0x00 } },
   // Sigma Foveon X3F file
   { DT_FILETYPE_X3F, TRUE, 0, 4, dt_imageio_open_libraw,
@@ -518,12 +531,12 @@ static dt_magic_bytes_t _windows_BMP_signature = { DT_FILETYPE_BMP, FALSE, 0, 2,
 // need to open and examine dng images to find out the type of
 // content.
 static const gchar *_supported_raw[]
-    = { "3fr", "ari", "arw", "bay", "cr2", "cr3", "crw", "dc2", "dcr", "erf", "fff", "gpr",
+    = { "3fr", "ari", "arw", "bay", "cr2", "cr3", "crw", "dc2", "dcr", "erf", "fff",
         "ia",  "iiq", "k25", "kc2", "kdc", "mdc", "mef", "mos", "mrw", "nef", "nrw",
         "orf", "ori", "pef", "raf", "raw", "rw2", "rwl", "sr2", "srf", "srw", "sti",
         "x3f", NULL };
 static const gchar *_supported_ldr[]
-    = { "bmp", "bmq", "cap", "cin", "cine", "cs1", "dcm",  "gif", "j2c",  "j2k",
+    = { "bmp", "bmq", "cap", "cin", "cine", "cs1", "dcm",  "gif", "gpr", "j2c",  "j2k",
         "jng", "jp2", "jpc", "jpeg", "jpg", "miff", "mng", "pbm", "pfm",  "pgm",
         "png", "pnm", "ppm", "pxn",  "qoi", "qtk",  "rdc", "tif", "tiff", "webp",
         NULL };
@@ -606,7 +619,7 @@ static dt_imageio_retval_t _try_open_as_tiff_on_failure_fallback_to_rawspeed
   dt_imageio_retval_t ret = DT_IMAGEIO_LOAD_FAILED;
   ret = dt_imageio_open_tiff(img, filename, mbuf);
   if(!_image_handled(ret))
-    ret = dt_imageio_open_rawspeed(img, filename, mbuf);
+    ret = _open_rawspeed(img, filename, mbuf);
 
   return ret;
 }
@@ -683,7 +696,7 @@ gboolean dt_imageio_large_thumbnail(const char *filename,
     if(dt_imageio_jpeg_decompress_header(buf, bufsize, &jpg))
       goto error;
 
-    *buffer = dt_alloc_align_uint8(4 * jpg.width * jpg.height);
+    *buffer = dt_alloc_align_uint8((size_t)4 * jpg.width * jpg.height);
     if(!*buffer) goto error;
 
     *width = jpg.width;
@@ -1048,9 +1061,7 @@ static double _get_pipescale(dt_dev_pixelpipe_t *pipe,
   return fmin(scalex, scaley);
 }
 
-// internal function: to avoid exif blob reading + 8-bit byteorder
-// flag + high-quality override
-static gboolean _imageio_export_with_flags(const dt_imgid_t imgid,
+gboolean dt_imageio_export_with_flags(const dt_imgid_t imgid,
                                       const char *filename,
                                       dt_imageio_module_format_t *format,
                                       dt_imageio_module_data_t *format_params,
@@ -1072,8 +1083,7 @@ static gboolean _imageio_export_with_flags(const dt_imgid_t imgid,
                                       int num,
                                       const int total,
                                       dt_export_metadata_t *metadata,
-                                      const int history_end,
-                                      dt_imageio_preview_cancel_t *cancel)
+                                      const int history_end)
 {
   dt_develop_t dev;
   dt_dev_init(&dev, FALSE);
@@ -1110,13 +1120,16 @@ static gboolean _imageio_export_with_flags(const dt_imgid_t imgid,
   const int wd = img->width;
   const int ht = img->height;
 
+  // Check if masks/layers are supported for this format
+  const gboolean layers = export_masks
+            && (format->flags(NULL) & FORMAT_FLAGS_SUPPORT_LAYERS) == FORMAT_FLAGS_SUPPORT_LAYERS;
+
   dt_times_t start;
   dt_get_perf_times(&start);
   dt_dev_pixelpipe_t pipe;
   gboolean res = thumbnail_export
     ? dt_dev_pixelpipe_init_thumbnail(&pipe, wd, ht)
-    : dt_dev_pixelpipe_init_export(&pipe, wd, ht,
-                                   format->levels(format_params), export_masks);
+    : dt_dev_pixelpipe_init_export(&pipe, wd, ht, format->levels(format_params), layers);
   if(!res)
   {
     dt_control_log(
@@ -1124,16 +1137,6 @@ static gboolean _imageio_export_with_flags(const dt_imgid_t imgid,
         " for export or buy more memory."),
       thumbnail_export ? C_("noun", "thumbnail export") : C_("noun", "export"));
     goto error;
-  }
-
-  if(cancel)
-  {
-    g_mutex_lock(&cancel->mutex);
-    cancel->pipe = &pipe;
-    pipe.toneequal_sample = cancel->toneequal_sample;
-    if(cancel->cancelled)
-      dt_atomic_set_int(&pipe.shutdown, DT_DEV_PIXELPIPE_STOP_NODES);
-    g_mutex_unlock(&cancel->mutex);
   }
 
   const int final_history_end = history_end == -1 ? dev.history_end : history_end;
@@ -1317,7 +1320,7 @@ static gboolean _imageio_export_with_flags(const dt_imgid_t imgid,
   double scale = _get_pipescale(&pipe, width, height, max_scale);
   float origin[2] = { 0.0f, 0.0f };
 
-  if(dt_dev_distort_backtransform_plus(&dev, &pipe, 0.0,
+  if(dt_dev_distort_backtransform_plus(&dev, &pipe, 0,
                                        DT_DEV_TRANSFORM_DIR_ALL, origin, 1))
   {
     if(width == 0) width = pipe.processed_width;
@@ -1335,12 +1338,6 @@ static gboolean _imageio_export_with_flags(const dt_imgid_t imgid,
 
   const int processed_width = floor(scale * pipe.processed_width);
   const int processed_height = floor(scale * pipe.processed_height);
-  if(pipe.toneequal_sample)
-  {
-    pipe.toneequal_sample->output_scale = scale;
-    pipe.toneequal_sample->output_width = processed_width;
-    pipe.toneequal_sample->output_height = processed_height;
-  }
   if(scale == max_possible_scale && !thumbnail_export)
     dt_control_log(_("export reduced to %dx%d because of memory restrictions"),
             processed_width, processed_height);
@@ -1394,14 +1391,8 @@ static gboolean _imageio_export_with_flags(const dt_imgid_t imgid,
 
     if(finalscale) finalscale->enabled = FALSE;
 
-    // do the processing (8-bit with special treatment, to make sure
-    // we can use openmp further down):
-    if(bpp == 8)
-      dt_dev_pixelpipe_process(&pipe, &dev, 0, 0,
-                               processed_width, processed_height, scale, DT_DEVICE_NONE);
-    else
-      dt_dev_pixelpipe_process_no_gamma(&pipe, &dev, 0, 0,
-                                        processed_width, processed_height, scale);
+    dt_dev_pixelpipe_process_no_gamma(&pipe, &dev, 0, 0,
+                                      processed_width, processed_height, scale);
 
     if(finalscale) finalscale->enabled = TRUE;
   }
@@ -1419,56 +1410,27 @@ static gboolean _imageio_export_with_flags(const dt_imgid_t imgid,
   }
 
   // downconversion to low-precision formats:
+  uint8_t *buf8 = NULL;
   if(bpp == 8)
   {
-    if(display_byteorder)
+    // into a buffer of its own: in place, a pixel's bytes land on the floats
+    // of an earlier pixel, which another thread may not have read yet
+    buf8 = dt_alloc_align_uint8((size_t)4 * processed_width * processed_height);
+    if(!buf8)
     {
-      if(hq_process)
-      {
-        const float *const inbuf = (float *)outbuf;
-        for(size_t k = 0; k < (size_t)processed_width * processed_height; k++)
-        {
-          // convert in place, this is unfortunately very serial..
-          const uint8_t r = roundf(CLAMP(inbuf[4 * k + 2] * 0xff, 0, 0xff));
-          const uint8_t g = roundf(CLAMP(inbuf[4 * k + 1] * 0xff, 0, 0xff));
-          const uint8_t b = roundf(CLAMP(inbuf[4 * k + 0] * 0xff, 0, 0xff));
-          outbuf[4 * k + 0] = r;
-          outbuf[4 * k + 1] = g;
-          outbuf[4 * k + 2] = b;
-        }
-      }
-      // else processing output was 8-bit already, and no need to swap order
+      dt_print(DT_DEBUG_ALWAYS,
+               "[dt_imageio_export_with_flags] error allocating the 8-bit buffer");
+      goto error;
     }
-    else // need to flip
+    const float *const inbuf = (float *)outbuf;
+    DT_OMP_FOR()
+    for(int y = 0; y < processed_height; y++)
     {
-      // ldr output: char
-      if(hq_process)
-      {
-        const float *const inbuf = (float *)outbuf;
-        for(size_t k = 0; k < (size_t)processed_width * processed_height; k++)
-        {
-          // convert in place, this is unfortunately very serial..
-          const uint8_t r = roundf(CLAMP(inbuf[4 * k + 0] * 0xff, 0, 0xff));
-          const uint8_t g = roundf(CLAMP(inbuf[4 * k + 1] * 0xff, 0, 0xff));
-          const uint8_t b = roundf(CLAMP(inbuf[4 * k + 2] * 0xff, 0, 0xff));
-          outbuf[4 * k + 0] = r;
-          outbuf[4 * k + 1] = g;
-          outbuf[4 * k + 2] = b;
-        }
-      }
-      else
-      { // !display_byteorder, need to swap:
-        uint8_t *const buf8 = pipe.backbuf;
-        DT_OMP_FOR()
-        // just flip byte order
-        for(size_t k = 0; k < (size_t)processed_width * processed_height; k++)
-        {
-          uint8_t tmp = buf8[4 * k + 0];
-          buf8[4 * k + 0] = buf8[4 * k + 2];
-          buf8[4 * k + 2] = tmp;
-        }
-      }
+      const size_t row = (size_t)4 * processed_width * y;
+      dt_display_to_8bit_pixels(inbuf + row, buf8 + row, processed_width,
+                                display_byteorder);
     }
+    outbuf = buf8;
   }
   else if(bpp == 16)
   {
@@ -1540,6 +1502,7 @@ static gboolean _imageio_export_with_flags(const dt_imgid_t imgid,
                               icc_filename, NULL, 0, imgid, num, total,
                               &pipe, export_masks)) != 0;
   }
+  dt_free_align(buf8);
 
   if(res)
     goto error;
@@ -1550,13 +1513,6 @@ static gboolean _imageio_export_with_flags(const dt_imgid_t imgid,
   {
     dt_exif_xmp_attach_export(imgid, filename, metadata, &dev, &pipe);
     // no need to cancel the export if this fail
-  }
-
-  if(cancel)
-  {
-    g_mutex_lock(&cancel->mutex);
-    cancel->pipe = NULL;
-    g_mutex_unlock(&cancel->mutex);
   }
 
   dt_dev_pixelpipe_cleanup(&pipe);
@@ -1597,12 +1553,6 @@ static gboolean _imageio_export_with_flags(const dt_imgid_t imgid,
   return FALSE; // success
 
 error:
-  if(cancel)
-  {
-    g_mutex_lock(&cancel->mutex);
-    cancel->pipe = NULL;
-    g_mutex_unlock(&cancel->mutex);
-  }
   dt_dev_pixelpipe_cleanup(&pipe);
 error_early:
   dt_dev_cleanup(&dev);
@@ -1611,28 +1561,6 @@ error_early:
   if(!thumbnail_export)
     dt_set_backthumb_time(5.0);
   return TRUE;
-}
-
-
-gboolean dt_imageio_export_with_flags(const dt_imgid_t imgid, const char *filename,
-                                      dt_imageio_module_format_t *format,
-                                      dt_imageio_module_data_t *format_params,
-                                      const gboolean ignore_exif, const gboolean display_byteorder,
-                                      const gboolean high_quality, const gboolean upscale,
-                                      const gboolean is_scaling, const double scale_factor,
-                                      const gboolean thumbnail_export, const char *filter,
-                                      const gboolean copy_metadata, const gboolean export_masks,
-                                      const dt_colorspaces_color_profile_type_t icc_type,
-                                      const gchar *icc_filename, const dt_iop_color_intent_t icc_intent,
-                                      dt_imageio_module_storage_t *storage,
-                                      dt_imageio_module_data_t *storage_params, int num, const int total,
-                                      dt_export_metadata_t *metadata, const int history_end)
-{
-  return _imageio_export_with_flags(imgid, filename, format, format_params, ignore_exif,
-                                    display_byteorder, high_quality, upscale, is_scaling, scale_factor,
-                                    thumbnail_export, filter, copy_metadata, export_masks, icc_type,
-                                    icc_filename, icc_intent, storage, storage_params, num, total,
-                                    metadata, history_end, NULL);
 }
 
 
@@ -1712,7 +1640,7 @@ dt_imageio_retval_t dt_imageio_open(dt_image_t *img,
 
     // try using rawspeed to load a raw
     if(!_image_handled(ret))
-      ret = dt_imageio_open_rawspeed(img, filename, buf);
+      ret = _open_rawspeed(img, filename, buf);
 
     // fallback that tries to open file via LibRaw to support Canon CR3
     if(!_image_handled(ret))
@@ -1792,7 +1720,7 @@ static int _preview_write_image(dt_imageio_module_data_t *data,
   _imageio_preview_t *d = (_imageio_preview_t *)data;
 
   if(!in) return 1;
-  memcpy(d->buf, in, sizeof(uint32_t) * data->width * data->height);
+  memcpy(d->buf, in, sizeof(uint32_t) * (size_t)data->width * data->height);
   d->width = data->width;
   d->height = data->height;
 
@@ -1834,6 +1762,8 @@ cairo_surface_t *dt_imageio_preview(const dt_imgid_t imgid,
   dat.head.style_append = TRUE;
   dat.bpp = 8;
   dat.buf = (uint8_t *)dt_alloc_aligned(sizeof(uint32_t) * width * height);
+  if(!dat.buf)
+    return NULL;
 
   g_strlcpy(dat.head.style, style_name, sizeof(dat.head.style));
 
@@ -1858,149 +1788,28 @@ cairo_surface_t *dt_imageio_preview(const dt_imgid_t imgid,
   return surface;
 }
 
-dt_imageio_preview_cancel_t *dt_imageio_preview_cancel_new(void)
+void dt_imageio_pq_light_level(const float *const rgba,
+                               const size_t npixels,
+                               float *const max_cll,
+                               float *const max_fall)
 {
-  dt_imageio_preview_cancel_t *cancel = g_malloc0(sizeof(*cancel));
-  g_mutex_init(&cancel->mutex);
-  return cancel;
-}
+  float peak = 0.0f;
+  double sum = 0.0;
 
-void dt_imageio_preview_cancel(dt_imageio_preview_cancel_t *cancel)
-{
-  if(!cancel) return;
-  g_mutex_lock(&cancel->mutex);
-  cancel->cancelled = TRUE;
-  /* STOP_NODES is deliberately stored even while the pipe is idle: the
-   * processing entry point preserves it and exits before running nodes. */
-  if(cancel->pipe)
-    dt_atomic_set_int(&cancel->pipe->shutdown, DT_DEV_PIXELPIPE_STOP_NODES);
-  g_mutex_unlock(&cancel->mutex);
-}
-
-void dt_imageio_preview_cancel_free(dt_imageio_preview_cancel_t *cancel)
-{
-  if(!cancel) return;
-  g_mutex_clear(&cancel->mutex);
-  g_free(cancel);
-}
-
-gboolean dt_imageio_export_to_file(const dt_imgid_t imgid,
-                                  const char *filename,
-                                  dt_imageio_module_format_t *format,
-                                  dt_imageio_module_data_t *format_params,
-                                  dt_export_metadata_t *metadata,
-                                  dt_imageio_preview_cancel_t *cancel)
-{
-  return dt_imageio_export_to_file_with_options(imgid, filename, format, format_params,
-    FALSE, TRUE, DT_COLORSPACE_NONE, NULL, DT_INTENT_LAST, metadata, cancel);
-}
-
-gboolean dt_imageio_export_to_file_with_options(const dt_imgid_t imgid,
-                                  const char *filename,
-                                  dt_imageio_module_format_t *format,
-                                  dt_imageio_module_data_t *format_params,
-                                  gboolean ignore_exif, gboolean copy_metadata,
-                                  dt_colorspaces_color_profile_type_t icc_type,
-                                  const gchar *icc_filename,
-                                  dt_iop_color_intent_t icc_intent,
-                                  dt_export_metadata_t *metadata,
-                                  dt_imageio_preview_cancel_t *cancel)
-{
-  if(!strcmp(format->mime(format_params), "x-copy"))
-    return dt_imageio_export(imgid, filename, format, format_params,
-                             TRUE, FALSE, FALSE, 1.0, copy_metadata, FALSE,
-                             icc_type, icc_filename, icc_intent,
-                             NULL, NULL, 1, 1, metadata);
-  return _imageio_export_with_flags
-    (imgid, filename, format, format_params, ignore_exif, FALSE, TRUE, FALSE,
-     FALSE, 1.0, FALSE, NULL, copy_metadata, FALSE, icc_type, icc_filename,
-     icc_intent, NULL, NULL, 1, 1, metadata, -1, cancel);
-}
-
-gboolean dt_imageio_preview_to_memory(const dt_imgid_t imgid,
-                                      const size_t max_width,
-                                      const size_t max_height,
-                                      uint8_t **rgba,
-                                      uint32_t *width,
-                                      uint32_t *height,
-                                      dt_imageio_preview_cancel_t *cancel)
-{
-  if(!rgba || !width || !height || !max_width || !max_height
-     || max_width > UINT32_MAX || max_height > UINT32_MAX
-     || max_width > SIZE_MAX / max_height
-     || max_width * max_height > SIZE_MAX / sizeof(uint32_t))
-    return TRUE;
-
-  *rgba = NULL;
-  *width = *height = 0;
-  _imageio_preview_t dat = { 0 };
-  dat.head.max_width = max_width;
-  dat.head.max_height = max_height;
-  dat.head.width = max_width;
-  dat.head.height = max_height;
-  dat.bpp = 8;
-  dat.buf = dt_alloc_aligned(sizeof(uint32_t) * max_width * max_height);
-  if(!dat.buf) return TRUE;
-
-  dt_imageio_module_format_t format = { 0 };
-  format.mime = _preview_mime;
-  format.levels = _preview_levels;
-  format.bpp = _preview_bpp;
-  format.write_image = _preview_write_image;
-  const gboolean failed = _imageio_export_with_flags
-    (imgid, "mobile-preview", &format, (dt_imageio_module_data_t *)&dat,
-     TRUE, TRUE, FALSE, FALSE, FALSE, 1.0, FALSE, NULL, FALSE, FALSE,
-     DT_COLORSPACE_DISPLAY, NULL, DT_INTENT_LAST, NULL, NULL, 1, 1, NULL, -1, cancel);
-  if(failed || !dat.width || !dat.height)
+  // dt_hdr_pq_decode() maps NaN to black and clamps Inf to the PQ maximum,
+  // so neither can poison the sum or overflow the writers' integer fields
+  DT_OMP_FOR_SIMD(reduction(max : peak) reduction(+ : sum))
+  for(size_t k = 0; k < npixels; k++)
   {
-    dt_free_align(dat.buf);
-    return TRUE;
+    const float *const px = &rgba[4 * k];
+    const float nits = DT_HDR_REFERENCE_WHITE_NITS
+      * dt_hdr_pq_decode(fmaxf(fmaxf(px[0], px[1]), px[2]));
+    peak = fmaxf(peak, nits);
+    sum += nits;
   }
 
-  const size_t bytes = sizeof(uint32_t) * dat.width * dat.height;
-  uint8_t *result = malloc(bytes);
-  if(!result)
-  {
-    dt_free_align(dat.buf);
-    return TRUE;
-  }
-  /* display_byteorder produces BGRx. The mobile API preserves that byte order
-   * with opaque alpha; platform adapters must convert to their bitmap layout. */
-  memcpy(result, dat.buf, bytes);
-  for(size_t k = 3; k < bytes; k += 4) result[k] = 0xff;
-  dt_free_align(dat.buf);
-  *rgba = result;
-  *width = dat.width;
-  *height = dat.height;
-  return FALSE;
-}
-
-gboolean dt_imageio_toneequal_sample(const dt_imgid_t imgid,
-                                      const size_t max_width,
-                                      const size_t max_height,
-                                      dt_imageio_toneequal_sample_t *sample,
-                                      dt_imageio_preview_cancel_t *cancel)
-{
-  if(!sample || !cancel) return TRUE;
-  sample->found = FALSE;
-  sample->exposure = NAN;
-  g_mutex_lock(&cancel->mutex);
-  if(cancel->pipe || cancel->toneequal_sample)
-  {
-    g_mutex_unlock(&cancel->mutex);
-    return TRUE;
-  }
-  cancel->toneequal_sample = sample;
-  g_mutex_unlock(&cancel->mutex);
-  uint8_t *pixels = NULL;
-  uint32_t width = 0, height = 0;
-  const gboolean failed = dt_imageio_preview_to_memory(imgid, max_width, max_height,
-                                                       &pixels, &width, &height, cancel);
-  free(pixels);
-  g_mutex_lock(&cancel->mutex);
-  cancel->toneequal_sample = NULL;
-  g_mutex_unlock(&cancel->mutex);
-  return failed || !sample->found || !isfinite(sample->exposure);
+  *max_cll = peak;
+  *max_fall = npixels ? (float)(sum / (double)npixels) : 0.0f;
 }
 
 // clang-format off

@@ -1,6 +1,9 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Mobile engine integration
 
+See [upstream integration](UPSTREAM_INTEGRATION.md) for the isolated build
+configuration, compatibility checks and upstream update workflow.
+
 The target is the existing Android single-image interface with the desktop
 darktable processing algorithms, RAW inputs (including GoPro GPR), and desktop
 export capabilities. A lighttable, gallery scan, and image browser are outside
@@ -116,9 +119,10 @@ temperature module before subsequent operations.
 
 `dt_mobile_set_whitebalance_temperature` applies Kelvin/tint together using the
 desktop temperature module's original spectral integration, camera matrices and
-tint convention through `common/whitebalance`. The desktop GUI uses that same
-extracted core; Kotlin supplies no second formula. The original Y-scaling tint
-convention and blackbody/daylight transition remain unchanged.
+tint convention through `mobile/adapters/common/whitebalance.c`. The build
+generates its numerical helpers from the current upstream source; the desktop
+GUI keeps its original implementation. Kotlin supplies no second formula. The
+original Y-scaling tint convention and blackbody/daylight transition remain unchanged.
 The native description reports current values and original bounds only when
 calibration/current gains are usable. An Apply normalizes native channel 1 (green for RGB) to one, preserves
 the inactive fourth channel, selects user-defined balance and records one undo
@@ -226,8 +230,10 @@ build that includes it.
 
 ## Verification
 
-For an opt-in processing-library build from the repository root, set
-`BUILD_MOBILE_LIBRARY_ONLY=ON`. This also enables the mobile engine and keeps
+For the Android processing-library build, run `python3 mobile/tools/configure-engine.py -B <build-directory> --` with
+`BUILD_MOBILE_LIBRARY_ONLY=ON`. The dedicated configuration assembles a temporary
+upstream source view in the build directory and applies reviewed integration
+patches there. The tracked upstream checkout stays unchanged. It keeps
 `lib_darktable`, all configured processing and format/storage modules, and runtime data,
 while excluding desktop views, lighttable plugins, executables, documentation
 and packaging. Build `dt_mobile_runtime` to produce the complete dynamic module
@@ -262,9 +268,11 @@ edited full-size PNG round trip. Its CLI equivalent adds `--whitebalance` to
 the existing raw engine test; the other six sample tests keep their original
 behavior. These remain host tests, not Android execution proof.
 
-The real desktop-backed adapter must be configured from the repository root
-with `BUILD_MOBILE_ENGINE=ON`, `DT_MOBILE_BUILD_TESTS=ON` and the normal desktop
-build dependencies/submodules. Build target `dt_mobile_engine_test`, then run
+The real desktop-backed adapter must be configured with
+`python3 mobile/tools/configure-engine.py -B build/mobile-engine --
+-DDT_MOBILE_HOST_INTEGRATION_TESTS=ON -DDT_MOBILE_BUILD_TESTS=ON` and the normal
+desktop build dependencies/submodules. Host integration is an explicit test
+mode; a normal `cmake -S .` desktop build uses original upstream sources. Build target `dt_mobile_engine_test`, then run
 `ctest --test-dir <build-directory> -R '^dt_mobile_engine_test$'
 --output-on-failure`. The test changes exposure and curve nodes using upstream
 processing, checks that rendered pixels change, rejects invalid curve batches
@@ -276,8 +284,8 @@ selection, JPEG subsampling/DPI, original-source protection and exact temporary
 configuration restoration, including command-line override conflicts.
 White-balance checks cover gain- and Kelvin/tint-dependent pixels, exact undo,
 named setting semantics and inactive-fourth-channel preservation. With LCMS2
-available, the standalone `dt_mobile_temperature_test` also compares the shared
-spectral core to golden results from the original desktop source, including both
+available, the standalone `dt_mobile_temperature_test` also compares the generated
+spectral helper to golden results from the original desktop source, including both
 sides of its 4000 K transition. These tests do not establish Android execution.
 Cancellation after the real PNG encoder has written its temporary file also
 checks that the destination stays absent, the temporary file is removed and

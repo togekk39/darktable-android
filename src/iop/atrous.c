@@ -292,9 +292,10 @@ static void process_wavelets(dt_iop_module_t *self,
   if(self->dev->gui_attached && dt_pipe_is_full(piece->pipe))
   {
     dt_iop_atrous_gui_data_t *g = self->gui_data;
+    dt_iop_gui_enter_critical_section(self);
     g->num_samples = get_samples(g->sample, d, roi_in, piece);
-    // tries to acquire gdk lock and this prone to deadlock:
-    // dt_control_queue_draw(GTK_WIDGET(g->area));
+    dt_iop_gui_leave_critical_section(self);
+    // To be checked: redraw widget here?
   }
 
   // corner case of extremely small image. this is not really likely
@@ -338,7 +339,7 @@ static void process_wavelets(dt_iop_module_t *self,
   }
 
   // add in the final residue
-  DT_OMP_FOR_SIMD(aligned(buf1, out : 64) num_threads(MIN(dt_get_num_threads(),16)))
+  DT_OMP_FOR_SIMD_CAP_THREADS(MIN(dt_get_num_threads(),16), aligned(buf1, out : 64))
   for(size_t k = 0; k < (size_t)4 * width * height; k++)
     out[k] += buf1[k];
 
@@ -379,10 +380,10 @@ int process_cl(dt_iop_module_t *self,
   if(self->dev->gui_attached && dt_pipe_is_full(piece->pipe))
   {
     dt_iop_atrous_gui_data_t *g = self->gui_data;
+    dt_iop_gui_enter_critical_section(self);
     g->num_samples = get_samples(g->sample, d, roi_in, piece);
-    // dt_control_queue_redraw_widget(GTK_WIDGET(g->area));
-    // tries to acquire gdk lock and this prone to deadlock:
-    // dt_control_queue_draw(GTK_WIDGET(g->area));
+    dt_iop_gui_leave_critical_section(self);
+    // To be checked: redraw widget here?
   }
 
   cl_int err = CL_MEM_OBJECT_ALLOCATION_FAILURE;
@@ -454,12 +455,21 @@ int process_cl(dt_iop_module_t *self,
     }
   }
 
-  // add the residue (the coarse scale from the final decomposition)
-  // to the accumulated details
-  // work around CL 1.20 restriction is safe with the kernel,
+  /* Add the residue, the coarse scale from the final decomposition, to the accumulated
+     details. The kernel reads its accumulator and writes the sum, so the two cannot be
+     the same image: clSetKernelArg leaves the result undefined when one image object is
+     bound as both a read_only and a write_only argument.
+
+     After the loop pp_coarse holds the residue and is one of the two scratch buffers,
+     which leaves the other free to receive the sum before it is copied out. */
+  cl_mem residue_dst = (pp_coarse == dev_tmp) ? dev_tmp2 : dev_tmp;
   err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_addbuffers, width, height,
-          CLARG(dev_out), CLARG(dev_out), CLARG(pp_coarse),
+          CLARG(residue_dst), CLARG(dev_out), CLARG(pp_coarse),
           CLARG(width), CLARG(height));
+  if(err != CL_SUCCESS) goto error;
+
+  err = dt_opencl_enqueue_copy_image(devid, residue_dst, dev_out,
+                                     CLIMG_ORIGIN, CLIMG_ORIGIN, area);
 error:
   dt_opencl_release_mem_object(dev_filter);
   dt_opencl_release_mem_object(dev_tmp);
@@ -489,10 +499,10 @@ int process_cl(dt_iop_module_t *self,
   if(self->dev->gui_attached && dt_pipe_is_full(piece->pipe))
   {
     dt_iop_atrous_gui_data_t *g = self->gui_data;
+    dt_iop_gui_enter_critical_section(self);
     g->num_samples = get_samples(g->sample, d, roi_in, piece);
-    // dt_control_queue_redraw_widget(GTK_WIDGET(g->area));
-    // tries to acquire gdk lock and this prone to deadlock:
-    // dt_control_queue_draw(GTK_WIDGET(g->area));
+    dt_iop_gui_leave_critical_section(self);
+    // To be checked: redraw widget here?
   }
 
   cl_int err = DT_OPENCL_DEFAULT_ERROR;
@@ -1068,7 +1078,10 @@ static gboolean area_draw(GtkWidget *widget,
   dt_iop_atrous_gui_data_t *g = self->gui_data;
   dt_iop_atrous_params_t p = *(dt_iop_atrous_params_t *)self->params;
 
+  dt_iop_gui_enter_critical_section(self);
   const float mix = g->in_curve ? 1.0f : p.mix;
+  const int num_samples = g->num_samples;
+  dt_iop_gui_leave_critical_section(self);
 
   for(int k = 0; k < BANDS; k++)
   {
@@ -1155,10 +1168,10 @@ static gboolean area_draw(GtkWidget *widget,
 
 // draw frequency histogram in bg.
 #if 1
-  if(g->num_samples > 0)
+  if(num_samples > 0)
   {
     cairo_save(cr);
-    for(int k = 1; k < g->num_samples; k += 2)
+    for(int k = 1; k < num_samples; k += 2)
     {
       cairo_set_source_rgba(cr, graph_bg.red, graph_bg.green, graph_bg.blue, .3);
       cairo_move_to(cr, width * g->sample[k - 1], 0.0f);
@@ -1167,10 +1180,10 @@ static gboolean area_draw(GtkWidget *widget,
       cairo_line_to(cr, width * g->sample[k], 0.0f);
       cairo_fill(cr);
     }
-    if(g->num_samples & 1)
+    if(num_samples & 1)
     {
-      cairo_move_to(cr, width * g->sample[g->num_samples - 1], 0.0f);
-      cairo_line_to(cr, width * g->sample[g->num_samples - 1], -height);
+      cairo_move_to(cr, width * g->sample[num_samples - 1], 0.0f);
+      cairo_line_to(cr, width * g->sample[num_samples - 1], -height);
       cairo_line_to(cr, 0.0f, -height);
       cairo_line_to(cr, 0.0f, 0.0f);
       cairo_fill(cr);
@@ -1329,8 +1342,7 @@ static gboolean area_draw(GtkWidget *widget,
     // draw labels:
     PangoLayout *layout;
     PangoRectangle ink;
-    PangoFontDescription *desc =
-      pango_font_description_copy_static(darktable.bauhaus->pango_font_desc);
+    PangoFontDescription *desc = dt_gui_get_font();
     pango_font_description_set_weight(desc, PANGO_WEIGHT_BOLD);
     pango_font_description_set_absolute_size(desc, (.06 * height) * PANGO_SCALE);
     layout = pango_cairo_create_layout(cr);
@@ -1532,7 +1544,8 @@ static void area_scrolled(GtkEventControllerScroll *controller,
 
   if(dt_modifier_eq(controller, GDK_MOD1_MASK))
   {
-    // FIXME: GTK4 - need to forward scroll event to notebook
+    // alt+scroll switches the channel tab (as before the controller conversion)
+    dt_gui_forward_scroll(controller, GTK_WIDGET(g->channel_tabs));
     return;
   }
 

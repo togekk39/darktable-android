@@ -617,7 +617,7 @@ static inline float4 filmic_split_v4(const float4 i,
                                      const int use_output_profile,
                                      constant const float *const export_matrix_in, constant const float *const export_matrix_out)
 {
-  float4 o;
+  float4 o = 0.f;
 
   // Log tonemapping
   o.x = log_tonemapping_v2(i.x, grey_value, black_exposure, dynamic_range);
@@ -727,7 +727,7 @@ static inline float4 filmic_split_v1(const float4 i,
                                      const float latitude_min, const float latitude_max, const float output_power,
                                      const dt_iop_filmicrgb_curve_type_t type[2])
 {
-  float4 o;
+  float4 o = 0.f;
 
   // Log tonemapping
   o.x = log_tonemapping_v1(fmax(i.x, NORM_MIN), grey_value, black_exposure, dynamic_range);
@@ -764,7 +764,7 @@ static inline float4 filmic_split_v2_v3(const float4 i,
                                         const float latitude_min, const float latitude_max, const float output_power,
                                         const dt_iop_filmicrgb_curve_type_t type[2])
 {
-  float4 o;
+  float4 o = 0.f;
 
   // Log tonemapping
   o.x = log_tonemapping_v2(fmax(i.x, NORM_MIN), grey_value, black_exposure, dynamic_range);
@@ -1033,24 +1033,29 @@ filmicrgb_chroma (read_only image2d_t in, write_only image2d_t out,
 
 
 kernel void
-filmic_mask_clipped_pixels(read_only image2d_t in, write_only image2d_t out,
-                           int width, int height,
-                           const float normalize, const float feathering, global uint *is_clipped)
+filmic_mask_clipped_pixels(read_only image2d_t in,
+                           write_only image2d_t out,
+                           const int width,
+                           const int height,
+                           const float normalize,
+                           const float feathering,
+                           global int *const clipped)
 {
   const unsigned int x = get_global_id(0);
   const unsigned int y = get_global_id(1);
 
   if(x >= width || y >= height) return;
 
-  float4 i = readpixel(in, x, y);
+  float4 i = Areadpixel(in, x, y);
   const float4 i2 = i * i;
 
-  const float pix_max = fmax(dtcl_sqrt(i2.x + i2.y + i2.z), 0.f);
+  const float pix_max = dtcl_sqrt(i2.x + i2.y + i2.z);
   const float argument = -pix_max * normalize + feathering;
   const float weight = clipf(1.0f / ( 1.0f + dtcl_exp2(argument)));
 
-  if(4.f > argument) *is_clipped = 1;
-
+  // process_cl() reconstructs only above 9 clipped pixels, and a plain
+  // increment from concurrent work items loses most of the counts
+  if(4.f > argument) atomic_inc(clipped);
   write_imagef(out, (int2)(x, y), weight);
 }
 

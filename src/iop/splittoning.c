@@ -15,6 +15,7 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
+
 #include "bauhaus/bauhaus.h"
 #include "common/colorspaces.h"
 #include "common/debug.h"
@@ -32,7 +33,7 @@
 #include "gui/presets.h"
 #include "gui/color_picker_proxy.h"
 #include "iop/iop_api.h"
-#include <assert.h>
+
 #include <gtk/gtk.h>
 #include <inttypes.h>
 #include <stdlib.h>
@@ -169,7 +170,7 @@ void process(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *c
   const float balance = data->balance;
 
   DT_OMP_FOR()
-  for(int k = 0; k < 4 * npixels; k += 4)
+  for(size_t k = 0; k < 4 * npixels; k += 4)
   {
     float h, s, l;
     rgb2hsl(in+k, &h, &s, &l);

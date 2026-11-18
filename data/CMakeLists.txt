@@ -35,7 +35,7 @@ endif(USE_LUA)
 #
 # Install (and generate when necessary) other system shares
 #
-if(NOT WIN32 AND NOT BUILD_MOBILE_LIBRARY_ONLY)
+if(NOT WIN32)
   if("avif" IN_LIST DT_SUPPORTED_EXTENSIONS)
     list(APPEND DESKTOP_MIME_TYPES image/avif)
   endif()
@@ -113,7 +113,7 @@ if(NOT WIN32 AND NOT BUILD_MOBILE_LIBRARY_ONLY)
   add_custom_target(darktable.appdata_file ALL DEPENDS ${DARKTABLE_SHAREDIR}/metainfo/org.darktable.darktable.appdata.xml)
 
   install(FILES ${DARKTABLE_SHAREDIR}/metainfo/org.darktable.darktable.appdata.xml DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/metainfo COMPONENT DTApplication)
-endif()
+endif(NOT WIN32)
 
 #
 # Install watermarks
@@ -138,32 +138,20 @@ install(FILES shortcutsrc ${LOCALIZED_SHORTCUTS} DESTINATION ${CMAKE_INSTALL_DAT
 #
 # Install noiseprofiles
 #
-if(${VALIDATE_JSON})
-  add_custom_target(
-    validate_noiseprofiles_json ALL
-    COMMAND ${jsonschema_BIN} -i ${CMAKE_CURRENT_SOURCE_DIR}/noiseprofiles.json ${CMAKE_CURRENT_SOURCE_DIR}/noiseprofiles.schema
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/noiseprofiles.json ${CMAKE_CURRENT_SOURCE_DIR}/noiseprofiles.schema
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/
-    COMMENT "Checking validity of noiseprofiles.json"
-  )
-endif()
 FILE(COPY noiseprofiles.json DESTINATION "${DARKTABLE_DATADIR}")
 install(FILES noiseprofiles.json DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/darktable COMPONENT DTApplication)
 
 #
 # Install wb presets
 #
-if(${VALIDATE_JSON})
-  add_custom_target(
-    validate_wbpresets_json ALL
-    COMMAND ${jsonschema_BIN} -i ${CMAKE_CURRENT_SOURCE_DIR}/wb_presets.json ${CMAKE_CURRENT_SOURCE_DIR}/wb_presets.schema
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/wb_presets.json ${CMAKE_CURRENT_SOURCE_DIR}/wb_presets.schema
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/
-    COMMENT "Checking validity of wb_presets.json"
-  )
-endif()
 FILE(COPY wb_presets.json DESTINATION "${DARKTABLE_DATADIR}")
 install(FILES wb_presets.json DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/darktable COMPONENT DTApplication)
+
+#
+# Install the masks panel's built-in group layout presets
+#
+FILE(COPY masks_group_presets.json DESTINATION "${DARKTABLE_DATADIR}")
+install(FILES masks_group_presets.json DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/darktable COMPONENT DTApplication)
 
 if(USE_AI)
   #
@@ -174,6 +162,14 @@ if(USE_AI)
   FILE(COPY ort_gpu.json DESTINATION "${DARKTABLE_DATADIR}")
   install(FILES ort_gpu.json DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/darktable COMPONENT DTApplication)
 endif(USE_AI)
+
+if(USE_MCP)
+  #
+  # Install darktable-mcp tool descriptions/schemas (editable without a rebuild)
+  #
+  FILE(COPY mcp_tools.json DESTINATION "${DARKTABLE_DATADIR}")
+  install(FILES mcp_tools.json DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/darktable COMPONENT DTApplication)
+endif(USE_MCP)
 
 #
 # Transform darktableconfig.xml into darktablerc
@@ -259,6 +255,6 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/darktablerc DESTINATION ${CMAKE_INSTAL
 #
 # Install bash completion file. users/packagers can symlink that to /etc/bash_completion.d/
 #
-if (NOT BUILD_MOBILE_LIBRARY_ONLY AND ((NOT WIN32) OR BUILD_MSYS2_INSTALL))
+if ((NOT WIN32) OR BUILD_MSYS2_INSTALL)
   install(FILES darktable.bash DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/darktable COMPONENT DTApplication)
 endif()

@@ -34,7 +34,6 @@
 #include "gui/presets.h"
 #include "iop/iop_api.h"
 
-#include <assert.h>
 #include <gdk/gdkkeysyms.h>
 #include <gtk/gtk.h>
 #include <inttypes.h>
@@ -105,7 +104,7 @@ typedef struct dt_iop_crop_gui_data_t
   gboolean shift_hold;
   gboolean ctrl_hold;
   gboolean preview_ready;
-  gint64 focus_time;
+  double focus_time;
   dt_gui_collapsible_section_t cs;
 } dt_iop_crop_gui_data_t;
 
@@ -322,8 +321,6 @@ static gboolean _reduce_aligners(int *ialign_w, int *ialign_h)
 }
 
 static void _commit_box(dt_iop_module_t *self,
-                        dt_iop_crop_gui_data_t *g,
-                        dt_iop_crop_params_t *p,
                         const gboolean enforce_history)
 {
   if(DT_IN_GUI_UPDATE())
@@ -331,6 +328,10 @@ static void _commit_box(dt_iop_module_t *self,
   if(self->dev->preview_pipe->status != DT_DEV_PIXELPIPE_VALID)
     return;
 
+  dt_iop_crop_gui_data_t *g = self->gui_data;
+  dt_iop_crop_params_t *p = self->params;
+
+  dt_iop_gui_enter_critical_section(self);
   g->cropping = GRAB_CENTER;
   const dt_boundingbox_t old = { p->cx, p->cy, p->cw, p->ch };
   const float eps = 1e-6f; // threshold to avoid rounding errors
@@ -349,6 +350,8 @@ static void _commit_box(dt_iop_module_t *self,
                               g->clip_y * ht,
                              (g->clip_x + g->clip_w) * wd,
                              (g->clip_y + g->clip_h) * ht };
+  dt_iop_gui_leave_critical_section(self);
+
   if(dt_dev_distort_backtransform_plus(self->dev, fpipe, self->iop_order,
                                        DT_DEV_TRANSFORM_DIR_FORW_EXCL, points, 2))
   {
@@ -678,6 +681,8 @@ void gui_focus(dt_iop_module_t *self, gboolean in)
   {
     // once the pipe is recomputed, we want to update final sizes
     DT_CONTROL_SIGNAL_HANDLE(DT_SIGNAL_DEVELOP_PREVIEW_PIPE_FINISHED, _event_preview_updated_callback);
+
+    dt_iop_gui_enter_critical_section(self);
     if(in)
     {
       // got focus, grab stuff to gui:
@@ -687,23 +692,25 @@ void gui_focus(dt_iop_module_t *self, gboolean in)
       g->clip_w = CLAMPF(p->cw - p->cx, MIN_CROP_SIZE, 1.0f - g->clip_x);
       g->clip_h = CLAMPF(p->ch - p->cy, MIN_CROP_SIZE, 1.0f - g->clip_y);
       g->preview_ready = FALSE;
+      g->focus_time = dt_get_wtime();   // reset the alpha blending timer whenever we focus_in
     }
     else if(g->preview_ready)
     {
       // hack : commit_box use distort_transform routines with gui values to get params
       // but this values are accurate only if crop is the gui_module...
       // so we temporary put back gui_module to crop and revert once finished
-      dt_iop_module_t *old_gui = self->dev->gui_module;
-      self->dev->gui_module = self;
-      _commit_box(self, g, p, FALSE);
-      self->dev->gui_module = old_gui;
+      _commit_box(self, FALSE);
       g->clip_max_pipe_hash = DT_INVALID_HASH;
     }
+    dt_iop_gui_leave_critical_section(self);
   }
   else if(in)
+  {
+    dt_iop_gui_enter_critical_section(self);
     g->preview_ready = TRUE;
-
-  g->focus_time = g_get_monotonic_time();
+    g->focus_time = dt_get_wtime();
+    dt_iop_gui_leave_critical_section(self);
+  }
 }
 
 void init_pipe(dt_iop_module_t *self,
@@ -890,6 +897,67 @@ void reload_defaults(dt_iop_module_t *self)
   dp->cw = img->usercrop[3];
   dp->ch = img->usercrop[2];
   dp->ratio_n = dp->ratio_d = -1;
+
+  self->default_enabled = FALSE;
+
+  // A crop coming from the raw only preloads our parameters. An aspect ratio
+  // dialed in on the camera though is a framing decision taken while
+  // shooting, so reproduce it right away: center that ratio on the sensor
+  // area we are handed and switch ourselves on. The intended framing is
+  // applied but stays free to be moved around within the full frame.
+  const gboolean has_usercrop = dp->cx > 0.0f || dp->cy > 0.0f
+                             || dp->cw < 1.0f || dp->ch < 1.0f;
+
+  const float iwd = img->p_width > 0 ? img->p_width : img->width;
+  const float iht = img->p_height > 0 ? img->p_height : img->height;
+
+  if(has_usercrop
+     || img->camera_ratio_d < 1
+     || img->camera_ratio_n < 1
+     || iwd < 1.0f
+     || iht < 1.0f)
+    return;
+
+  // p_width and p_height are still in sensor orientation here
+  const float want = (float)img->camera_ratio_d / (float)img->camera_ratio_n;
+  const float have = iwd / iht;
+
+  float bx = 0.0f, by = 0.0f, bw = 1.0f, bh = 1.0f;
+  if(want < have)       // narrower than the sensor, take off left and right
+  {
+    bw = want / have;
+    bx = (1.0f - bw) * 0.5f;
+  }
+  else if(want > have)  // wider, take off top and bottom
+  {
+    bh = have / want;
+    by = (1.0f - bh) * 0.5f;
+  }
+
+  // The ratio is the one we are handed already, either because the vendor
+  // applied the crop to the raw data after all or because the value was read
+  // as something it is not. Nothing to reproduce, and staying off is the safe
+  // answer rather than adding a crop that does nothing.
+  if(bw > 0.995f && bh > 0.995f)
+    return;
+
+  // flip runs before us, so follow the image into portrait. The box is
+  // centered, which leaves the mirroring bits of the orientation a no-op.
+  if(dt_image_orientation(img) & ORIENTATION_SWAP_XY)
+  {
+    float t;
+    t = bx; bx = by; by = t;
+    t = bw; bw = bh; bh = t;
+  }
+
+  dp->cx = bx;
+  dp->cy = by;
+  dp->cw = bx + bw;
+  dp->ch = by + bh;
+  dp->ratio_d = img->camera_ratio_d;
+  dp->ratio_n = img->camera_ratio_n;
+
+  self->default_enabled = TRUE;
 }
 
 static void _float_to_fract(const char *num, int *n, int *d)
@@ -1068,7 +1136,7 @@ static void _event_aspect_presets_changed(GtkWidget *combo, dt_iop_module_t *sel
   }
 
   DT_LEAVE_GUI_UPDATE();
-  _commit_box(self, g, p, TRUE);
+  _commit_box(self, TRUE);
 }
 
 static void _update_sliders_and_limit(dt_iop_crop_gui_data_t *g)
@@ -1117,7 +1185,7 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
   _update_sliders_and_limit(g);
 
   DT_LEAVE_GUI_UPDATE();
-  _commit_box(self, g, p, TRUE);
+  _commit_box(self, TRUE);
 }
 
 void gui_reset(dt_iop_module_t *self)
@@ -1194,9 +1262,7 @@ static void _event_key_swap(dt_iop_module_t *self)
 static void _event_aspect_flip(GtkWidget *button, dt_iop_module_t *self)
 {
   _event_key_swap(self);
-  dt_iop_crop_gui_data_t *g = self->gui_data;
-  dt_iop_crop_params_t *p = self->params;
-  _commit_box(self, g, p, TRUE);
+  _commit_box(self, TRUE);
 }
 
 static gint _aspect_ratio_cmp(const dt_iop_crop_aspect_t *a,
@@ -1281,6 +1347,7 @@ void gui_init(dt_iop_module_t *self)
     { _("golden cut"), 16180340, 10000000 },
     { _("16:9, HDTV"), 16, 9 },
     { _("widescreen"), 185, 100 },
+    { _("1.91:1"), 1080, 566 },
     { _("2:1, Univisium"), 2, 1 },
     { _("CinemaScope"), 235, 100 },
     { _("21:9"), 237, 100 },
@@ -1500,6 +1567,11 @@ static _grab_region_t _gui_get_grab(float pzx,
 }
 
 // draw guides and handles over the image
+gboolean canvas_overlay_active(dt_iop_module_t *self)
+{
+  return TRUE;
+}
+
 void gui_post_expose(dt_iop_module_t *self,
                      cairo_t *cr,
                      const float wd,
@@ -1574,7 +1646,7 @@ void gui_post_expose(dt_iop_module_t *self,
 
     PangoLayout *layout;
     PangoRectangle ext;
-    PangoFontDescription *desc = pango_font_description_copy_static(darktable.bauhaus->pango_font_desc);
+    PangoFontDescription *desc = dt_gui_get_font();
     pango_font_description_set_weight(desc, PANGO_WEIGHT_BOLD);
     pango_font_description_set_absolute_size(desc, DT_PIXEL_APPLY_DPI(16) * PANGO_SCALE / zoom_scale);
     layout = pango_cairo_create_layout(cr);
@@ -1616,7 +1688,7 @@ void gui_post_expose(dt_iop_module_t *self,
   }
 
   cairo_set_line_width(cr, DT_PIXEL_APPLY_DPI(2.0) / zoom_scale);
-  const double alpha = CLIP(1.0 - (g_get_monotonic_time() - g->focus_time) / 2e6f);
+  const double alpha = CLIP(1.0 - 0.5 * (dt_get_wtime() - g->focus_time));
   dt_draw_set_color_overlay(cr, TRUE, alpha);
   const double border = DT_PIXEL_APPLY_DPI(MIN(30.0, MIN(wd, ht) / 3.0)) / zoom_scale;
 
@@ -1853,7 +1925,6 @@ int button_released(dt_iop_module_t *self,
                     const float zoom_scale)
 {
   dt_iop_crop_gui_data_t *g = self->gui_data;
-  dt_iop_crop_params_t *p = self->params;
   // we don't do anything if the image is not ready
   if(!g->preview_ready) return 0;
 
@@ -1865,7 +1936,7 @@ int button_released(dt_iop_module_t *self,
   dt_control_change_cursor("default");
 
   // we save the crop into the params now so params are kept in synch with gui settings
-  _commit_box(self, g, p, FALSE);
+  _commit_box(self, FALSE);
   return 1;
 }
 

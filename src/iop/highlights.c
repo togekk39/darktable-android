@@ -16,11 +16,14 @@
    along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <assert.h>
+#include <gtk/gtk.h>
+#include <inttypes.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+
 #include "bauhaus/bauhaus.h"
+#include "common/bilinear.h"
 #include "common/box_filters.h"
 #include "common/bspline.h"
 #include "common/opencl.h"
@@ -39,14 +42,12 @@
 #include "gui/accelerators.h"
 #include "gui/gtk.h"
 
-#include <gtk/gtk.h>
-#include <inttypes.h>
 
 // Downsampling factor for guided-laplacian
 #define DS_FACTOR 4
 #define MAX_NUM_SCALES 12
 
-DT_MODULE_INTROSPECTION(4, dt_iop_highlights_params_t)
+DT_MODULE_INTROSPECTION(5, dt_iop_highlights_params_t)
 
 /* As some of the internal algorithms use a smaller value for clipping than given by the UI
    the visualizing is wrong for those algos. It seems to be a a minor issue but sometimes significant.
@@ -103,22 +104,16 @@ typedef enum dt_highlights_mask_t
 
 typedef struct dt_iop_highlights_params_t
 {
-  // params of v1
-  dt_iop_highlights_mode_t mode; // $DEFAULT: DT_IOP_HIGHLIGHTS_OPPOSED $DESCRIPTION: "method"
-  float blendL; // unused $DEFAULT: 1.0
-  float blendC; // unused $DEFAULT: 0.0
-  float strength; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "strength"
-  // params of v2
-  float clip; // $MIN: 0.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "clipping threshold"
-  // params of v3
-  float noise_level; // $MIN: 0. $MAX: 0.5 $DEFAULT: 0.00 $DESCRIPTION: "noise level"
-  int iterations; // $MIN: 1 $MAX: 256 $DEFAULT: 30 $DESCRIPTION: "iterations"
+  dt_iop_highlights_mode_t mode;      // $DEFAULT: DT_IOP_HIGHLIGHTS_OPPOSED $DESCRIPTION: "method"
+  float strength;                     // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "strength"
+  float clip;                         // $MIN: 0.0 $MAX: 2.0 $DEFAULT: 1.0 $DESCRIPTION: "clipping threshold"
+  float noise_level;                  // $MIN: 0. $MAX: 0.5 $DEFAULT: 0.00 $DESCRIPTION: "noise level"
+  int iterations;                     // $MIN: 1 $MAX: 256 $DEFAULT: 30 $DESCRIPTION: "iterations"
   dt_atrous_wavelets_scales_t scales; // $DEFAULT: WAVELETS_7_SCALE $DESCRIPTION: "diameter of reconstruction"
-  float candidating; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.4 $DESCRIPTION: "candidating"
-  float combine;     // $MIN: 0.0 $MAX: 8.0 $DEFAULT: 2.0 $DESCRIPTION: "combine"
-  dt_recovery_mode_t recovery; // $DEFAULT: DT_RECOVERY_MODE_OFF $DESCRIPTION: "rebuild"
-  // params of v4
-  float solid_color; // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "inpaint a flat color"
+  float candidating;                  // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.4 $DESCRIPTION: "candidating"
+  float combine;                      // $MIN: 0.0 $MAX: 8.0 $DEFAULT: 2.0 $DESCRIPTION: "combine"
+  dt_recovery_mode_t recovery;        // $DEFAULT: DT_RECOVERY_MODE_OFF $DESCRIPTION: "rebuild"
+  float solid_color;                  // $MIN: 0.0 $MAX: 1.0 $DEFAULT: 0.0 $DESCRIPTION: "inpaint a flat color"
 } dt_iop_highlights_params_t;
 
 typedef struct dt_iop_highlights_gui_data_t
@@ -134,6 +129,11 @@ typedef struct dt_iop_highlights_gui_data_t
   GtkWidget *recovery;
   GtkWidget *strength;
   dt_highlights_mask_t hlr_mask_mode;
+  dt_aligned_pixel_t oppchroma;
+  gboolean oppclipped;
+  dt_hash_t opphash;
+  gboolean oppresult;
+  gboolean opprequest;
 } dt_iop_highlights_gui_data_t;
 
 typedef dt_iop_highlights_params_t dt_iop_highlights_data_t;
@@ -153,7 +153,8 @@ typedef struct dt_iop_highlights_global_data_t
   int kernel_highlights_opposed;
   int kernel_highlights_initmask;
   int kernel_highlights_dilatemask;
-  int kernel_highlights_chroma;
+  int kernel_highlights_initmask_linear;
+  int kernel_highlights_opposed_linear;
 
   int kernel_highlights_false_color;
 
@@ -161,7 +162,6 @@ typedef struct dt_iop_highlights_global_data_t
   int kernel_filmic_bspline_horizontal;
   int kernel_filmic_wavelets_detail;
 
-  int kernel_interpolate_bilinear;
 } dt_iop_highlights_global_data_t;
 
 
@@ -225,13 +225,26 @@ int legacy_params(dt_iop_module_t *self,
     float solid_color;
   } dt_iop_highlights_params_v4_t;
 
+  typedef struct dt_iop_highlights_params_v5_t
+  {
+    dt_iop_highlights_mode_t mode;
+    float strength;
+    float clip;
+    float noise_level;
+    int iterations;
+    dt_atrous_wavelets_scales_t scales;
+    float candidating;
+    float combine;
+    dt_recovery_mode_t recovery;
+    float solid_color;
+  } dt_iop_highlights_params_v5_t;
+
   if(old_version == 1)
   {
     typedef struct dt_iop_highlights_params_v1_t
     {
       dt_iop_highlights_mode_t mode;
       float blendL, blendC, blendh;
-      float strength;
     } dt_iop_highlights_params_v1_t;
 
     const dt_iop_highlights_params_v1_t *o = (dt_iop_highlights_params_v1_t *)old_params;
@@ -259,7 +272,6 @@ int legacy_params(dt_iop_module_t *self,
     {
       dt_iop_highlights_mode_t mode;
       float blendL, blendC, blendh;
-      float strength;
       float clip;
     } dt_iop_highlights_params_v2_t;
 
@@ -308,13 +320,30 @@ int legacy_params(dt_iop_module_t *self,
     *new_version = 4;
     return 0;
   }
+  if(old_version == 4)
+  {
+    const dt_iop_highlights_params_v4_t *o = (dt_iop_highlights_params_v4_t *)old_params;
+    dt_iop_highlights_params_v5_t *n = malloc(sizeof(dt_iop_highlights_params_v5_t));
+
+    n->mode = o->mode;
+    n->strength = o->strength;
+    n->clip = o->clip;
+    n->noise_level = o->noise_level;
+    n->iterations = o->iterations;
+    n->scales = o->scales;
+    n->candidating = o->candidating;
+    n->combine = o->combine;
+    n->recovery = o->recovery;
+    n->solid_color = o->solid_color;
+
+    *new_params = n;
+    *new_params_size = sizeof(dt_iop_highlights_params_v5_t);
+    *new_version = 5;
+    return 0;
+  }
 
   return 1;
 }
-
-static dt_aligned_pixel_t img_oppchroma;
-static gboolean img_oppclipped = TRUE;
-static dt_hash_t img_opphash = ULLONG_MAX;
 
 #include "hlreconstruct/segmentation.c"
 #include "hlreconstruct/segbased.c"
@@ -379,7 +408,7 @@ void modify_roi_in(dt_iop_module_t *self,
   else
   {
     // We require the correct (full-image-data) expansion with a defined scale for all pixelpipes for proper
-    // aligning and scaling in the demosiacer
+    // aligning and scaling in the demosaicer
     roi_in->x = 0;
     roi_in->y = 0;
     roi_in->width = piece->buf_in.width;
@@ -409,7 +438,7 @@ void tiling_callback(dt_iop_module_t *self,
   tiling->overlap = 0;
 
   dt_develop_blend_params_t *const bldata = piece->blendop_data;
-  if(bldata && dt_iop_piece_is_raster_mask_used(piece, BLEND_RASTER_ID))
+  if(bldata && dt_iop_is_raster_mask_used(self, BLEND_RASTER_ID))
   {
     tiling->factor += 0.5f;
     tiling->factor_cl += 0.5f;
@@ -424,7 +453,7 @@ void tiling_callback(dt_iop_module_t *self,
     const int max_filter_radius = (1 << scales);
 
     tiling->factor += 2.f * 4 + 6.f * 4 / (DS_FACTOR * DS_FACTOR);
-    tiling->factor_cl += 3.f * 4 + 5.f * 4 / (DS_FACTOR * DS_FACTOR);
+    tiling->factor_cl += 3.f * 4 + 7.f * 4 / (DS_FACTOR * DS_FACTOR);
 
     // The wavelets decomposition uses a temp buffer of size 4 × ds_width
     tiling->maxbuf = 1.f / roi_in->height * dt_get_num_threads() * 4.f / DS_FACTOR;
@@ -554,17 +583,22 @@ int process_cl(dt_iop_module_t *self,
   const dt_iop_highlights_mode_t dmode =  d->mode;
   const float clipper = d->clip * highlights_clip_magics[dmode];
 
-  gboolean announce = dt_iop_piece_is_raster_mask_used(piece, BLEND_RASTER_ID);
+  gboolean announce = dt_iop_is_raster_mask_used(self, BLEND_RASTER_ID);
 
   cl_int err = CL_MEM_OBJECT_ALLOCATION_FAILURE;
   cl_mem dev_xtrans = NULL;
+  cl_mem dev_tmp = NULL;
 
-  if(g && fullpipe)
+  if(self->dev->gui_attached && g && fullpipe)
   {
-    if(g->hlr_mask_mode != DT_HIGHLIGHTS_MASK_OFF)
+    dt_iop_gui_enter_critical_section(self);
+    const dt_highlights_mask_t g_hlr_mask_mode = g->hlr_mask_mode;
+    dt_iop_gui_leave_critical_section(self);
+
+    if(g_hlr_mask_mode != DT_HIGHLIGHTS_MASK_OFF)
     {
       pipe->mask_display = DT_DEV_PIXELPIPE_DISPLAY_PASSTHRU;
-      if(g->hlr_mask_mode == DT_HIGHLIGHTS_MASK_CLIPPED)
+      if(g_hlr_mask_mode == DT_HIGHLIGHTS_MASK_CLIPPED)
       {
         const float *c = pipe->dsc.temperature.coeffs;
         float clips[4] = { clipper * (c[RED]   <= 0.0f ? 1.0f : c[RED]),
@@ -591,7 +625,16 @@ int process_cl(dt_iop_module_t *self,
     }
   }
 
-  if(!filters)
+  if(!filters && dmode == DT_IOP_HIGHLIGHTS_OPPOSED)
+  {
+    // linear raws, as process(): opposed on roi_in, then scaled to roi_out
+    dev_tmp = dt_opencl_alloc_device(devid, roi_in->width, roi_in->height, 4 * sizeof(float));
+    if(!dev_tmp) goto finish;
+    err = _process_linear_opposed_cl(self, piece, dev_in, dev_tmp, roi_in);
+    if(err == CL_SUCCESS)
+      err = dt_iop_clip_and_zoom_roi_cl(devid, dev_out, dev_tmp, roi_out, roi_in);
+  }
+  else if(!filters)
   {
     // non-raw images use dedicated kernel which just clips
     err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_highlights_4f_clip, roi_in->width, roi_in->height,
@@ -631,8 +674,8 @@ int process_cl(dt_iop_module_t *self,
     dev_xtrans = dt_opencl_copy_host_to_device_constant(devid, sizeof(piece->xtrans), piece->xtrans);
     if(dev_xtrans == NULL) goto finish;
 
-    size_t sizes[2] = { ROUNDUP(roi_in->width, blocksizex), ROUNDUP(roi_in->height, blocksizey) };
-    size_t local[2] = { blocksizex, blocksizey };
+    const size_t sizes[2] = { ROUNDUP(roi_in->width, blocksizex), ROUNDUP(roi_in->height, blocksizey) };
+    const size_t local[2] = { blocksizex, blocksizey };
     err = dt_opencl_enqueue_kernel_2d_local_args(devid, gd->kernel_highlights_1f_lch_xtrans, sizes, local,
       CLARG(dev_in), CLARG(dev_out),
       CLARG(roi_in->width), CLARG(roi_in->height),
@@ -648,13 +691,13 @@ int process_cl(dt_iop_module_t *self,
   }
   else // (dmode == DT_IOP_HIGHLIGHTS_CLIP)
   {
-    const dt_dev_chroma_t *chr = &self->dev->chroma;
     dt_aligned_pixel_t clips = { clipper, clipper, clipper, clipper};
-    if(pipe->dsc.temperature.enabled && chr->late_correction)
+    const dt_dev_wb_t *wb = &pipe->wb;
+    if(dt_dev_wb_late_correction(wb, &pipe->dsc))
     {
-      clips[0] *= chr->as_shot[0] / chr->D65coeffs[0];
-      clips[1] *= chr->as_shot[1] / chr->D65coeffs[1];
-      clips[2] *= chr->as_shot[2] / chr->D65coeffs[2];
+      clips[0] *= wb->coeffs[0] / wb->D65coeffs[0];
+      clips[1] *= wb->coeffs[1] / wb->D65coeffs[1];
+      clips[2] *= wb->coeffs[2] / wb->D65coeffs[2];
     }
 
     dev_xtrans = dt_opencl_copy_host_to_device_constant(devid, sizeof(piece->xtrans), piece->xtrans);
@@ -700,6 +743,7 @@ int process_cl(dt_iop_module_t *self,
   if(err != CL_SUCCESS) dt_iop_piece_clear_raster(piece, NULL);
 
   dt_opencl_release_mem_object(dev_xtrans);
+  dt_opencl_release_mem_object(dev_tmp);
   return err;
 }
 #endif
@@ -727,13 +771,14 @@ static void process_clip(dt_iop_module_t *self,
   else
   {
     const uint8_t(*const xtrans)[6] = piece->xtrans;
-    const dt_dev_chroma_t *chr = &self->dev->chroma;
     dt_aligned_pixel_t clips = { clip, clip, clip, clip};
-    if(piece->pipe->dsc.temperature.enabled && chr->late_correction)
+    dt_dev_pixelpipe_t *pipe = piece->pipe;
+    const dt_dev_wb_t *wb = &pipe->wb;
+    if(dt_dev_wb_late_correction(wb, &pipe->dsc))
     {
-      clips[0] *= chr->as_shot[0] / chr->D65coeffs[0];
-      clips[1] *= chr->as_shot[1] / chr->D65coeffs[1];
-      clips[2] *= chr->as_shot[2] / chr->D65coeffs[2];
+      clips[0] *= wb->coeffs[0] / wb->D65coeffs[0];
+      clips[1] *= wb->coeffs[1] / wb->D65coeffs[1];
+      clips[2] *= wb->coeffs[2] / wb->D65coeffs[2];
     }
     for(int row = 0; row < roi_out->height; row++)
     {
@@ -840,7 +885,7 @@ void process(dt_iop_module_t *self,
   const gboolean scaled = filters == 0 && dmode != DT_IOP_HIGHLIGHTS_CLIP;
 
   float *out = scaled ? dt_alloc_align_float((size_t)roi_in->width * roi_in->height * 4) : NULL;
-  const gboolean announce = dt_iop_piece_is_raster_mask_used(piece, BLEND_RASTER_ID);
+  const gboolean announce = dt_iop_is_raster_mask_used(self, BLEND_RASTER_ID);
 
   if(!out && scaled)
   {
@@ -852,12 +897,17 @@ void process(dt_iop_module_t *self,
     return;
   }
 
-  if(g && fullpipe)
+  dt_highlights_mask_t g_hlr_mask_mode = DT_HIGHLIGHTS_MASK_OFF;
+  if(self->dev->gui_attached && g && fullpipe)
   {
-    if(g->hlr_mask_mode != DT_HIGHLIGHTS_MASK_OFF)
+    dt_iop_gui_enter_critical_section(self);
+    g_hlr_mask_mode = g->hlr_mask_mode;
+    dt_iop_gui_leave_critical_section(self);
+
+    if(g_hlr_mask_mode != DT_HIGHLIGHTS_MASK_OFF)
     {
       pipe->mask_display = DT_DEV_PIXELPIPE_DISPLAY_PASSTHRU;
-      if(g->hlr_mask_mode == DT_HIGHLIGHTS_MASK_CLIPPED)
+      if(g_hlr_mask_mode == DT_HIGHLIGHTS_MASK_CLIPPED)
       {
         if(scaled)
         {
@@ -874,16 +924,6 @@ void process(dt_iop_module_t *self,
     }
   }
 
-  /* While rendering thumnbnails we look for an acceptable lower quality */
-  gboolean high_quality = TRUE;
-  if(dt_pipe_is_thumb(pipe))
-  {
-    const dt_mipmap_size_t level = dt_mipmap_cache_get_matching_size(pipe->final_width, pipe->final_height);
-    const char *min = dt_conf_get_string_const("plugins/lighttable/thumbnail_hq_min_level");
-    const dt_mipmap_size_t min_s = dt_mipmap_cache_get_min_mip_from_pref(min);
-    high_quality = (level >= min_s);
-  }
-
   const float clipper = d->clip * highlights_clip_magics[dmode];
 
   if(filters == 0)
@@ -896,7 +936,7 @@ void process(dt_iop_module_t *self,
     }
     else
     {
-      _process_linear_opposed(self, piece, ivoid, out, roi_in, high_quality);
+      _process_linear_opposed(self, piece, ivoid, out, roi_in);
       dt_iop_clip_and_zoom_roi((float *)ovoid, out, roi_out, roi_in);
       dt_free_align(out);
     }
@@ -963,9 +1003,9 @@ void process(dt_iop_module_t *self,
 
     case DT_IOP_HIGHLIGHTS_SEGMENTS:
     {
-      const dt_highlights_mask_t vmode = ((g != NULL) && fullpipe && (g->hlr_mask_mode != DT_HIGHLIGHTS_MASK_CLIPPED)) ? g->hlr_mask_mode : DT_HIGHLIGHTS_MASK_OFF;
+      const dt_highlights_mask_t vmode = g_hlr_mask_mode != DT_HIGHLIGHTS_MASK_CLIPPED ? g_hlr_mask_mode : DT_HIGHLIGHTS_MASK_OFF;
 
-      float *tmp = _process_opposed(self, piece, ivoid, ovoid, roi_in, roi_out, TRUE, TRUE, clipper);
+      float *tmp = _process_opposed(self, piece, ivoid, ovoid, roi_in, roi_out, TRUE, clipper);
       if(tmp)
         _process_segmentation(piece, ivoid, ovoid, roi_in, roi_out, d, vmode, tmp);
       dt_free_align(tmp);
@@ -989,7 +1029,7 @@ void process(dt_iop_module_t *self,
 
     default:
     {
-      _process_opposed(self, piece, ivoid, ovoid, roi_in, roi_out, FALSE, high_quality, clipper);
+      _process_opposed(self, piece, ivoid, ovoid, roi_in, roi_out, FALSE, clipper);
       break;
     }
   }
@@ -1021,29 +1061,68 @@ void commit_params(dt_iop_module_t *self,
   const dt_image_t *img = &piece->pipe->image;
   const uint32_t filters = img->buf_dsc.filters;
   const gboolean rawprep = dt_image_is_rawprepare_supported(img);
-  const gboolean linear = (filters == 0);
+  const gboolean linear = filters == 0;
+  const gboolean is_4bayer = img->flags & DT_IMAGE_4BAYER;
 
-  // for non-raws always use clip
-  if(!rawprep)
+  // for non-raws always use clip; an unknown stored mode would index
+  // highlights_clip_magics[] out of bounds, and processing treats it as clip anyway
+  if(!rawprep || is_4bayer || (unsigned)d->mode > DT_IOP_HIGHLIGHTS_OPPOSED)
     d->mode = DT_IOP_HIGHLIGHTS_CLIP;
 
-  /* no OpenCLfor
-     1. DT_IOP_HIGHLIGHTS_INPAINT and DT_IOP_HIGHLIGHTS_SEGMENTS
-     2. DT_IOP_HIGHLIGHTS_OPPOSED on linear raws
-     FIXME the opposed preprocessing might be added as OpenCL too
-  */
-  const gboolean opplinear = (d->mode == DT_IOP_HIGHLIGHTS_OPPOSED) && linear;
+  // no OpenCL for DT_IOP_HIGHLIGHTS_INPAINT and DT_IOP_HIGHLIGHTS_SEGMENTS
+  const gboolean use_opposed = d->mode == DT_IOP_HIGHLIGHTS_OPPOSED;
 
-  piece->process_cl_ready = ((d->mode == DT_IOP_HIGHLIGHTS_INPAINT) || (d->mode == DT_IOP_HIGHLIGHTS_SEGMENTS) || opplinear) ? FALSE : TRUE;
+  piece->process_cl_ready = ((d->mode == DT_IOP_HIGHLIGHTS_INPAINT) || (d->mode == DT_IOP_HIGHLIGHTS_SEGMENTS)) ? FALSE : TRUE;
 
-  if((d->mode == DT_IOP_HIGHLIGHTS_SEGMENTS) || (d->mode == DT_IOP_HIGHLIGHTS_OPPOSED))
+  if((d->mode == DT_IOP_HIGHLIGHTS_SEGMENTS) || use_opposed)
     piece->process_tiling_ready = FALSE;
 
-  const gboolean fullpipe = dt_pipe_is_full(piece->pipe);
-
   dt_iop_highlights_gui_data_t *g = self->gui_data;
-  if(g && (g->hlr_mask_mode == DT_HIGHLIGHTS_MASK_CLIPPED) && linear && fullpipe)
-    piece->process_cl_ready = FALSE;
+  if(self->dev->gui_attached && g)
+  {
+    const gboolean fullpipe = dt_pipe_is_full(piece->pipe);
+    const gboolean fresh_raw = dt_image_is_raw(img) && !dt_image_altered(img->id);
+    dt_iop_gui_enter_critical_section(self);
+    if(linear && fullpipe)
+    {
+      if(g->hlr_mask_mode == DT_HIGHLIGHTS_MASK_CLIPPED)
+        piece->process_cl_ready = FALSE;
+    }
+
+    /** Please note that as dt_image_altered() uses hash from the database this might
+        report an image as not altered until first edits are written to it.
+    */
+    if(fullpipe && !g->oppresult && fresh_raw && use_opposed)
+      g->opprequest = TRUE;
+    dt_iop_gui_leave_critical_section(self);
+  }
+}
+
+static void _ui_pipe_done(gpointer instance, dt_iop_module_t *self)
+{
+  dt_iop_highlights_gui_data_t *g = self->gui_data;
+  if(!(self->dev->gui_attached && g))
+    return;
+
+  dt_iop_gui_enter_critical_section(self);
+  const gboolean result = g->oppresult && g->opprequest;
+  const gboolean clipped = g->oppclipped;
+  if(result)
+  {
+    g->oppresult = FALSE;
+    g->opprequest = FALSE;
+  }
+  dt_iop_gui_leave_critical_section(self);
+
+  if(!result || clipped) return;
+
+  DT_TRY_GUI_UPDATE();
+  dt_develop_t *dev = self->dev;
+  dt_dev_pixelpipe_stop_and_lock_all(dev);
+  self->enabled = FALSE;
+  dt_dev_pixelpipe_unlock_all(dev);
+  DT_LEAVE_GUI_UPDATE();
+  dt_dev_add_history_item(darktable.develop, self, FALSE);
 }
 
 void init_global(dt_iop_module_so_t *self)
@@ -1063,9 +1142,9 @@ void init_global(dt_iop_module_so_t *self)
   gd->kernel_highlights_opposed = dt_opencl_create_kernel(program, "highlights_opposed");
   gd->kernel_highlights_initmask = dt_opencl_create_kernel(program, "highlights_initmask");
   gd->kernel_highlights_dilatemask = dt_opencl_create_kernel(program, "highlights_dilatemask");
-  gd->kernel_highlights_chroma = dt_opencl_create_kernel(program, "highlights_chroma");
+  gd->kernel_highlights_initmask_linear = dt_opencl_create_kernel(program, "highlights_initmask_linear");
+  gd->kernel_highlights_opposed_linear = dt_opencl_create_kernel(program, "highlights_opposed_linear");
   gd->kernel_highlights_false_color = dt_opencl_create_kernel(program, "highlights_false_color");
-  gd->kernel_interpolate_bilinear = dt_opencl_create_kernel(program, "interpolate_bilinear");
 
   const int wavelets = 35; // bspline.cl, from programs.conf
   gd->kernel_filmic_bspline_horizontal = dt_opencl_create_kernel(wavelets, "blur_2D_Bspline_horizontal");
@@ -1088,9 +1167,9 @@ void cleanup_global(dt_iop_module_so_t *self)
   dt_opencl_free_kernel(gd->kernel_highlights_opposed);
   dt_opencl_free_kernel(gd->kernel_highlights_initmask);
   dt_opencl_free_kernel(gd->kernel_highlights_dilatemask);
-  dt_opencl_free_kernel(gd->kernel_highlights_chroma);
+  dt_opencl_free_kernel(gd->kernel_highlights_initmask_linear);
+  dt_opencl_free_kernel(gd->kernel_highlights_opposed_linear);
   dt_opencl_free_kernel(gd->kernel_highlights_false_color);
-  dt_opencl_free_kernel(gd->kernel_interpolate_bilinear);
 
   dt_opencl_free_kernel(gd->kernel_filmic_bspline_vertical);
   dt_opencl_free_kernel(gd->kernel_filmic_bspline_horizontal);
@@ -1134,12 +1213,13 @@ void gui_changed(dt_iop_module_t *self, GtkWidget *w, void *previous)
   const uint32_t filters = img->buf_dsc.filters;
   const gboolean bayer = (filters != 0) && (filters != 9u);
   const gboolean rawprep = dt_image_is_rawprepare_supported(img);
+  const gboolean is_4bayer = img->flags & DT_IMAGE_4BAYER;
 
   /* Sanitize mode if wrongfully
    - copied as part of the history of another pic or by preset / style or
    - by old edits that allowed opposed for non-raws
   */
-  if(!rawprep)
+  if(!rawprep || is_4bayer)
   {
     p->mode = DT_IOP_HIGHLIGHTS_CLIP;
     dt_bauhaus_combobox_set_from_value(g->mode, p->mode);
@@ -1205,6 +1285,7 @@ void reload_defaults(dt_iop_module_t *self)
 
   const dt_image_t *img = &self->dev->image_storage;
   const gboolean monochrome = dt_image_is_monochrome(img);
+  const gboolean is_4bayer = img->flags & DT_IMAGE_4BAYER;
   const uint32_t filters = img->buf_dsc.filters;
   const gboolean rawprep = dt_image_is_rawprepare_supported(img);
   const gboolean sraw = rawprep && (filters == 0);
@@ -1219,14 +1300,14 @@ void reload_defaults(dt_iop_module_t *self)
 
   dt_iop_highlights_params_t *d = self->default_params;
   dt_iop_highlights_gui_data_t *g = self->gui_data;
-  if(g)
+  if(self->dev->gui_attached && g)
   {
     // rebuild the complete menu depending on sensor type and possibly active but obsolete mode
     dt_bauhaus_combobox_clear(g->mode);
 
     dt_introspection_type_enum_tuple_t *values = self->so->get_f("mode")->Enum.values;
 
-    if(!rawprep)
+    if(!rawprep || is_4bayer)
     {
       dt_bauhaus_combobox_add_introspection(g->mode, NULL, values, DT_IOP_HIGHLIGHTS_CLIP,
                                                                    DT_IOP_HIGHLIGHTS_OPPOSED);
@@ -1247,17 +1328,27 @@ void reload_defaults(dt_iop_module_t *self)
                                                                    ? DT_IOP_HIGHLIGHTS_SEGMENTS
                                                                    : DT_IOP_HIGHLIGHTS_LAPLACIAN);
     }
-    _set_quads(g, NULL);
+
+    dt_iop_gui_enter_critical_section(self);
+    g->oppclipped = TRUE;
+    g->opphash = DT_INVALID_HASH;
+    g->oppresult = FALSE;
+   _set_quads(g, NULL);
+    dt_iop_gui_leave_critical_section(self);
   }
   d->clip = MIN(d->clip, img->linear_response_limit);
-  d->mode = rawprep ? DT_IOP_HIGHLIGHTS_OPPOSED : DT_IOP_HIGHLIGHTS_CLIP;
+  d->mode = rawprep && !is_4bayer ? DT_IOP_HIGHLIGHTS_OPPOSED : DT_IOP_HIGHLIGHTS_CLIP;
 }
 
 static void _quad_callback(GtkWidget *quad, dt_iop_module_t *self)
 {
   DT_GUARD_GUI_UPDATE();
   dt_iop_highlights_gui_data_t *g = self->gui_data;
+
+  dt_iop_gui_enter_critical_section(self);
   _set_quads(g, quad);
+  dt_iop_gui_leave_critical_section(self);
+
   dt_dev_reprocess_center(self->dev, self->iop_order);
 }
 
@@ -1266,8 +1357,11 @@ void gui_focus(dt_iop_module_t *self, gboolean in)
   dt_iop_highlights_gui_data_t *g = self->gui_data;
   if(!in)
   {
+    dt_iop_gui_enter_critical_section(self);
     const gboolean was_visualize = (g->hlr_mask_mode != DT_HIGHLIGHTS_MASK_OFF);
     _set_quads(g, NULL);
+    dt_iop_gui_leave_critical_section(self);
+
     if(was_visualize) dt_dev_reprocess_center(self->dev, self->iop_order);
   }
 }
@@ -1276,7 +1370,10 @@ void gui_init(dt_iop_module_t *self)
 {
   dt_iop_highlights_gui_data_t *g = IOP_GUI_ALLOC(highlights);
   GtkWidget *box_raw = self->widget = dt_gui_vbox();
-
+  g->opphash = DT_INVALID_HASH;
+  g->oppclipped = TRUE;
+  g->oppresult = FALSE;
+  g->opprequest = FALSE;
   g->mode = dt_bauhaus_combobox_from_params(self, "mode");
   gtk_widget_set_tooltip_text(g->mode, _("highlight reconstruction method"));
 
@@ -1343,6 +1440,8 @@ void gui_init(dt_iop_module_t *self)
   gtk_stack_set_homogeneous(GTK_STACK(self->widget), FALSE);
   gtk_stack_add_named(GTK_STACK(self->widget), notapplicable, "notapplicable");
   gtk_stack_add_named(GTK_STACK(self->widget), box_raw, "default");
+
+  DT_CONTROL_SIGNAL_HANDLE(DT_SIGNAL_DEVELOP_UI_PIPE_FINISHED, _ui_pipe_done);
 }
 
 // clang-format off

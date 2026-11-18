@@ -24,11 +24,14 @@ G_BEGIN_DECLS
 
 float dt_osx_get_ppd();
 void dt_osx_disallow_fullscreen(GtkWidget *widget);
+// opaque titlebar on every dialog; call once after the first GtkWindow exists
+void dt_osx_setup_dialogs();
 gboolean dt_osx_file_trash(const char *filename, GError **error);
 char* dt_osx_get_bundle_res_path();
 void dt_osx_prepare_environment();
 void dt_osx_focus_window();
 gboolean dt_osx_open_url(const char *url);
+gboolean dt_osx_clipboard_set_files(GList *files);
 
 G_END_DECLS
 

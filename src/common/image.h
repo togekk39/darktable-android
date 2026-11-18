@@ -101,6 +101,11 @@ typedef enum
   DT_IMAGE_MONOCHROME_BAYER = 1 << 19,
   // image has a flag set to use the monochrome workflow in the modules supporting it
   DT_IMAGE_MONOCHROME_WORKFLOW = 1 << 20,
+  // produced by neural restore raw denoise; derived at import from
+  // Xmp.darktable.neural_restore in the file
+  DT_IMAGE_AI_DENOISED = 1 << 21,
+  // set when Lr import has been applied to this image.
+  DT_IMAGE_FOREIGN_XMP_APPLIED = 1 << 22,
 } dt_image_flags_t;
 
 typedef enum dt_image_colorspace_t
@@ -178,6 +183,8 @@ typedef union dt_image_correction_data_t
     float centre_vig[2];
     gboolean has_warp;
     gboolean has_vignette;
+    // a GainMap in OpcodeList3, applied after demosaic (see dng_gain_maps_opcode3)
+    gboolean has_gainmap;
   } dng;
   struct {
     gboolean has_dist;
@@ -285,6 +292,8 @@ typedef struct dt_image_t
 
   dt_image_correction_type_t exif_correction_type;
   dt_image_correction_data_t exif_correction_data;
+  // the camera applied its own vignetting gain to the raw data
+  gboolean exif_shading_compensation;
 
   char camera_maker[64];
   char camera_model[64];
@@ -317,8 +326,16 @@ typedef struct dt_image_t
 
   dt_iop_buffer_dsc_t buf_dsc;
 
-  float d65_color_matrix[9]; // the 3x3 matrix embedded in some DNGs
-  uint8_t *profile;          // embedded profile, for example from JPEGs
+  float d65_color_matrix[9];                // the 3x3 matrix embedded in some DNGs
+  float dng_forward_matrix[9];              // the 3x3 forward matrix supplied in some DNG files
+  float *profile_hsm_data;                  // hue_div * sat_div * val_div * 3 floats, owned by the struct
+  size_t profile_hsm_data_size;
+  int profile_hsm_hue_div;
+  int profile_hsm_sat_div;
+  int profile_hsm_val_div;
+  int profile_hsm_encoding;                 // 0 = linear prophoto (default), 1 = sRGB
+
+  uint8_t *profile;                         // embedded profile, for example from JPEGs
   uint32_t profile_size;
   dt_image_colorspace_t colorspace; // the colorspace that is
                                     // specified in exif. mostly used
@@ -346,6 +363,14 @@ typedef struct dt_image_t
   /* might help to improve highlights reconstruction module */
   float linear_response_limit;
 
+  /* DNG BaselineExposure + BaselineExposureOffset in EV, 0 when absent */
+  float dng_baseline_exposure;
+
+  /* DNG NoiseProfile as variance = a * x + b per RGB plane, x in [0,1] */
+  gboolean has_dng_noise_profile;
+  float dng_noise_a[3];
+  float dng_noise_b[3];
+
   /* White balance coeffs from the raw */
   dt_aligned_pixel_t wb_coeffs;
 
@@ -355,8 +380,15 @@ typedef struct dt_image_t
   /* DefaultUserCrop */
   dt_boundingbox_t usercrop;
 
+  /* aspect ratio dialed in on the camera while shooting, as d:n following
+     the crop module convention; 0:0 if the native sensor ratio was used */
+  int32_t camera_ratio_d, camera_ratio_n;
+
   /* GainMaps from DNG OpcodeList2 exif tag */
   GList *dng_gain_maps;
+
+  /* GainMaps from DNG OpcodeList3 exif tag */
+  GList *dng_gain_maps_opcode3;
 
   /* convenience pointer back into the image cache, so we can return
    * dt_image_t* there directly. */
@@ -401,6 +433,10 @@ gboolean dt_image_is_bayerRGB(const dt_image_t *img);
 gboolean dt_image_is_matrix_correction_supported(const dt_image_t *img);
 /** returns TRUE if the image supports the rawprepare module */
 gboolean dt_image_is_rawprepare_supported(const dt_image_t *img);
+/** returns TRUE if the image is the output of AI raw denoise, so
+ * denoising it again would be a second pass over denoised data */
+gboolean dt_image_is_ai_denoised(const dt_image_t *img);
+
 /** returns the bitmask containing info about monochrome images */
 int dt_image_monochrome_flags(const dt_image_t *img);
 /** returns TRUE if the image has been tested to be monochrome and the
@@ -410,6 +446,79 @@ gboolean dt_image_use_monochrome_workflow(const dt_image_t *img);
 char *dt_image_get_filename(const dt_imgid_t imgid);
 /** returns true if the image exists on the database */
 gboolean dt_image_exists(const dt_imgid_t imgid);
+/** number of images in the library */
+uint32_t dt_image_count(void);
+/** n-th image id (from 0, by id) of the library, or NO_IMGID */
+dt_imgid_t dt_image_get_nth(const int n);
+/** ids of all images of the library */
+GList *dt_image_get_all(void);
+/** lower thumb_maxmip to level for the images above it */
+void dt_image_cap_thumb_maxmip(const int level);
+/** number of images whose id is returned by the SQL query `images`, and the
+ *  first of them in *first (left unchanged when there are none) */
+int dt_image_count_in_query(const char *images, dt_imgid_t *first);
+/** history_end of an image in *history_end; FALSE, *history_end untouched,
+ *  when the image is missing or has none */
+gboolean dt_image_get_history_end(const dt_imgid_t imgid, int *history_end);
+/** move history_end of an image by delta; FALSE when the update fails */
+gboolean dt_image_shift_history_end(const dt_imgid_t imgid, const int delta);
+/** set history_end of an image past its last history item, 0 without any */
+void dt_image_sync_history_end(const dt_imgid_t imgid);
+/** an image of dt_image_get_in_range() */
+typedef struct dt_image_id_filename_t
+{
+  dt_imgid_t id;
+  gchar *filename;
+} dt_image_id_filename_t;
+/** number of images with an id in [min, max], -1 on failure */
+int dt_image_count_in_range(const dt_imgid_t min, const dt_imgid_t max);
+/** id and filename of the images with an id in [min, max] */
+GList *dt_image_get_in_range(const dt_imgid_t min, const dt_imgid_t max);
+void dt_image_id_filename_free(gpointer item);
+/** an image row as the XMP crawler reads it, see dt_image_foreach_sidecar_row() */
+typedef struct dt_image_sidecar_row_t
+{
+  dt_imgid_t id;
+  int64_t write_timestamp;
+  int version;
+  const char *folder;
+  const char *filename;
+  int flags;
+} dt_image_sidecar_row_t;
+/** call cb on the images of film roll filmid (all images for an invalid id),
+ *  ordered by film roll and filename, until cb returns FALSE */
+void dt_image_foreach_sidecar_row(const dt_filmid_t filmid,
+                                  gboolean (*cb)(const dt_image_sidecar_row_t *row, void *data),
+                                  void *data);
+/** set the flags of n images in one transaction */
+void dt_image_set_flags_list(const dt_imgid_t *ids, const int *flags, const int n);
+/** set write_timestamp of an image */
+void dt_image_set_write_timestamp(const dt_imgid_t imgid, const int64_t timestamp);
+/** record the thumbnails of an image as made up to max_mip at stamp */
+void dt_image_set_thumb_state(const dt_imgid_t imgid, const int max_mip, const int64_t stamp);
+/** an image of dt_image_get_outdated_thumbs() */
+typedef struct dt_image_thumb_stamp_t
+{
+  dt_imgid_t id;
+  int64_t stamp;
+} dt_image_thumb_stamp_t;
+/** images whose thumbnails are older than the image or below max_mip, by
+ *  descending id, with the newer of their import and change timestamps */
+GList *dt_image_get_outdated_thumbs(const int max_mip);
+/** mark the thumbnails of all images as never made */
+void dt_image_reset_thumb_state(void);
+/** set write_timestamp of an image to now */
+void dt_image_set_write_timestamp_now(const dt_imgid_t imgid);
+/** add flags to the images whose ids are in `imgs`, a comma-separated id
+ *  list as built by the remove and delete jobs */
+void dt_image_add_flags_in_list(const char *imgs, const int flags);
+/** distinct full paths of the images whose ids are in `imgs` */
+GList *dt_image_get_full_paths_in_list(const char *imgs);
+/** ids of the images in `imgs` that carry all of `flags` */
+GList *dt_image_get_with_flags_in_list(const char *imgs, const int flags);
+/** number of images with the same file (film roll and filename) as imgid,
+ *  imgid included */
+int dt_image_count_same_file(const dt_imgid_t imgid);
 /** TRUE if the given output profile type has primaries wider than sRGB for
  *  this image. Handles the three UI cases used by export-style controls:
  *    DT_COLORSPACE_NONE — "image settings", falls back to the image's

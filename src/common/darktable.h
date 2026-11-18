@@ -74,7 +74,8 @@ typedef unsigned int u_int;
 #include <sys/types.h>
 #endif
 #if defined(__NetBSD__) || defined(__OpenBSD__)
-#include <sys/param.h>
+typedef unsigned long u_long;
+#include <sys/types.h>
 #include <sys/sysctl.h>
 #endif
 
@@ -128,8 +129,14 @@ typedef unsigned int u_int;
 
 #define DT_OMP_SIMD(clauses) DT_OMP_PRAGMA(simd clauses)
 #define DT_OMP_DECLARE_SIMD(clauses) DT_OMP_PRAGMA(declare simd clauses)
-#define DT_OMP_FOR(clauses) DT_OMP_PRAGMA(parallel for default(firstprivate) schedule(static) clauses)
-#define DT_OMP_FOR_SIMD(clauses) DT_OMP_PRAGMA(parallel for simd default(firstprivate) schedule(simd:static) clauses)
+// num_threads() overrides any thread count a library set with
+// omp_set_num_threads(), so a loop never runs more threads than the
+// per-thread buffers have slots. The field is read directly because
+// dt_get_num_threads() makes a system call on each loop start with libgomp
+#define DT_OMP_FOR_CAP_THREADS(max_threads, clauses) DT_OMP_PRAGMA(parallel for default(firstprivate) schedule(static) num_threads(MIN((int)(max_threads), darktable.num_openmp_threads)) clauses)
+#define DT_OMP_FOR_SIMD_CAP_THREADS(max_threads, clauses) DT_OMP_PRAGMA(parallel for simd default(firstprivate) schedule(simd:static) num_threads(MIN((int)(max_threads), darktable.num_openmp_threads)) clauses)
+#define DT_OMP_FOR(clauses) DT_OMP_FOR_CAP_THREADS(darktable.num_openmp_threads, clauses)
+#define DT_OMP_FOR_SIMD(clauses) DT_OMP_FOR_SIMD_CAP_THREADS(darktable.num_openmp_threads, clauses)
 
 #ifndef _RELEASE
 #include "common/poison.h"
@@ -145,10 +152,15 @@ G_BEGIN_DECLS
 /* Create cloned functions for various CPU SSE generations */
 /* See for instructions https://hannes.hauswedell.net/post/2017/12/09/fmv/ */
 /* TL;DR : use only on SIMD functions containing low-level paralellized/vectorized loops */
-#if __has_attribute(target_clones) && !defined(_WIN32) && !defined(NATIVE_ARCH) && !defined(__APPLE__) && defined(__GLIBC__)
+#if __has_attribute(target_clones) \
+    && (((defined(__linux__) || defined(__GNU__)) && defined(__GLIBC__)) \
+        || (!defined(NATIVE_ARCH) \
+            && !defined(_WIN32) \
+            && !defined(__APPLE__) \
+            && !defined(__OpenBSD__)))
 # if defined(__amd64__) || defined(__amd64) || defined(__x86_64__) || defined(__x86_64)
 #define __DT_CLONE_TARGETS__ __attribute__((target_clones("default", "sse2", "sse3", "sse4.1", "sse4.2", "popcnt", "avx", "avx2", "avx512f", "fma4")))
-# elif defined(__PPC64__)
+# elif defined(__PPC64__) && defined(__GLIBC__)
 /* __PPC64__ is the only macro tested for in is_supported_platform.h, other macros would fail there anyway. */
 #define __DT_CLONE_TARGETS__ __attribute__((target_clones("default","cpu=power9")))
 # else
@@ -179,12 +191,13 @@ typedef int32_t dt_filmid_t;
 #define DT_DEVICE_NONE -2
 
 // We have several bitmask opencl start options passed to dt_opencl_init()
-#define DT_OPENCL_OPTION_NONE 0       // default
-#define DT_OPENCL_OPTION_EXCLUDE 1    // --disable-opencl:  disables OpenCL for the session
+#define DT_OPENCL_OPTION_NONE 0         // default
+#define DT_OPENCL_OPTION_EXCLUDE 1      // --disable-opencl:  disables OpenCL for the session
 // some reserved options, mentioned cli options might not be available depending on build
-#define DT_OPENCL_OPTION_FAST_TILE 2  // --cl-tiling:       use OpenCL tiling mode (debugging session)
-#define DT_OPENCL_OPTION_SPURIOS 4    // --cl-spurious:     insert random OpenCL errors while processing modules (debugging session)
-#define DT_OPENCL_OPTION_MIGRATE 8    // --cl-migrate:      enforce cl_mem migration while allocating cl_mem (debugging session)
+#define DT_OPENCL_OPTION_FAST_TILE 2    // --opencl-tiling:   use OpenCL tiling mode (debugging session)
+#define DT_OPENCL_OPTION_SPURIOS 4      // --opencl-spurious: insert random OpenCL errors while processing modules (debugging session)
+#define DT_OPENCL_OPTION_MIGRATE 8      // --opencl-migrate:  enforce cl_mem migration while allocating cl_mem (debugging session)
+#define DT_OPENCL_OPTION_NOFAST_TILE 16 // --opencl-notiling: disable OpenCL fast tiling mode (debugging session)
 
 typedef int32_t dt_mask_id_t;
 #define INVALID_MASKID (-1)
@@ -389,6 +402,7 @@ typedef enum dt_debug_thread_t
   DT_DEBUG_EXPOSE         = 1 << 26,
   DT_DEBUG_PICKER         = 1 << 27,
   DT_DEBUG_AI             = 1 << 28,
+  DT_DEBUG_HDR_MERGE      = 1 << 29,  // HDR exposure-bracket merge + auto-alignment
   DT_DEBUG_ALL            = 0xffffffff & ~DT_DEBUG_VERBOSE,
   DT_DEBUG_COMMON         = DT_DEBUG_OPENCL | DT_DEBUG_PARAMS | DT_DEBUG_IMAGEIO | DT_DEBUG_PIPE | DT_DEBUG_LUA | DT_DEBUG_AI,
   DT_DEBUG_RESTRICT       = DT_DEBUG_VERBOSE | DT_DEBUG_PERF,
@@ -460,6 +474,7 @@ typedef struct darktable_t
   const struct dt_pwstorage_t *pwstorage;
   struct dt_camctl_t *camctl;
   const struct dt_collection_t *collection;
+  struct dt_collection_navigation_state_t *collection_navigation;
   struct dt_selection_t *selection;
   struct dt_points_t *points;
   struct dt_imageio_t *imageio;
@@ -476,6 +491,8 @@ typedef struct darktable_t
   dt_pthread_mutex_t readFile_mutex;
   dt_pthread_mutex_t metadata_threadsafe;
   char *progname;
+  gboolean restart;     /* relaunch after dt_cleanup */
+  char **restart_argv;  /* NULL-terminated copy of original argv */
   char *datadir;
   char *sharedir;
   char *plugindir;
@@ -490,11 +507,12 @@ typedef struct darktable_t
   char *bench_module;
   dt_lua_state_t lua_state;
   GList *guides;
-  double start_wtime;
+  gint64 start_mtime;
   GList *themes;
   int32_t unmuted_signal_dbg_acts;
   gboolean unmuted_signal_dbg[DT_SIGNAL_COUNT];
   gboolean pipe_cache;
+  gboolean cldiff_stats;
   // Keep database history for known images rather than replacing it from XMP.
   // Set by darktable-cli with explicit --library <db>; GUI and CLI use XMP by default.
   gboolean prefer_library_history;
@@ -524,6 +542,10 @@ int dt_init(int argc, char *argv[],
             const gboolean init_gui,
             const gboolean load_data,
             lua_State *L);
+
+#ifdef _WIN32
+void dt_request_console_notice(void);
+#endif
 
 void dt_get_sysresource_level();
 void dt_cleanup();
@@ -733,9 +755,7 @@ void dt_capabilities_cleanup();
 
 static inline double dt_get_wtime(void)
 {
-  struct timeval time;
-  gettimeofday(&time, NULL);
-  return time.tv_sec - 1290608000 + (1.0 / 1000000.0) * time.tv_usec;
+  return(double)(g_get_monotonic_time() - darktable.start_mtime) * 1e-6;
 }
 
 static inline double dt_get_debug_wtime(void)
@@ -882,20 +902,6 @@ static inline float *dt_calloc_perthread_float(const size_t n,
 // return a pointer to the indicated thread's private buffer.
 #define dt_get_bythread(buf, padsize, tnum) \
   DT_IS_ALIGNED((buf) + ((padsize) * (tnum)))
-
-// Most code in dt assumes that the compiler is capable of
-// auto-vectorization.  In some cases, this will yield suboptimal code
-// if the compiler in fact does NOT auto-vectorize.  Uncomment the
-// following line for such a compiler.
-
-//#define DT_NO_VECTORIZATION
-
-// For some combinations of compiler and architecture, the compiler
-// may actually emit inferior code if given a hint to vectorize a
-// loop.  Uncomment the following line if such a combination is the
-// compilation target.
-
-//#define DT_NO_SIMD_HINTS
 
 // copy the RGB channels of a pixel; includes the 'alpha' channel as
 // well if faster due to vectorization, but subsequent code should

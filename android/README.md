@@ -3,6 +3,10 @@
 
 Open this `android/` directory in Android Studio. Install Android SDK 35, NDK 27.2.12479018, and CMake 3.22.1. Build `devDebug` or run `./gradlew :app:assembleDevDebug`; install with `adb install -r app/build/outputs/apk/dev/debug/app-dev-debug.apk`.
 
+The native engine uses the separate [mobile integration layer](../mobile/UPSTREAM_INTEGRATION.md).
+Its Android configuration assembles upstream sources in the build tree and
+keeps the official darktable checkout unchanged.
+
 The Android UI opens one document directly into a fixed split editor: preview
 above, tool controls below, with four persistent bottom tabs and no app-title
 bar or dismissible tools sheet. The three editing tabs group light/color,

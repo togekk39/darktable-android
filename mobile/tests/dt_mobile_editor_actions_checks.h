@@ -222,7 +222,7 @@ static int editor_actions_native_checks(void)
   g_clear_pointer(&before, g_free);
 
   /* Resolve only this develop's enabled original exposure instances. Prefer
-   * an unmasked instance, then the lowest priority, regardless of list order. */
+   * an unmasked instance, then the first in the original pipeline list. */
   exposure.so = other_exposure.so = dt_iop_get_module_so("exposure");
   EDITOR_NATIVE_CHECK(exposure.so && exposure.so->module && exposure.so->get_introspection_linear);
   exposure.module = other_exposure.module = exposure.so->module;
@@ -256,6 +256,20 @@ static int editor_actions_native_checks(void)
   EDITOR_NATIVE_CHECK(set_agx(&agx, "agx.range_from_exposure", 1) == 1);
   EDITOR_NATIVE_CHECK(fabsf(EDITOR_NATIVE_VALUE(agx, "range_black_relative_ev") - (-8.f + 1.5f) * 1.25f) < 1e-6f
     && fabsf(EDITOR_NATIVE_VALUE(agx, "range_white_relative_ev") - (4.f + 2.4f) * 1.25f) < 1e-6f);
+  /* Reordering the pipeline must win over unrelated instance identifiers. */
+  develop.iop = g_list_reverse(develop.iop);
+  EDITOR_NATIVE_CHECK(set_agx(&agx, "agx.range_from_exposure", 1) == 1);
+  EDITOR_NATIVE_CHECK(fabsf(EDITOR_NATIVE_VALUE(agx, "range_black_relative_ev") - (-8.f + .5f) * 1.25f) < 1e-6f
+    && fabsf(EDITOR_NATIVE_VALUE(agx, "range_white_relative_ev") - (4.f + .8f) * 1.25f) < 1e-6f);
+  develop.iop = g_list_reverse(develop.iop);
+  /* Headless deflicker cannot report the GUI's cached effective correction. */
+  EDITOR_NATIVE_INT(other_exposure, "mode") = 1;
+  before = g_memdup2(agx.params, agx.params_size);
+  EDITOR_NATIVE_CHECK(get_agx(&agx, "agx.range_from_exposure", &value, &minimum, &maximum, &original, &kind) == 0
+    && set_agx(&agx, "agx.range_from_exposure", 1) == -1
+    && !memcmp(before, agx.params, agx.params_size));
+  g_clear_pointer(&before, g_free);
+  EDITOR_NATIVE_INT(other_exposure, "mode") = 0;
   exposure.enabled = other_exposure.enabled = FALSE;
   EDITOR_NATIVE_CHECK(get_agx(&agx, "agx.range_from_exposure", &value, &minimum, &maximum, &original, &kind) == 0);
 

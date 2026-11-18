@@ -137,12 +137,11 @@ static inline float sqrf(const float a)
   return a * a;
 }
 
-// taken from rt code: calculate a * b + (1 - a) * c
-static inline float interpolatef(const float a,
-                                 const float b,
-                                 const float c)
+static inline float mixf(const float x,
+                         const float y,
+                         const float a)
 {
-  return a * (b - c) + c;
+  return DT_FMA(y - x, a, x);
 }
 
 // Kahan summation algorithm
@@ -155,6 +154,31 @@ static inline float Kahan_sum(const float m,
    const float t2 = m + t1;
    *c = (t2 - m) - t1;
    return t2;
+}
+
+static inline float _radius_hypotf(const float x, const float y)
+{
+  /*
+  This would be the CPU equivalent fro OpenCL code.
+  Tested on various systems and the code gives bit-identical results
+  with libc hypotf() but is much slower ...
+
+  const float ax = fabsf(x), ay = fabsf(y);
+  const float a = fmaxf(ax, ay), b = fminf(ax, ay);
+  if(a == 0.0f) return 0.0f;
+
+  const float aa = a * a;
+  const float bb = b * b;
+  const float s = aa + bb;
+
+  const float e = ((aa - s) + bb)
+                + (fmaf(a, a, -aa) + fmaf(b, b, -bb));
+
+  const float h = sqrtf(s);
+  const float residual = fmaf(-h, h, s) + e;
+  return fmaf(residual, 0.5f / h, h);
+  */
+  return hypotf(x, y);
 }
 
 static inline float Log2(const float x)
@@ -376,14 +400,10 @@ union float_int {
   int k;
 };
 
-/* __FAST_MATH__ is defined via -ffast-math compiler option,
-  for darktable this is currently used for "Release" builds and in some
-  special parts of the code.
-  For these builds we accept some precision loss for performance and in
-  addition to compiler optimizing we allow some perf optimized inline functions
-  or macros.
+/* _DARKTABLE_RELEASE allows some precision loss for performance making
+   sure this matches OpenCL fast vs normal mode to keep differences small.
 */
-#ifdef __FAST_MATH__
+#ifdef _DARKTABLE_RELEASE
 
 // a faster, vectorizable version of hypotf() when we know that there
 // won't be overflow, NaNs or infinities. Looses some precision for very small inputs
@@ -393,14 +413,14 @@ static inline float dt_fast_hypotf(const float x, const float y)
   return sqrtf(x * x + y * y);
 }
 
-#else // __FAST_MATH__
+#else
 
 static inline float dt_fast_hypotf(const float x, const float y)
 {
   return hypotf(x, y);
 }
 
-#endif // __FAST_MATH__
+#endif
 
 static inline float scharr_gradient(const float *p, const int w)
 {
@@ -460,23 +480,6 @@ static inline float fast_mexp2f(const float x)
   } k;
   k.i = k0 >= (float)0x800000u ? k0 : 0;
   return k.f;
-}
-
-/** Compute ceil value of a float
- * @remark Avoid libc ceil for now. Maybe we'll revert to libc later.
- * @param x Value to ceil
- * @return ceil value
- */
-static inline float ceil_fast(const float x)
-{
-  if(x <= 0.f)
-  {
-    return (float)(int)x;
-  }
-  else
-  {
-    return -((float)(int)-x) + 1.f;
-  }
 }
 
 static inline void dt_vector_min(dt_aligned_pixel_t min,
@@ -566,6 +569,7 @@ static inline void dt_vector_log2(const dt_aligned_pixel_t x,
     res[c] = (logmant[c] * (mant.f[c] - 1.0f)) + exp[c];
 }
 
+#ifdef _DARKTABLE_RELEASE
 static inline void dt_vector_exp(const dt_aligned_pixel_t x,
                                  dt_aligned_pixel_t result)
 {
@@ -641,16 +645,6 @@ static inline void dt_vector_exp2(const dt_aligned_pixel_t input,
     res[c] = expipart.f[c] * expfpart[c];
 }
 
-static inline void dt_vector_exp10(const dt_aligned_pixel_t x,
-                                   dt_aligned_pixel_t res)
-{
-  // 10^x == 2^(3.3219280948873626 * x)
-  dt_aligned_pixel_t scaled;
-  for_four_channels(c,aligned(x,scaled))
-    scaled[c] = 3.3219280948873626f * x[c];
-  dt_vector_exp2(scaled, res);
-}
-
 static inline void dt_vector_powf(const dt_aligned_pixel_t input,
                                   const dt_aligned_pixel_t power,
                                   dt_aligned_pixel_t output)
@@ -661,6 +655,39 @@ static inline void dt_vector_powf(const dt_aligned_pixel_t input,
   for_four_channels(c)
     log[c] *= power[c];
   dt_vector_exp2(log, output);
+}
+
+#else
+static inline void dt_vector_exp(const dt_aligned_pixel_t x,
+                                 dt_aligned_pixel_t result)
+{
+  for_four_channels(c, aligned(x, result))
+    result[c] = expf(x[c]);
+}
+static inline void dt_vector_exp2(const dt_aligned_pixel_t input,
+                                  dt_aligned_pixel_t res)
+{
+  for_four_channels(c,aligned(input,res))
+    res[c] = exp2f(input[c]);
+}
+static inline void dt_vector_powf(const dt_aligned_pixel_t input,
+                                  const dt_aligned_pixel_t power,
+                                  dt_aligned_pixel_t output)
+{
+  for_four_channels(c,aligned(input,output,power))
+    output[c] = powf(input[c], power[c]);
+}
+
+#endif
+
+static inline void dt_vector_exp10(const dt_aligned_pixel_t x,
+                                   dt_aligned_pixel_t res)
+{
+  // 10^x == 2^(3.3219280948873626 * x)
+  dt_aligned_pixel_t scaled;
+  for_four_channels(c,aligned(x,scaled))
+    scaled[c] = 3.3219280948873626f * x[c];
+  dt_vector_exp2(scaled, res);
 }
 
 static inline void dt_vector_pow1(const dt_aligned_pixel_t input,

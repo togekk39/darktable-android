@@ -28,6 +28,7 @@ static gboolean mobile_masks_available(dt_iop_module_t *module)
   return module && module->dev && module->blend_params
     && (module->flags() & IOP_FLAGS_SUPPORTS_BLENDING)
     && (!(module->flags() & IOP_FLAGS_NO_MASKS) || mobile_mask_special(module))
+    && (mobile_mask_special(module) || mobile_blending_classic_editor(module))
     && (!mobile_mask_special(module) || mobile_mask_sync(module));
 }
 
@@ -495,7 +496,8 @@ static int mobile_mask_add(dt_iop_module_t *module, const char *kind)
   module->dev->forms = g_list_append(module->dev->forms, form);
   dt_develop_blend_params_t blend = *module->blend_params;
   blend.mask_id = group->formid;
-  if(!mobile_mask_special(module)) blend.mask_mode |= DEVELOP_MASK_ENABLED | DEVELOP_MASK_MASK;
+  if(!mobile_mask_special(module))
+    blend.mask_mode = (blend.mask_mode & ~DEVELOP_MASK_FLEXI) | DEVELOP_MASK_ENABLED | DEVELOP_MASK_MASK;
   dt_iop_commit_blend_params(module, &blend, NULL);
   if(add) add(module, algorithm);
   else if(mobile_mask_special(module)) mobile_mask_sync(module)(module);

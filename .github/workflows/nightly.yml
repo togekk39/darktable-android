@@ -72,6 +72,11 @@ jobs:
             liblensfun-bin \
             liblensfun-data-v1 \
             liblensfun1 \
+            libopencv-calib3d-dev \
+            libopencv-core-dev \
+            libopencv-features2d-dev \
+            libopencv-flann-dev \
+            libopencv-imgproc-dev \
             libosmgpsmap-1.0-dev \
             libpango1.0-dev \
             libpng-dev \
@@ -84,6 +89,8 @@ jobs:
             libsecret-1-dev \
             libsqlite3-dev \
             libtiff5-dev \
+            libwayland-bin \
+            libwayland-dev \
             libwebp-dev \
             libx11-dev \
             libxml2-dev \
@@ -123,7 +130,7 @@ jobs:
             libxfixes-dev
       - name: Build and install fresh libheif with built-in decoders
         run: |
-          git clone --branch v1.23.1 --depth 1 https://github.com/strukturag/libheif src-libheif
+          git clone --branch v1.23.7 --depth 1 https://github.com/strukturag/libheif src-libheif
           cd src-libheif
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
@@ -141,7 +148,7 @@ jobs:
           cd ..
       - name: Build and install a more recent version of exiv2
         run: |
-          git clone --branch v0.28.8 --depth 1 https://github.com/Exiv2/exiv2 src-exiv2
+          git clone --branch v0.28.9 --depth 1 https://github.com/Exiv2/exiv2 src-exiv2
           cd src-exiv2
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
@@ -235,7 +242,7 @@ jobs:
             python-jsonschema:p
             curl:p
             drmingw:p
-            gcc-libs:p
+            cc-libs:p
             gettext:p
             gmic:p
             graphicsmagick:p
@@ -258,6 +265,7 @@ jobs:
             libxml2:p
             lua54:p
             omp:p
+            opencv:p
             openexr:p
             openjpeg2:p
             osm-gps-map:p
@@ -341,8 +349,7 @@ jobs:
       fail-fast: true
       matrix:
         build:
-          - { os: macos-14,       xcode: 16.2, deployment: 14.0 } # AppleClang 16, arm64
-          - { os: macos-15-intel, xcode: 26.3, deployment: 15.0 } # AppleClang 17, x86_64
+          - { os: macos-15,       xcode: 26.3, deployment: 15.0 } # AppleClang 17, arm64
         compiler:
           - { compiler: XCode,   CC: cc, CXX: c++ }
         btype: [ Release ]
@@ -376,6 +383,9 @@ jobs:
           popd
       - name: Install Base Dependencies
         run: |
+          # The GitHub runner images ship aws/tap, which Homebrew does not trust and
+          # thus warns about on every invocation. We don't use it, so drop it.
+          brew untap --force aws/tap || true
           brew update > /dev/null || true
           cd src/.ci
           export HOMEBREW_NO_INSTALL_UPGRADE=1
@@ -459,7 +469,7 @@ jobs:
         with:
           allowUpdates: true     # required to allow nightly release updates
           removeArtifacts: true  # we don't want to pile up old artifacts in the nightly release
-          tag: ${{ github.ref_name == 'master' && 'nightly' || github.ref_name }}
+          tag: ${{ github.ref_name == 'master' && 'nightly' || (startsWith(github.ref, 'refs/tags/') && github.ref_name || format('nightly_{0}', github.ref_name)) }}
           prerelease: true
           # We don't want a stable release that is in the process of being prepared
           # and not yet ready for publication to be visible
@@ -471,7 +481,7 @@ jobs:
 
             You can use this if you want to try new features without waiting for releases. From time to time, in development builds, old difficult-to-reproduce bugs are fixed, but it is also true that in the development process with the introduction of new complex code, the stability of the program may suffer compared to official releases, so **use it with caution**!
 
-            Also, new versions can make changes to the database schema, so it's best to run them with a separate library.
+            Also, new versions can make changes to the database schema, so it's best to run them with a separate library. We recommended to separate your stable installation from the nightly, see our [guide](https://docs.darktable.org/usermanual/development/en/special-topics/test-environment/) in the manual. 
 
             The `*-x86_64.AppImage` package is compatible with distribution releases that have glibc version 2.35 or higher. For example, if we consider some popular distributions, Ubuntu 22.04, Debian 12, Fedora 36 and newer releases are compatible. The `*-aarch64.AppImage` package requires glibc 2.39 or higher (e.g. Ubuntu 24.04, Debian 13, Fedora 40 and newer).
 
@@ -479,7 +489,7 @@ jobs:
 
             The Windows package `*-win64.exe` requires at least Windows 10. The `*-woa64.exe` package requires at least Windows 11.
 
-            The macOS package `*-arm64.dmg` requires at least macOS 14.0 (Sonoma). The `*-x86_64.dmg` package requires at least macOS 15.0 (Sequoia).
+            The macOS package `*-arm64.dmg` requires at least macOS 15.0 (Sequoia).
 
             __Please help us improve Darktable by reporting any issues you encounter!__ :wink:
           artifacts: |

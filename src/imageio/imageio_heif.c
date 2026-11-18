@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2021-2024 darktable developers.
+    Copyright (C) 2021-2026 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -24,6 +24,7 @@
 #endif
 
 #include <inttypes.h>
+#include <limits.h>
 #include <memory.h>
 #include <stdio.h>
 #include <strings.h>
@@ -115,14 +116,19 @@ dt_imageio_retval_t dt_imageio_open_heif(dt_image_t *img,
           err = heif_image_handle_get_metadata(handle, exif_id, exif_data);
           if(err.code == heif_error_Ok)
           {
-            const uint32_t exif_offset = exif_data[0] << 24
-              | exif_data[1] << 16
-              | exif_data[2] << 8
-              | exif_data[3];
-            if(exif_size > 4 + exif_offset)
-              dt_exif_read_from_blob(img,
-                                     exif_data + 4 + exif_offset,
-                                     exif_size - 4 - exif_offset);
+            const uint32_t exif_offset = (uint32_t)exif_data[0] << 24
+              | (uint32_t)exif_data[1] << 16
+              | (uint32_t)exif_data[2] << 8
+              | (uint32_t)exif_data[3];
+            if(exif_offset < exif_size - 4)
+            {
+              const size_t data_offset = 4 + (size_t)exif_offset;
+              const size_t data_size = exif_size - data_offset;
+              if(data_size <= INT_MAX)
+                dt_exif_read_from_blob(img,
+                                       exif_data + data_offset,
+                                       data_size);
+            }
           }
           g_free(exif_data);
         }
@@ -389,7 +395,7 @@ int dt_imageio_heif_read_profile(const char *filename,
         // image has no embedded ICC profile
         goto out;
       }
-      icc_data = (uint8_t *)g_malloc0(sizeof(uint8_t) * icc_size);
+      icc_data = (uint8_t *)g_try_malloc0(sizeof(uint8_t) * icc_size);
       if(!icc_data)
       {
         goto out;

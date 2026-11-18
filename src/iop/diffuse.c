@@ -86,6 +86,7 @@ typedef struct dt_iop_diffuse_global_data_t
   int kernel_filmic_bspline_vertical;
   int kernel_filmic_bspline_horizontal;
   int kernel_filmic_wavelets_detail;
+  int kernel_filmic_bspline_vertical_detail;
 
   int kernel_diffuse_build_mask;
   int kernel_diffuse_inpaint_mask;
@@ -1073,10 +1074,14 @@ static inline void heat_PDE_diffusion(const float *const restrict high_freq,
         }
 
         // elements of c2 need to be expf(mag*anistropy), but we
-        // haven't applied the expf() yet.  Do that now.
+        // haven't applied the expf() yet.  Do that now. Not with
+        // dt_vector_exp(): it is off by more than 10% below -1, and the
+        // error accumulates over the iterations
         for(size_t k = 0; k < 4; k++)
         {
-          dt_vector_exp(c2[k], c2[k]);
+          for_four_channels(c)
+            c2[k][c] *= 1.44269504f; // exp(x) = 2^(x / ln(2))
+          dt_vector_exp2(c2[k], c2[k]);
         }
 
         dt_aligned_pixel_t kern_first[9], kern_second[9], kern_third[9], kern_fourth[9];
@@ -1309,6 +1314,8 @@ static inline void inpaint_mask(float *const restrict inpainted,
                                 const size_t width,
                                 const size_t height)
 {
+  const uint32_t splitmix32_1337 = splitmix32(1337);
+  const uint32_t splitmix32_666 = splitmix32(666);
   // init the reconstruction with noise inside the masked areas
   DT_OMP_FOR()
   for(size_t k = 0; k < height * width * 4; k += 4)
@@ -1318,8 +1325,10 @@ static inline void inpaint_mask(float *const restrict inpainted,
       const uint32_t i = k / width;
       const uint32_t j = k - i;
       uint32_t DT_ALIGNED_ARRAY state[4]
-          = { splitmix32(j + 1), splitmix32((uint64_t)(j + 1) * (i + 3)),
-              splitmix32(1337), splitmix32(666) };
+          = { splitmix32(j + 1),
+              splitmix32((uint64_t)(j + 1) * (i + 3)),
+              splitmix32_1337,
+              splitmix32_666 };
       xoshiro128plus(state);
       xoshiro128plus(state);
       xoshiro128plus(state);
@@ -1414,7 +1423,7 @@ void process(dt_iop_module_t *self,
     in = temp1;
   }
 
-  for(int it = 0; it < iterations; it++)
+  for(int it = 0; it < iterations && !dt_dev_piece_shutdown(piece, (iterations-it) > 5); it++)
   {
     if(it == 0)
     {
@@ -1522,23 +1531,41 @@ static inline cl_int wavelets_process_cl(const int devid,
       buffer_out = LF_odd;
     }
 
-    // Compute wavelets low-frequency scales
-    err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_filmic_bspline_horizontal, width, height,
-                              CLARG(buffer_in), CLARG(HF[s]),
-                              CLARG(width), CLARG(height), CLARG(mult));
-    if(err != CL_SUCCESS) return err;
+    if(s + 1 < scales)
+    {
+      // HF[s + 1] is not written yet and holds the horizontal blur; the
+      // vertical blur writes the low-frequency scale and HF = detail - LF
+      // in one pass
+      err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_filmic_bspline_horizontal, width, height,
+                                CLARG(buffer_in), CLARG(HF[s + 1]),
+                                CLARG(width), CLARG(height), CLARG(mult));
+      if(err != CL_SUCCESS) return err;
 
-    err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_filmic_bspline_vertical, width, height,
-                              CLARG(HF[s]), CLARG(buffer_out),
-                              CLARG(width), CLARG(height), CLARG(mult));
-    if(err != CL_SUCCESS) return err;
+      err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_filmic_bspline_vertical_detail, width, height,
+                                CLARG(HF[s + 1]), CLARG(buffer_in), CLARG(buffer_out),
+                                CLARG(HF[s]), CLARG(width), CLARG(height), CLARG(mult));
+      if(err != CL_SUCCESS) return err;
+    }
+    else
+    {
+      // Compute wavelets low-frequency scales
+      err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_filmic_bspline_horizontal, width, height,
+                                CLARG(buffer_in), CLARG(HF[s]),
+                                CLARG(width), CLARG(height), CLARG(mult));
+      if(err != CL_SUCCESS) return err;
 
-    // Compute wavelets high-frequency scales and backup the maximum
-    // of texture over the RGB channels Note : HF = detail - LF
-    err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_filmic_wavelets_detail, width, height,
-                              CLARG(buffer_in), CLARG(buffer_out),
-                              CLARG(HF[s]), CLARG(width), CLARG(height));
-    if(err != CL_SUCCESS) return err;
+      err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_filmic_bspline_vertical, width, height,
+                                CLARG(HF[s]), CLARG(buffer_out),
+                                CLARG(width), CLARG(height), CLARG(mult));
+      if(err != CL_SUCCESS) return err;
+
+      // Compute wavelets high-frequency scales and backup the maximum
+      // of texture over the RGB channels Note : HF = detail - LF
+      err = dt_opencl_enqueue_kernel_2d_args(devid, gd->kernel_filmic_wavelets_detail, width, height,
+                                CLARG(buffer_in), CLARG(buffer_out),
+                                CLARG(HF[s]), CLARG(width), CLARG(height));
+      if(err != CL_SUCCESS) return err;
+    }
 
     residual = buffer_out;
   }
@@ -1680,7 +1707,7 @@ int process_cl(dt_iop_module_t *self,
     in = temp1;
   }
 
-  for(int it = 0; it < iterations && err == CL_SUCCESS; it++)
+  for(int it = 0; it < iterations && err == CL_SUCCESS && !dt_dev_piece_shutdown(piece, (iterations-it)>5); it++)
   {
     if(it == 0)
     {
@@ -1736,6 +1763,8 @@ void init_global(dt_iop_module_so_t *self)
     dt_opencl_create_kernel(wavelets, "blur_2D_Bspline_vertical");
   gd->kernel_filmic_wavelets_detail =
     dt_opencl_create_kernel(wavelets, "wavelets_detail_level");
+  gd->kernel_filmic_bspline_vertical_detail =
+    dt_opencl_create_kernel(wavelets, "blur_2D_Bspline_vertical_detail");
 }
 
 
@@ -1749,6 +1778,7 @@ void cleanup_global(dt_iop_module_so_t *self)
   dt_opencl_free_kernel(gd->kernel_filmic_bspline_vertical);
   dt_opencl_free_kernel(gd->kernel_filmic_bspline_horizontal);
   dt_opencl_free_kernel(gd->kernel_filmic_wavelets_detail);
+  dt_opencl_free_kernel(gd->kernel_filmic_bspline_vertical_detail);
   free(self->data);
   self->data = NULL;
 }
@@ -1904,7 +1934,7 @@ void gui_init(dt_iop_module_t *self)
   gtk_widget_set_tooltip_text
     (g->threshold,
      _("luminance threshold for the mask.\n"
-       "0. disables the luminance masking and applies the module on the whole image.\n"
+       "0 disables the luminance masking and applies the module on the whole image.\n"
        "any higher value excludes pixels with luminance lower than the threshold.\n"
        "this can be used to inpaint highlights."));
 }

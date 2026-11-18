@@ -27,26 +27,10 @@ CMakeLists.txt.user
 workspace/
 cmake-build-debug/
 .idea/
+AppDir/
 
-# Android/NDK build outputs
-android/.gradle/
-android/local.properties
-android/**/build/
-.cxx/
-build/mobile/
+# personal, per-project agent instructions (see AGENTS.md)
+AGENTS.local.md
 
-# Local Android packages, native outputs, and signing material
-.vcpkg/
-*.apk
-*.aab
-*.apks
-*.so
-*.jks
-*.keystore
-*.p12
-*.pfx
-*.pkcs12
-android/gradle/wrapper/gradle-wrapper.jar
-
-# Local dependency downloads, toolchains and verification scratch files
-/work/
+# cache directories generated for Python tools
+__pycache__/

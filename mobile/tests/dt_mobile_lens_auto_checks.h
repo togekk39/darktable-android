@@ -127,6 +127,36 @@ static int mobile_lens_auto_checks(void)
   LENS_AUTO_CHECK(set_number(module, "lens.autodetect", 1) == 1);
   LENS_AUTO_CHECK(*modified && !current_lens[0]);
   LENS_AUTO_CHECK(!memcmp(module->default_params, defaults_before, schema->size));
+
+  /* imported names can fill the native arrays without a terminator. Queries
+   * use bounded local strings and must leave the stored history unchanged */
+  char *current_camera = plugin->get_p(module->params, "camera");
+  LENS_AUTO_CHECK(current_camera);
+  memset(current_camera, 'C', camera_field->Array.count);
+  memset(current_lens, 'L', lens_field->Array.count);
+  memcpy(params_before, module->params, schema->size);
+  char *bounded_camera = g_strnfill(camera_field->Array.count - 1, 'C');
+  char *bounded_lens = g_strnfill(lens_field->Array.count - 1, 'L');
+  char *camera_json = g_strdup_printf("\"requestedCamera\":\"%s\"", bounded_camera);
+  char *lens_json = g_strdup_printf("\"requestedLens\":\"%s\"", bounded_lens);
+  json = metadata(module);
+  const gboolean bounded_current = json && strstr(json, camera_json) && strstr(json, lens_json)
+    && !memcmp(module->params, params_before, schema->size);
+  g_free(bounded_camera); g_free(bounded_lens); g_free(camera_json); g_free(lens_json);
+  LENS_AUTO_CHECK(bounded_current);
+  g_clear_pointer(&json, g_free);
+
+  *modified = FALSE;
+  memset(default_camera, 'D', camera_field->Array.count);
+  memset(default_lens, 'E', lens_field->Array.count);
+  memcpy(defaults_before, module->default_params, schema->size);
+  bounded_camera = g_strnfill(camera_field->Array.count - 1, 'D');
+  camera_json = g_strdup_printf("\"requestedCamera\":\"%s\"", bounded_camera);
+  json = metadata(module);
+  const gboolean bounded_defaults = json && strstr(json, camera_json)
+    && !memcmp(module->default_params, defaults_before, schema->size);
+  g_free(bounded_camera); g_free(camera_json);
+  LENS_AUTO_CHECK(bounded_defaults);
   success = 1;
 finished:
   g_free(json);

@@ -37,21 +37,15 @@ macro (add_iop _lib _src)
   # yes, input is added as part of the library. since we just set it's LANGUAGE
   # to "", no compilation will happen. this is needed for proper IDE support.
   add_library(${_lib} MODULE ${_output} ${OPT_SRC} ${_input})
-  if(ANDROID)
-    set_target_properties(${_lib} PROPERTIES PREFIX "libdt_iop_")
-  endif()
   target_link_libraries(${_lib} lib_darktable)
 
-  if(ANDROID)
-    # Android packages every module beside the core in nativeLibraryDir.
-    set_target_properties(${_lib} PROPERTIES INSTALL_RPATH "${RPATH_ORIGIN}")
-  elseif (WIN32)
+  if (WIN32)
     _detach_debuginfo (${_lib} ${CMAKE_INSTALL_LIBDIR}/darktable/plugins)
   else()
       set_target_properties(${_lib}
                             PROPERTIES
                             INSTALL_RPATH ${RPATH_ORIGIN}/..)
-  endif()
+  endif(WIN32)
 
   install(TARGETS ${_lib} DESTINATION ${CMAKE_INSTALL_LIBDIR}/darktable/plugins COMPONENT DTApplication)
 
@@ -104,6 +98,12 @@ add_iop(rawoverexposed "rawoverexposed.c")
 add_iop(velvia "velvia.c")
 add_iop(vignette "vignette.c")
 add_iop(splittoning "splittoning.c")
+add_iop(spektrafilm "spektrafilm.c")
+# same floating-point contract as common/spektra_core.c and spektra_sim.c,
+# see SPEKTRA_FP_CONTRACT_FLAGS in src/CMakeLists.txt
+if(SPEKTRA_FP_CONTRACT_FLAGS)
+  target_compile_options(spektrafilm PRIVATE ${SPEKTRA_FP_CONTRACT_FLAGS})
+endif()
 add_iop(grain "grain.c")
 add_iop(clahe "clahe.c")
 add_iop(bilateral "bilateral.cc")
@@ -115,10 +115,25 @@ add_iop(graduatednd "graduatednd.c")
 add_iop(relight "relight.c")
 add_iop(zonesystem "zonesystem.c")
 add_iop(demosaic "demosaic.c" "demosaicing/amaze.cc" DEFAULT_VISIBLE)
+# AMaZE decides by comparing nearly equal floats. Reassociation and fma
+# contraction flip some of those decisions, so the CPU code would differ
+# from its OpenCL twin (data/kernels/demosaic_amaze.cl) by up to 1e-2 on
+# single pixels. Plain IEEE math costs no measurable time here.
+if(HAVE_FFP_CONTRACT_OFF)
+  set_source_files_properties("demosaicing/amaze.cc"
+    PROPERTIES COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off")
+endif()
 add_iop(rotatepixels "rotatepixels.c")
 add_iop(scalepixels "scalepixels.c")
 add_iop(atrous "atrous.c")
 add_iop(cacorrect "cacorrect.c")
+# the correction pass branches on the sign of color differences that are
+# exactly 0 in clipped and dead sensels. Reassociation and fma contraction
+# move them off 0, so the CPU took other branches than its OpenCL twin
+# (data/kernels/cacorrect.cl) and differed by up to 6e-2 on single sensels
+if(HAVE_FFP_CONTRACT_OFF)
+  target_compile_options(cacorrect PRIVATE "-fno-fast-math;-ffp-contract=off")
+endif()
 add_iop(overexposed "overexposed.c")
 add_iop(hotpixels "hotpixels.c")
 add_iop(lowlight "lowlight.c")
@@ -136,6 +151,7 @@ add_iop(invert "invert.c")
 add_iop(vibrance "vibrance.c")
 add_iop(flip "flip.c" DEFAULT_VISIBLE)
 add_iop(finalscale "finalscale.c")
+add_iop(demosaicscale "demosaicscale.c")
 add_iop(globaltonemap "globaltonemap.c")
 add_iop(bilat "bilat.c" DEFAULT_VISIBLE)
 add_iop(denoiseprofile "denoiseprofile.c" DEFAULT_VISIBLE)
@@ -162,13 +178,18 @@ add_iop(sigmoid "sigmoid.c")
 add_iop(agx "agx.c")
 add_iop(primaries "primaries.c")
 add_iop(colorequal "colorequal.c")
+add_iop(contrastntexture "contrastntexture.c")
 add_iop(rasterfile "rasterfile.c")
+add_iop(satcurvergb "satcurvergb.c")
 
 if(Rsvg2_FOUND)
   add_iop(watermark "watermark.c")
 endif(Rsvg2_FOUND)
 
 add_iop(lens "lens.cc" DEFAULT_VISIBLE)
+target_compile_options(lens PRIVATE
+  -fno-fast-math
+  -ffp-contract=off)
 
 # fix for Mac when OpenMP is only available in C compiler
 if(APPLE)

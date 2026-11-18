@@ -21,6 +21,8 @@
 */
 
 #include "common/collection.h"
+#include "common/filter.h"
+
 typedef struct _widgets_misc_t
 {
   dt_lib_filtering_rule_t *rule;
@@ -60,161 +62,87 @@ static void _misc_changed(GtkWidget *widget,
   _misc_synchronise(misc);
 }
 
-static gboolean _misc_focus_out(GtkWidget *entry,
-                                GdkEventFocus *event,
-                                gpointer user_data)
+static void _misc_focus_out(GtkEventController *controller,
+                            gpointer user_data)
 {
   _widgets_misc_t *misc = (_widgets_misc_t *)user_data;
-  if(misc->rule->cleaning) return FALSE;
-  _misc_changed(entry, user_data);
-  return FALSE;
+  if(misc->rule->cleaning) return;
+  _misc_changed(dt_gui_get_widget(controller), user_data);
 }
 
-void _misc_tree_update(_widgets_misc_t *misc)
+static void _misc_tree_update(_widgets_misc_t *misc)
 {
   dt_lib_filtering_t *d = misc->rule->lib;
-
-  char query[1024] = { 0 };
 
   GtkTreeModel *name_model = gtk_tree_view_get_model(GTK_TREE_VIEW(misc->name_tree));
   gtk_list_store_clear(GTK_LIST_STORE(name_model));
 
-  gchar *table = NULL;
   gchar *tooltip = NULL;
+  GList *counts = NULL;
 
   if(misc->prop == DT_COLLECTION_PROP_CAMERA)
   {
+    counts = dt_filter_get_camera_counts(d->last_where_ext);
     tooltip = g_strdup(_("no camera defined"));
   }
   else if(misc->prop == DT_COLLECTION_PROP_LENS)
   {
+    counts = dt_filter_get_lens_counts(d->last_where_ext);
     tooltip = g_strdup(_("no lens defined"));
   }
   else if(misc->prop == DT_COLLECTION_PROP_GROUP_ID)
   {
+    counts = dt_filter_get_group_id_counts(d->last_where_ext);
     tooltip = g_strdup(_("no group id defined"));
   }
   else if(misc->prop == DT_COLLECTION_PROP_WHITEBALANCE)
   {
-    table = g_strdup("whitebalance");
+    counts = dt_filter_get_white_balance_counts(d->last_where_ext);
     tooltip = g_strdup(_("no white balance defined"));
   }
   else if(misc->prop == DT_COLLECTION_PROP_FLASH)
   {
-    table = g_strdup("flash");
+    counts = dt_filter_get_flash_counts(d->last_where_ext);
     tooltip = g_strdup(_("no flash defined"));
   }
   else if(misc->prop == DT_COLLECTION_PROP_EXPOSURE_PROGRAM)
   {
-    table = g_strdup("exposure_program");
+    counts = dt_filter_get_exposure_program_counts(d->last_where_ext);
     tooltip = g_strdup(_("no exposure program defined"));
   }
   else if(misc->prop == DT_COLLECTION_PROP_METERING_MODE)
   {
-    table = g_strdup("metering_mode");
+    counts = dt_filter_get_metering_mode_counts(d->last_where_ext);
     tooltip = g_strdup(_("no metering mode defined"));
   }
   else if(misc->prop == DT_COLLECTION_PROP_DIMENSIONS)
   {
+    counts = dt_filter_get_image_dimension_counts(d->last_where_ext);
     tooltip = g_strdup(_("no image dimensions defined"));
   }
 
-  // SQL
-  if(misc->prop == DT_COLLECTION_PROP_CAMERA)
-  {
-    // clang-format off
-    g_snprintf(query, sizeof(query),
-               "SELECT TRIM(cm.maker || ' ' || cm.model) AS camera, COUNT(*) AS count"
-               " FROM main.images AS mi, main.cameras AS cm"
-               " WHERE mi.camera_id = cm.id AND %s"
-               " GROUP BY camera"
-               " ORDER BY camera",
-               d->last_where_ext);
-    // clang-format on
-  }
-  else if(misc->prop == DT_COLLECTION_PROP_LENS)
-  {
-    // clang-format off
-    g_snprintf(query, sizeof(query),
-               "SELECT CASE LOWER(TRIM(ln.name))"
-               "         WHEN 'n/a' THEN ''"
-               "         ELSE ln.name"
-               "       END AS lens, COUNT(*) AS count"
-               " FROM main.images AS mi, main.lens AS ln"
-               " WHERE mi.lens_id = ln.id AND %s"
-               " GROUP BY lens"
-               " ORDER BY lens",
-               d->last_where_ext);
-    // clang-format on
-  }
-  else if(misc->prop == DT_COLLECTION_PROP_GROUP_ID)
-  {
-    // clang-format off
-    g_snprintf(query, sizeof(query),
-               "SELECT mi.group_id, COUNT(*) AS count"
-               " FROM main.images AS mi"
-               " WHERE %s"
-               " GROUP BY group_id"
-               " HAVING COUNT(*) > 1"
-               " ORDER BY group_id",
-               d->last_where_ext);
-    // clang-format on
-  }
-  else if(misc->prop == DT_COLLECTION_PROP_DIMENSIONS)
-  {
-    // clang-format off
-    g_snprintf(query, sizeof(query),
-               "SELECT mi.width || 'x' || mi.height AS dim, COUNT(*) AS count"
-               " FROM main.images AS mi"
-               " WHERE %s"
-               " GROUP BY dim"
-               " ORDER BY dim",
-               d->last_where_ext);
-    // clang-format on
-  }
-  else // white balance, flash, exposure program, metering mode
-  {
-    // clang-format off
-    g_snprintf(query, sizeof(query),
-               "SELECT t.name"
-               "     , COUNT(*) AS count"
-               " FROM main.images AS mi"
-               " JOIN main.%s AS t"
-               " WHERE mi.%s_id = t.id AND %s"
-               " GROUP BY name"
-               " ORDER BY name",
-               table, table,
-               d->last_where_ext);
-    // clang-format on
-  }
-
-  g_free(table);
-
-  // clang-format on
-  sqlite3_stmt *stmt;
-  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), query, -1, &stmt, NULL);
   int unset = 0;
-  while(sqlite3_step(stmt) == SQLITE_ROW)
-  {
-    const char *name = (char *)sqlite3_column_text(stmt, 0);
-    const int count = sqlite3_column_int(stmt, 1);
 
-    if(!name || !g_strcmp0(name, ""))
+  for(GList *iter = counts; iter; iter = g_list_next(iter))
+  {
+    dt_filter_name_count_t *count = iter->data;
+
+    if(!count->name || !g_strcmp0(count->name, ""))
     {
-      unset += count;
+      unset += count->count;
     }
     else
     {
-      gchar *value_path = g_strdup_printf("\"%s\"", name);
+      gchar *value_path = g_strdup_printf("\"%s\"", count->name);
       gtk_list_store_insert_with_values(GTK_LIST_STORE(name_model), NULL, -1,
-                         TREE_COL_TEXT, name,
-                         TREE_COL_TOOLTIP, name,
+                         TREE_COL_TEXT, count->name,
+                         TREE_COL_TOOLTIP, count->name,
                          TREE_COL_PATH, value_path,
-                         TREE_COL_COUNT, count, -1);
+                         TREE_COL_COUNT, count->count, -1);
       g_free(value_path);
     }
   }
-  sqlite3_finalize(stmt);
+  g_list_free_full(counts, dt_filter_name_count_free);
 
   // we add the unset entry if any
   if(unset > 0)
@@ -229,8 +157,8 @@ void _misc_tree_update(_widgets_misc_t *misc)
   misc->tree_ok = TRUE;
 }
 
-void _misc_tree_update_visibility(GtkWidget *w,
-                                  _widgets_misc_t *misc)
+static void _misc_tree_update_visibility(GtkWidget *w,
+                                         _widgets_misc_t *misc)
 {
   if(!misc->tree_ok) _misc_tree_update(misc);
 }
@@ -375,11 +303,11 @@ static void _misc_ok_clicked(GtkWidget *w,
   gtk_widget_hide(misc->pop);
 }
 
-void _misc_tree_count_func(GtkTreeViewColumn *col,
-                           GtkCellRenderer *renderer,
-                           GtkTreeModel *model,
-                           GtkTreeIter *iter,
-                           gpointer data)
+static void _misc_tree_count_func(GtkTreeViewColumn *col,
+                                  GtkCellRenderer *renderer,
+                                  GtkTreeModel *model,
+                                  GtkTreeIter *iter,
+                                  gpointer data)
 {
   gchar *name;
   guint count;
@@ -490,7 +418,7 @@ static void _misc_widget_init(dt_lib_filtering_rule_t *rule,
 
   gtk_box_pack_start(GTK_BOX(hb), misc->name, TRUE, TRUE, 0);
   g_signal_connect(G_OBJECT(misc->name), "activate", G_CALLBACK(_misc_changed), misc);
-  g_signal_connect(G_OBJECT(misc->name), "focus-out-event", G_CALLBACK(_misc_focus_out), misc);
+  dt_gui_connect_focus(misc->name, NULL, _misc_focus_out, misc);
   GtkGestureSingle *misc_gesture = dt_gui_connect_click(misc->name, _misc_press, NULL, misc);
   gtk_gesture_single_set_button(misc_gesture, GDK_BUTTON_SECONDARY);
   gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(misc_gesture), GTK_PHASE_TARGET);

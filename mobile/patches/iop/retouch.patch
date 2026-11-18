@@ -1,0 +1,29 @@
+--- a/src/iop/retouch.c
++++ b/src/iop/retouch.c
+@@ -749,7 +749,7 @@
+   memset(forms_d, 0, sizeof(dt_iop_retouch_form_data_t) * RETOUCH_NO_FORMS);
+ 
+   // we go through all forms in blend params
+-  dt_masks_form_t *grp = dt_masks_get_from_id(darktable.develop, bp->mask_id);
++  dt_masks_form_t *grp = dt_masks_get_from_id(self->dev, bp->mask_id);
+   if(grp && (grp->type & DT_MASKS_GROUP))
+   {
+     int new_form_index = 0;
+@@ -776,7 +776,7 @@
+         {
+           // if it does not exists add it to the new array
+           const dt_masks_form_t *parent_form =
+-            dt_masks_get_from_id(darktable.develop, formid);
++            dt_masks_get_from_id(self->dev, formid);
+ 
+           if(parent_form)
+           {
+@@ -811,6 +811,8 @@
+ 
+   memcpy(p->rt_forms, forms_d, sizeof(p->rt_forms));
+ }
++
++#include "mobile/adapters/iop/retouch.inc"
+ 
+ static gboolean rt_masks_form_is_in_roi(dt_iop_module_t *self,
+                                         dt_dev_pixelpipe_iop_t *piece,

@@ -132,7 +132,7 @@ static void rcd_demosaic(float *const restrict out,
   const int num_vertical = 1 + (height - 2 * RCD_BORDER -1) / RCD_TILEVALID;
   const int num_horizontal = 1 + (width - 2 * RCD_BORDER -1) / RCD_TILEVALID;
 
-  DT_OMP_PRAGMA(parallel firstprivate(width, height, filters, out, in, scaler, revscaler))
+  DT_OMP_PRAGMA(parallel num_threads(darktable.num_openmp_threads) firstprivate(width, height, filters, out, in, scaler, revscaler))
   {
     // ensure that border elements which are read but never actually set below are zeroed out so use calloc
     float *const VH_Dir = dt_calloc_align_float((size_t) DT_RCD_TILESIZE * DT_RCD_TILESIZE);
@@ -260,7 +260,7 @@ static void rcd_demosaic(float *const restrict out,
             const float VH_Neighbourhood_Value = 0.25f * (VH_Dir[indx - w1 - 1] + VH_Dir[indx - w1 + 1] + VH_Dir[indx + w1 - 1] + VH_Dir[indx + w1 + 1]);
             const float VH_Disc = (fabsf(0.5f - VH_Central_Value) < fabsf(0.5f - VH_Neighbourhood_Value)) ? VH_Neighbourhood_Value : VH_Central_Value;
 
-            rgb[1][indx] = interpolatef(CLIP(VH_Disc), H_Est, V_Est);
+            rgb[1][indx] = mixf(V_Est, H_Est, CLIP(VH_Disc));
           }
         }
 
@@ -314,7 +314,7 @@ static void rcd_demosaic(float *const restrict out,
             const float Q_Est = (NE_Grad * SW_Est + SW_Grad * NE_Est) / (NE_Grad + SW_Grad);
 
             // R@B and B@R interpolation
-            rgb[c][indx] = rgb[1][indx] + interpolatef(CLIP(PQ_Disc), Q_Est, P_Est);
+            rgb[c][indx] = rgb[1][indx] + mixf(P_Est, Q_Est, CLIP(PQ_Disc));
           }
         }
 
@@ -360,7 +360,7 @@ static void rcd_demosaic(float *const restrict out,
               const float H_Est = (E_Grad * W_Est + W_Grad * E_Est) / (E_Grad + W_Grad);
 
               // R@G and B@G interpolation
-              rgb[c][indx] = rgb1 + interpolatef(CLIP(VH_Disc), H_Est, V_Est);
+              rgb[c][indx] = rgb1 + mixf(V_Est, H_Est, CLIP(VH_Disc));
             }
           }
         }
@@ -438,8 +438,8 @@ static cl_int process_rcd_cl(dt_iop_module_t *self,
     err = dt_opencl_local_buffer_opt(devid, gd->kernel_ppg_green, &locopt);
     if(err != CL_SUCCESS) goto error;
 
-    size_t sizes[2] = { ROUNDUP(width, locopt.sizex), ROUNDUP(height, locopt.sizey) };
-    size_t local[2] = { locopt.sizex, locopt.sizey };
+    const size_t sizes[2] = { ROUNDUP(width, locopt.sizex), ROUNDUP(height, locopt.sizey) };
+    const size_t local[2] = { locopt.sizex, locopt.sizey };
     err = dt_opencl_enqueue_kernel_2d_local_args(devid, gd->kernel_ppg_green, sizes, local,
         CLARG(dev_in), CLARG(dev_tmp), CLARG(width), CLARG(height), CLARG(filters),
         CLLOCAL(sizeof(float) * (locopt.sizex + 2*3) * (locopt.sizey + 2*3)), CLARGINT(32));
@@ -455,8 +455,8 @@ static cl_int process_rcd_cl(dt_iop_module_t *self,
     err = dt_opencl_local_buffer_opt(devid, gd->kernel_ppg_redblue, &locopt);
     if(err != CL_SUCCESS) goto error;
 
-    size_t sizes[2] = { ROUNDUP(width, locopt.sizex), ROUNDUP(height, locopt.sizey) };
-    size_t local[2] = { locopt.sizex, locopt.sizey };
+    const size_t sizes[2] = { ROUNDUP(width, locopt.sizex), ROUNDUP(height, locopt.sizey) };
+    const size_t local[2] = { locopt.sizex, locopt.sizey };
     err = dt_opencl_enqueue_kernel_2d_local_args(devid, gd->kernel_ppg_redblue, sizes, local,
       CLARG(dev_tmp), CLARG(dev_out), CLARG(width), CLARG(height), CLARG(filters),
       CLLOCAL(sizeof(float) * 4 * (locopt.sizex + 2) * (locopt.sizey + 2)), CLARGINT(16));
@@ -496,8 +496,8 @@ static cl_int process_rcd_cl(dt_iop_module_t *self,
   if(err != CL_SUCCESS) goto error;
 
   // Fused step1 code with locals.
-  size_t sizes[2] = { ROUNDUP(width, locopt.sizex), ROUNDUP(height, locopt.sizey) };
-  size_t local[2] = { locopt.sizex, locopt.sizey };
+  const size_t sizes[2] = { ROUNDUP(width, locopt.sizex), ROUNDUP(height, locopt.sizey) };
+  const size_t local[2] = { locopt.sizex, locopt.sizey };
   err = dt_opencl_enqueue_kernel_2d_local_args(devid, gd->kernel_rcd_step_1, sizes, local,
       CLARG(cfa), CLARG(VH_dir), CLARG(width), CLARG(height),
       CLLOCAL(sizeof(float) * (locopt.sizex + 8) * (locopt.sizey + 8)));

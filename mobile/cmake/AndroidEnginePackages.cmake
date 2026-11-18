@@ -37,7 +37,7 @@ set(PKG_CONFIG_ARGN --static)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(DT_ANDROID_ENGINE REQUIRED IMPORTED_TARGET GLOBAL
   gtk+-3.0 gio-2.0 gmodule-2.0 gthread-2.0 pangocairo librsvg-2.0
-  json-glib-1.0 lensfun lcms2 exiv2 libtiff-4 libpng libxml-2.0)
+  json-glib-1.0 lensfun lcms2 exiv2 libtiff-4 libpng libxml-2.0 libarchive)
 foreach(_dt_engine_path IN LISTS DT_ANDROID_ENGINE_INCLUDE_DIRS DT_ANDROID_ENGINE_LIBRARY_DIRS)
   cmake_path(IS_PREFIX _dt_engine_prefix "${_dt_engine_path}" NORMALIZE _dt_engine_is_target)
   if(NOT _dt_engine_is_target)

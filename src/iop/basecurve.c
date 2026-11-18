@@ -15,6 +15,7 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
+
 #include "common/gdk_event_utils.h"
 
 #include "bauhaus/bauhaus.h"
@@ -38,7 +39,6 @@
 #include "iop/iop_api.h"
 
 #include <regex.h>
-#include <assert.h>
 #include <gtk/gtk.h>
 #include <inttypes.h>
 #include <stdlib.h>
@@ -906,7 +906,7 @@ int process_cl_lut(dt_iop_module_t *self,
 
   cl_mem dev_profile_info = NULL;
   cl_mem dev_profile_lut = NULL;
-  dt_colorspaces_iccprofile_info_cl_t *profile_info_cl;
+  dt_colorspaces_iccprofile_info_cl_t *profile_info_cl = NULL;
   cl_float *profile_lut_cl = NULL;
 
   const int use_work_profile = (work_profile == NULL) ? 0 : 1;
@@ -1395,6 +1395,12 @@ void process(dt_iop_module_t *self,
     process_lut(self, piece, ivoid, ovoid, roi_in, roi_out);
 }
 
+static inline int _basecurve_nodes(const int nodes)
+{
+  // stored counts index the fixed node arrays, and the last node at nodes - 1
+  return CLAMP(nodes, 1, MAXNODES);
+}
+
 void commit_params(dt_iop_module_t *self,
                    dt_iop_params_t *p1,
                    dt_dev_pixelpipe_t *pipe,
@@ -1417,7 +1423,7 @@ void commit_params(dt_iop_module_t *self,
     d->curve = dt_draw_curve_new(0.0, 1.0, p->basecurve_type[ch]);
     d->basecurve_nodes = p->basecurve_nodes[ch];
     d->basecurve_type = p->basecurve_type[ch];
-    for(int k = 0; k < p->basecurve_nodes[ch]; k++)
+    for(int k = 0; k < _basecurve_nodes(p->basecurve_nodes[ch]); k++)
     {
       // printf("p->basecurve[%i][%i].x = %f;\n", ch, k, p->basecurve[ch][k].x);
       // printf("p->basecurve[%i][%i].y = %f;\n", ch, k, p->basecurve[ch][k].y);
@@ -1426,13 +1432,13 @@ void commit_params(dt_iop_module_t *self,
   }
   else
   {
-    for(int k = 0; k < p->basecurve_nodes[ch]; k++)
+    for(int k = 0; k < _basecurve_nodes(p->basecurve_nodes[ch]); k++)
       dt_draw_curve_set_point(d->curve, k, p->basecurve[ch][k].x, p->basecurve[ch][k].y);
   }
   dt_draw_curve_calc_values(d->curve, 0.0f, 1.0f, 0x10000, NULL, d->table);
 
   // now the extrapolation stuff:
-  const float xm = p->basecurve[0][p->basecurve_nodes[0] - 1].x;
+  const float xm = p->basecurve[0][_basecurve_nodes(p->basecurve_nodes[0]) - 1].x;
   const float x[4] = { 0.7f * xm, 0.8f * xm, 0.9f * xm, 1.0f * xm };
   const float y[4] = { d->table[CLAMP((int)(x[0] * 0x10000ul), 0, 0xffff)],
                        d->table[CLAMP((int)(x[1] * 0x10000ul), 0, 0xffff)],
@@ -1465,6 +1471,9 @@ void gui_update(dt_iop_module_t *self)
 {
   dt_iop_basecurve_params_t *p = self->params;
   dt_iop_basecurve_gui_data_t *g = self->gui_data;
+
+  // every GUI handler uses the stored count of curve 0, and adding a node writes through it
+  p->basecurve_nodes[0] = _basecurve_nodes(p->basecurve_nodes[0]);
 
   gtk_widget_set_visible(g->exposure_step, p->exposure_fusion != 0);
   gtk_widget_set_visible(g->exposure_bias, p->exposure_fusion != 0);
@@ -1620,7 +1629,7 @@ static gboolean dt_iop_basecurve_draw(GtkWidget *widget, cairo_t *crf, dt_iop_mo
     // draw information about current selected node
     PangoLayout *layout;
     PangoRectangle ink;
-    PangoFontDescription *desc = pango_font_description_copy_static(darktable.bauhaus->pango_font_desc);
+    PangoFontDescription *desc = dt_gui_get_font();
     pango_font_description_set_weight(desc, PANGO_WEIGHT_BOLD);
     pango_font_description_set_absolute_size(desc, PANGO_SCALE);
     layout = pango_cairo_create_layout(cr);
@@ -1936,12 +1945,17 @@ static void dt_iop_basecurve_button_press(GtkGestureSingle *gesture,
   }
   else if(gtk_gesture_single_get_current_button(gesture) == GDK_BUTTON_SECONDARY && g->selected >= 0)
   {
+    // consume the event so it does not bubble to the module body's
+    // right-click handler (which opens the presets menu)
+    dt_gui_claim(gesture);
+
     if(g->selected == 0 || g->selected == nodes - 1)
     {
       float reset_value = g->selected == 0 ? 0 : 1;
       basecurve[g->selected].y = basecurve[g->selected].x = reset_value;
       gtk_widget_queue_draw(GTK_WIDGET(g->area));
       dt_dev_add_history_item_target(darktable.develop, self, TRUE, widget);
+      return; // an endpoint reset must not fall through into node removal
     }
 
     for(int k = g->selected; k < nodes - 1; k++)

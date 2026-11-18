@@ -76,7 +76,7 @@ static void dual_demosaic(dt_dev_pixelpipe_iop_t *piece,
       {
         const size_t oidx = idx * 4;
         for(int c = 0; c < 3; c++)
-          high_data[oidx + c] = interpolatef(mask[idx], high_data[oidx + c], vng_image[oidx + c]);
+          high_data[oidx + c] = mixf(vng_image[oidx + c], high_data[oidx + c], mask[idx]);
         high_data[oidx + 3] = 0.0f;
       }
       dt_free_align(vng_image);
@@ -102,7 +102,7 @@ int dual_demosaic_cl(const dt_iop_module_t *self,
   dt_iop_demosaic_data_t *data = piece->data;
   const dt_iop_demosaic_global_data_t *gd = self->global_data;
 
-  const float contrastf = _slider2contrast(data->dual_thrs);
+  const float contrastf = 16.0f / MAX(1e-7f, _slider2contrast(data->dual_thrs));
 
   cl_int err = CL_MEM_OBJECT_ALLOCATION_FAILURE;
   const size_t bsize = sizeof(float) * width * height;

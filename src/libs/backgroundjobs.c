@@ -136,13 +136,7 @@ static gboolean _added_gui_thread(gpointer user_data)
 
   // instance cursor to tell user that, if this is a blocking job with
   // a global busy cursor, the cancel box in this widget can stop it
-  GdkWindow *window = gtk_widget_get_window(params->instance_widget);
-  if(window)
-  {
-    GdkCursor *cursor = gdk_cursor_new_from_name(gdk_display_get_default(), "default");
-    gdk_window_set_cursor(window, cursor);
-    g_object_unref(cursor);
-  }
+  dt_gui_cursor_set(params->instance_widget, "default", "background-job/instance");
 
   free(params);
   return G_SOURCE_REMOVE;
@@ -244,8 +238,11 @@ static gboolean _cancellable_gui_thread(gpointer user_data)
   _cancellable_gui_thread_t *params = (_cancellable_gui_thread_t *)user_data;
 
   GtkBox *hbox = GTK_BOX(params->instance->hbox);
-  GtkWidget *button = dtgtk_button_new(dtgtk_cairo_paint_cancel, 0, NULL);
-  g_signal_connect(G_OBJECT(button), "clicked", G_CALLBACK(_lib_backgroundjobs_cancel_callback_new), params->progress);
+  GtkWidget *button = dtgtk_button_new_full(dtgtk_cairo_paint_cancel, 0, NULL,
+      &(dtgtk_button_config_t){
+        .clicked_cb = G_CALLBACK(_lib_backgroundjobs_cancel_callback_new),
+        .clicked_data = params->progress,
+      });
   gtk_box_pack_start(hbox, GTK_WIDGET(button), FALSE, FALSE, 0);
   gtk_widget_show_all(button);
 

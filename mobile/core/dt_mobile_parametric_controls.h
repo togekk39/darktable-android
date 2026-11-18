@@ -7,7 +7,7 @@
  * neutral unused-channel polarity and boost-coordinate transformation. */
 static gboolean mobile_parametric_available(dt_iop_module_t *module)
 {
-  if(!mobile_blending_available(module)) return FALSE;
+  if(!mobile_blending_available(module) || !mobile_blending_classic_editor(module)) return FALSE;
   const dt_iop_colorspace_type_t cst = module->blend_colorspace(module, NULL, NULL);
   return cst == IOP_CS_LAB || cst == IOP_CS_RGB;
 }
@@ -105,7 +105,8 @@ static void mobile_parametric_neutral_channels(dt_iop_module_t *module, dt_devel
 
 static void mobile_parametric_activate(dt_develop_blend_params_t *p)
 {
-  p->mask_mode = (p->mask_mode & ~DEVELOP_MASK_RASTER) | DEVELOP_MASK_ENABLED | DEVELOP_MASK_CONDITIONAL;
+  p->mask_mode = (p->mask_mode & ~(DEVELOP_MASK_RASTER | DEVELOP_MASK_FLEXI))
+    | DEVELOP_MASK_ENABLED | DEVELOP_MASK_CONDITIONAL;
   /* Raster masks are an exclusive mode. Clear their source registration as
    * well as the mode bit; the original commit helper uses the stored source. */
   memset(p->raster_mask_source, 0, sizeof(p->raster_mask_source));

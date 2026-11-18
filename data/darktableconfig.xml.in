@@ -11,13 +11,14 @@
   <dttab name="darkroom" title="darkroom">
     <section title="general"/>
     <section name="modules" title="modules"/>
-    <section name="masking" title="masking"/>
   </dttab>
   <dttab name="processing" title="processing">
     <section name="general" title="image processing"/>
+    <section name="hdr_alignment" title="HDR alignment"/>
     <section name="cpugpu" title="CPU / memory"/>
     <section name="opencl" title="OpenCL GPU acceleration"/>
     <section name="platform" title="OpenCL drivers"/>
+    <section name="cldevices" title="OpenCL devices"/>
   </dttab>
   <dttab name="security" title="security">
     <section title="general"/>
@@ -40,6 +41,37 @@
     <type>bool</type>
     <default>false</default>
     <shortdescription>modify theme with user tweaks</shortdescription>
+  </dtconfig>
+  <dtconfig common="yes">
+    <name>themes/rounded-header</name>
+    <type>bool</type>
+    <default>false</default>
+    <shortdescription>use rounded module's header</shortdescription>
+  </dtconfig>
+  <dtconfig common="yes">
+    <name>themes/focused-module-border</name>
+    <type>int</type>
+    <default>0</default>
+    <shortdescription>use small border around module</shortdescription>
+  </dtconfig>
+  <dtconfig common="yes">
+    <name>themes/expanded-module-border</name>
+    <type>int</type>
+    <default>0</default>
+    <shortdescription>use small border around module</shortdescription>
+  </dtconfig>
+  <dtconfig common="yes">
+    <name>themes/accent-color</name>
+    <type>int</type>
+    <default>0</default>
+    <shortdescription>use colored accent for some UI elements</shortdescription>
+  </dtconfig>
+  <dtconfig common="yes">
+    <name>themes/condensed</name>
+    <type>bool</type>
+    <default>false</default>
+    <shortdescription>condensed panels' controls</shortdescription>
+    <longdescription>use condensed panels' controls in all views</longdescription>
   </dtconfig>
   <dtconfig prefs="misc" section="accel">
     <name>accel/prefer_focused</name>
@@ -162,13 +194,6 @@
     <shortdescription>marker shape</shortdescription>
     <longdescription>the shape of the slider marker</longdescription>
   </dtconfig>
-  <dtconfig prefs="misc" section="interface" common="yes" restart="true">
-    <name>themes/condensed</name>
-    <type>bool</type>
-    <default>false</default>
-    <shortdescription>condensed panels' controls</shortdescription>
-    <longdescription>use condensed panels' controls in all views</longdescription>
-  </dtconfig>
   <dtconfig prefs="misc" section="interface" common="yes">
     <name>darkroom/ui/auto_module_name_update</name>
     <type>bool</type>
@@ -182,6 +207,13 @@
     <default>library.db</default>
     <shortdescription>database location</shortdescription>
     <longdescription>filename relative to ~/.config/darktable or starting with a slash (restart required)</longdescription>
+  </dtconfig>
+  <dtconfig common="yes">
+    <name>workspace/label</name>
+    <type>string</type>
+    <default></default>
+    <shortdescription>selected workspace</shortdescription>
+    <longdescription>label of the workspace to open at startup; empty for the default workspace</longdescription>
   </dtconfig>
   <dtconfig>
     <name>storage/piwigo/last_album</name>
@@ -385,6 +417,55 @@
     <shortdescription>do not set the 'uncategorized' entry for tags</shortdescription>
     <longdescription>do not set the 'uncategorized' entry for tags which do not have children</longdescription>
   </dtconfig>
+  <dtconfig prefs="processing" section="hdr_alignment" capability="opencv">
+    <name>plugins/lighttable/hdr_merge_auto_align</name>
+    <type>bool</type>
+    <default>true</default>
+    <shortdescription>auto-align frames when merging HDR brackets</shortdescription>
+    <longdescription>register and warp exposure brackets onto a reference frame before merging, removing ghosting caused by a shaky tripod or handheld shots.\nonly effective when darktable is built with OpenCV.</longdescription>
+  </dtconfig>
+  <dtconfig prefs="processing" section="hdr_alignment" capability="opencv">
+    <name>plugins/lighttable/hdr_merge_auto_reference</name>
+    <type>bool</type>
+    <default>false</default>
+    <shortdescription>pick the HDR alignment reference automatically</shortdescription>
+    <longdescription>before merging, examine every bracket and align to the one richest in detail instead of the first frame.\nimproves alignment when the first exposure is a poor template, at the cost of one extra decode pass over the frames.\nrequires auto-align and an OpenCV build.</longdescription>
+  </dtconfig>
+  <dtconfig prefs="processing" section="hdr_alignment" capability="opencv">
+    <name>plugins/lighttable/hdr_merge_proxy_scale</name>
+    <type min="0.25" max="1.0">float</type>
+    <default>0.625</default>
+    <shortdescription>alignment detail (proxy scale)</shortdescription>
+    <longdescription>fraction of the full sensor resolution at which feature detection and alignment are computed.\nhigher values find more, more distinctive features (better on repetitive or low-contrast scenes) but cost roughly (scale / 0.5)^2 more time and memory.\n0.5 restores the legacy speed.</longdescription>
+  </dtconfig>
+  <dtconfig prefs="processing" section="hdr_alignment" capability="opencv">
+    <name>plugins/lighttable/hdr_merge_feature_gamma</name>
+    <type min="1.0" max="6.0">float</type>
+    <default>2.2</default>
+    <shortdescription>shadow lift for feature detection (gamma)</shortdescription>
+    <longdescription>display-gamma applied to the linear raw before feature detection, to lift shadow detail into the detector's range.\n1.0 disables it. higher values help under-exposed frames but can amplify shadow noise; the percentile stretch already does part of this, so the effect is scene-dependent.</longdescription>
+  </dtconfig>
+  <dtconfig prefs="processing" section="hdr_alignment" capability="opencv">
+    <name>plugins/lighttable/hdr_merge_clahe_clip</name>
+    <type min="0.0" max="16.0">float</type>
+    <default>0.0</default>
+    <shortdescription>local contrast for feature detection (CLAHE clip)</shortdescription>
+    <longdescription>clip limit of the local contrast enhancement (CLAHE) applied before feature detection. 0 disables it.\nenabling it (e.g. 2.0) helps detect features on extremely under-exposed frames, but on repetitive textures (façades, railings, foliage) it can change descriptor signatures between exposures and cause mis-alignment, so it is off by default.</longdescription>
+  </dtconfig>
+  <dtconfig prefs="processing" section="hdr_alignment" capability="opencv">
+    <name>plugins/lighttable/hdr_merge_sift_keypoints</name>
+    <type min="500" max="20000">int</type>
+    <default>5000</default>
+    <shortdescription>feature budget per frame (keypoints)</shortdescription>
+    <longdescription>maximum number of SIFT keypoints kept per frame after spatial balancing, before matching.\nbalancing both frames to a common budget keeps a feature-dense frame from flooding the matcher with ambiguous candidates.</longdescription>
+  </dtconfig>
+  <dtconfig prefs="processing" section="hdr_alignment" capability="opencv">
+    <name>plugins/lighttable/hdr_merge_debug_images</name>
+    <type>bool</type>
+    <default>false</default>
+    <shortdescription>save alignment debug images</shortdescription>
+    <longdescription>write per-frame diagnostic images while merging: the feature-detection input, the detected keypoints and all feature matches (green = inlier, red = outlier).\nsaved as Netpbm (.pgm/.ppm) in a darktable_hdr_align_debug folder in the system temp directory (or the folder named by the DT_HDR_DEBUG_IMAGE_DIR environment variable). for diagnosing alignment problems; off by default.</longdescription>
+  </dtconfig>
   <dtconfig dialog="collect">
     <name>plugins/lighttable/tagging/case_sensitivity</name>
     <type>
@@ -403,6 +484,13 @@
     <default>false</default>
     <shortdescription>enable AI features</shortdescription>
     <longdescription>enable AI-powered features such as denoising and upscaling using neural networks</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>plugins/ai/auto_check_updates</name>
+    <type>bool</type>
+    <default>true</default>
+    <shortdescription>automatically check for model updates</shortdescription>
+    <longdescription>contact the model repositories to look for newer versions of the installed AI models. when off, updates are only looked for when you ask for them in the AI preferences</longdescription>
   </dtconfig>
   <dtconfig>
     <name>plugins/ai/provider</name>
@@ -424,6 +512,13 @@
     <default>darktable-org/darktable-ai</default>
     <shortdescription>AI models GitHub repository</shortdescription>
     <longdescription>GitHub repository for downloading AI models (format: owner/repo)</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>plugins/ai/third_party_repositories</name>
+    <type>string</type>
+    <default></default>
+    <shortdescription>additional AI model repositories</shortdescription>
+    <longdescription>comma-separated list of additional GitHub repositories offering AI models (format: owner/repo,owner/repo). these are not maintained or reviewed by the darktable project; a model installed from one replaces any installed model of the same name. each listed repository is contacted when checking for model updates.</longdescription>
   </dtconfig>
   <dtconfig>
     <name>plugins/ai/models_path</name>
@@ -480,7 +575,7 @@
     <shortdescription>OpenCL scheduling profile</shortdescription>
     <longdescription>defines how preview and full pixelpipe tasks are scheduled on OpenCL enabled systems:\n - 'default': GPU processes full and CPU processes preview pipe (adaptable by config parameters),\n - 'multiple GPUs': process both pixelpipes in parallel on two different GPUs,\n - 'very fast GPU': process both pixelpipes sequentially on the GPU.</longdescription>
   </dtconfig>
-  <dtconfig prefs="processing" section="opencl" capability="multiopencl">
+  <dtconfig>
     <name>opencl_tune_headroom</name>
     <type>bool</type>
     <default>false</default>
@@ -521,6 +616,13 @@
     <default>${DEFCONFIG_APPLE}</default>
     <shortdescription>Apple</shortdescription>
     <longdescription>Apple OpenCL (vendor provided)</longdescription>
+  </dtconfig>
+  <dtconfig prefs="processing" section="platform" restart="true">
+    <name>clplatform_portablecomputinglanguage</name>
+    <type>bool</type>
+    <default>false</default>
+    <shortdescription>PoCL</shortdescription>
+    <longdescription>portable computing language, runs OpenCL on the CPU. usually slower than darktable's own CPU code, mostly useful for testing. the only platform allowed to use CPU devices</longdescription>
   </dtconfig>
   <dtconfig prefs="processing" section="platform" capability="windows" restart="true">
     <name>clplatform_openclon12</name>
@@ -904,6 +1006,13 @@
     <type>boolean</type>
     <default>false</default>
     <shortdescription>display large colorpicker patch</shortdescription>
+    <longdescription/>
+  </dtconfig>
+  <dtconfig>
+    <name>ui_last/color/softproof_bpc</name>
+    <type>bool</type>
+    <default>true</default>
+    <shortdescription/>
     <longdescription/>
   </dtconfig>
   <dtconfig>
@@ -1559,7 +1668,7 @@
     <shortdescription>pen pressure control for brush masks</shortdescription>
     <longdescription> - 'off': pressure reading ignored,\n - 'hardness'/'opacity'/'brush size': pressure reading controls specified attribute,\n - 'absolute'/'relative': pressure reading is taken directly as attribute value or multiplied with pre-defined setting.</longdescription>
   </dtconfig>
-  <dtconfig>
+  <dtconfig ui="yes">
     <name>brush_smoothing</name>
     <type>
       <enum>
@@ -1572,21 +1681,21 @@
     <shortdescription>smoothing of brush strokes</shortdescription>
     <longdescription>sets level for smoothing of brush strokes.\nstronger smoothing leads to less nodes and easier editing but with lower control of accuracy.</longdescription>
   </dtconfig>
-  <dtconfig prefs="darkroom" section="masking">
+  <dtconfig>
     <name>masks_scroll_down_increases</name>
     <type>bool</type>
     <default>false</default>
     <shortdescription>scroll down to increase mask parameters</shortdescription>
     <longdescription>when using the mouse scroll wheel to change mask parameters, scroll down to increase the mask size, feather size, opacity, brush hardness and gradient curvature\nby default scrolling up increases these parameters</longdescription>
   </dtconfig>
-  <dtconfig prefs="darkroom" section="masking">
+  <dtconfig>
     <name>masks/path_resize_amount</name>
-    <type>int</type>
+    <type min="1" max="200">int</type>
     <default>2</default>
-    <shortdescription>path mask resize step amount</shortdescription>
-    <longdescription>amount to grow or shrink a path mask per scroll wheel tick when resizing. the unit is set by the 'path mask resize unit' preference.</longdescription>
+    <shortdescription>step size</shortdescription>
+    <longdescription>amount to grow or shrink a path mask per scroll wheel tick when resizing. the unit is the one of the 'shrink or grow' slider's px/% toggle.</longdescription>
   </dtconfig>
-  <dtconfig prefs="darkroom" section="masking">
+  <dtconfig>
     <name>masks/path_resize_unit</name>
     <type>
       <enum>
@@ -1598,32 +1707,30 @@
     <shortdescription>unit for path mask resize step amount</shortdescription>
     <longdescription>unit for the path mask resize step: 'pixels' uses image pixels, '% of path size' uses a percentage of the path's largest bounding box dimension.</longdescription>
   </dtconfig>
-  <dtconfig prefs="darkroom" section="masking">
+  <dtconfig>
     <name>masks/path_resize_resolution</name>
     <type>
       <enum>
         <option>512</option>
         <option>1024</option>
         <option>2048</option>
-        <option>4096</option>
       </enum>
     </type>
     <default>2048</default>
     <shortdescription>path mask resize tracing resolution</shortdescription>
     <longdescription>internal raster resolution (in pixels on the longest side) used when re-vectorizing a resized path mask. higher values preserve more detail and nodes at the cost of speed.</longdescription>
   </dtconfig>
-  <dtconfig prefs="darkroom" section="masking">
+  <dtconfig>
     <name>masks/path_resize_curve_smoothing</name>
     <type>
       <enum>
         <option>sharp</option>
-        <option>balanced</option>
         <option>smooth</option>
       </enum>
     </type>
-    <default>balanced</default>
+    <default>smooth</default>
     <shortdescription>path mask resize curve smoothing</shortdescription>
-    <longdescription>controls how corners are handled when re-vectorizing a resized path mask. 'sharp' preserves more nodes and corners; 'smooth' produces fewer, rounder control points.</longdescription>
+    <longdescription>controls how a resized path mask is re-vectorized. 'smooth' follows the resized outline with few nodes and round curves; 'sharp' traces it as a polygon, which takes many more nodes.</longdescription>
   </dtconfig>
   <dtconfig prefs="darkroom" section="general">
     <name>darkroom/mouse/middle_button_cycle_zoom_to_200_percent</name>
@@ -2590,6 +2697,13 @@
     <longdescription>this is slower than the default.</longdescription>
   </dtconfig>
   <dtconfig>
+    <name>plugins/lighttable/export/pq_peak_nits</name>
+    <type min="203" max="10000">int</type>
+    <default>1000</default>
+    <shortdescription>PQ peak luminance</shortdescription>
+    <longdescription>the brightest highlight a PQ (HDR) output should reach, in nits. tone mappers that follow the output map their white to this peak. HLG output always peaks at 1000 nits and SDR output at the 203 nit reference white.</longdescription>
+  </dtconfig>
+  <dtconfig>
     <name>plugins/lighttable/export/high_quality_processing</name>
     <type>bool</type>
     <default>false</default>
@@ -2684,6 +2798,20 @@
     <default>1600</default>
     <shortdescription>crossover ISO for X-Trans FDC demosaicing</shortdescription>
     <longdescription>up to, and including, this ISO, X-Trans frequency domain chroma demosaicing uses the hybrid mode for determining chroma; for all higher ISO values the pure FDC is used.</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>plugins/darkroom/spektrafilm/repository</name>
+    <type>string</type>
+    <default>darktable-org/darktable-spektrafilm</default>
+    <shortdescription>spektrafilm data repository</shortdescription>
+    <longdescription>repository holding the spektrafilm spectral data packs, as owner/repo. the files are read over https; git is not required.</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>plugins/darkroom/spektrafilm/ref</name>
+    <type>string</type>
+    <default>main</default>
+    <shortdescription>spektrafilm data repository ref</shortdescription>
+    <longdescription>tag or branch to read the spektrafilm data packs from. a tag is preferable where one exists: an immutable ref is what lets an old edit fetch the exact spectral table it was developed against, where a branch hands over whatever is current.</longdescription>
   </dtconfig>
   <dtconfig>
     <name>plugins/darkroom/denoiseprofile/show_compute_variance_mode</name>
@@ -3556,6 +3684,125 @@
     <longdescription/>
   </dtconfig>
   <dtconfig>
+    <name>plugins/darkroom/blend/preview_channel_on_hover</name>
+    <type>bool</type>
+    <default>true</default>
+    <shortdescription>preview the channel under the cursor</shortdescription>
+    <longdescription>while enabled, resting the pointer on one of the add-parametric-element buttons displays that channel in the center view; the preview only starts after a short pause, so passing over the buttons costs nothing</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>plugins/darkroom/masks/parametric_picker_reuse_area</name>
+    <type>bool</type>
+    <default>true</default>
+    <shortdescription>reuse the last picked area</shortdescription>
+    <longdescription>while enabled, a parametric mask element's color picker starts from the area the module's last pick used and sets the range from it at once, so one area can set the range of several channels in turn; the first pick still waits for an area dragged on the image</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>plugins/darkroom/masks/solo_edit_mode</name>
+    <type>bool</type>
+    <default>false</default>
+    <shortdescription>solo edit the selected mask element</shortdescription>
+    <longdescription>while enabled, only the selected element's nodes and handles are editable on canvas; the other members still contribute to the mask</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>plugins/darkroom/masks/refinements_collapsed</name>
+    <type>bool</type>
+    <default>false</default>
+    <shortdescription>collapse the refinements section</shortdescription>
+    <longdescription>whether the mask panel's refinements section is folded, for every module and target</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>plugins/darkroom/masks/shape_controls_collapsed</name>
+    <type>bool</type>
+    <default>false</default>
+    <shortdescription>collapse the controls section of shapes</shortdescription>
+    <longdescription>whether the mask panel's controls sub-panel is folded while a drawn shape is selected, for every module and target</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>plugins/darkroom/masks/parametric_controls_collapsed</name>
+    <type>bool</type>
+    <default>false</default>
+    <shortdescription>collapse the controls section of parametric elements</shortdescription>
+    <longdescription>whether the mask panel's controls sub-panel is folded while a parametric element is selected, for every module and target</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>plugins/darkroom/masks/help_collapsed</name>
+    <type>bool</type>
+    <default>false</default>
+    <shortdescription>collapse the help section</shortdescription>
+    <longdescription>whether the mask panel's help section is folded, for every module and target</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>plugins/darkroom/masks/consumers_collapsed</name>
+    <type>bool</type>
+    <default>false</default>
+    <shortdescription>collapse the mask consumers section</shortdescription>
+    <longdescription>whether the mask panel's mask consumers section is folded, for every module</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>plugins/darkroom/masks/show_panel_handle</name>
+    <type>bool</type>
+    <default>true</default>
+    <shortdescription>show the mask panel's resize handle</shortdescription>
+    <longdescription>while enabled, the mask panel's edge carries a visible handle with an arrow showing which way the panel folds away; while disabled the handle is invisible, like the main panels', and still resizes the panel by dragging and hides it on a click</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>plugins/darkroom/masks/always_on_panel</name>
+    <type>bool</type>
+    <default>false</default>
+    <shortdescription>keep the mask panel open beside the canvas</shortdescription>
+    <longdescription>while enabled, the mask panel docked beside the canvas stays open for every module, with a mask or without, until it is folded away, and takes its room from the canvas instead of floating over it; hiding the left or right panel it is docked next to hides it too</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>plugins/darkroom/masks/show_focus_row</name>
+    <type>bool</type>
+    <default>true</default>
+    <shortdescription>show focused module under header</shortdescription>
+    <longdescription>while enabled, the mask panel hosted in the utility panel or beside the canvas shows the name of the module whose mask it holds, and its instance name, in a row under its header; the panel embedded within a module has no such row, as the module's own header names it</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>plugins/darkroom/masks/show_preset_notes</name>
+    <type>bool</type>
+    <default>true</default>
+    <shortdescription>show preset help notes (beginners)</shortdescription>
+    <longdescription>while enabled, the mask panel shows a short help note on how to use the selected group, in a collapsible help section of its own, when the group was made by a built-in group layout preset</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>plugins/darkroom/masks/default_group_preset</name>
+    <type>string</type>
+    <default>drawn</default>
+    <shortdescription>default group layout</shortdescription>
+    <longdescription>the group layout preset a module's mask starts with when it is switched on for the first time: the id of a built-in preset in masks_group_presets.json, or user: followed by the name of a saved one</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>plugins/darkroom/masks/docked_split_position</name>
+    <type min="0">int</type>
+    <default>0</default>
+    <shortdescription/>
+    <longdescription/>
+  </dtconfig>
+  <dtconfig>
+    <name>plugins/darkroom/masks/opacity_not_sticky</name>
+    <type>bool</type>
+    <default>false</default>
+    <shortdescription>start new shapes at full opacity</shortdescription>
+    <longdescription>while enabled, a new mask shape always starts at 100% opacity; while disabled, it starts at the opacity last used by any shape</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>plugins/darkroom/blend/masks_panel_position</name>
+    <type>int</type>
+    <default>0</default>
+    <shortdescription>mask panel position</shortdescription>
+    <longdescription>where the blend mask panel is shown: 0 embedded within each module, 1 as a utility module in the left panel, 2 as a separate panel beside the canvas</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>plugins/darkroom/masks/fold_run_length</name>
+    <type min="0">int</type>
+    <default>3</default>
+    <shortdescription>auto-fold runs of mask elements</shortdescription>
+    <longdescription>a run of this many elements or more, one after the other, in the mask panel shows only its top element, with a row standing in for the rest that opens them; groups are never folded and end a run. 0 never folds, and the panel options offer 0, 3 and 5</longdescription>
+  </dtconfig>
+  <dtconfig>
     <name>plugins/darkroom/masks/opacity</name>
     <type>float</type>
     <default>1.0</default>
@@ -3699,15 +3946,15 @@
     <name>plugins/darkroom/masks/object/threshold</name>
     <type min="0.3" max="0.9">float</type>
     <default>0.5</default>
-    <shortdescription>AI mask binarization threshold</shortdescription>
-    <longdescription>sigmoid threshold for converting AI mask to binary. higher values (0.6-0.7) tighten boundaries, lower values include more area.</longdescription>
+    <shortdescription>AI mask threshold</shortdescription>
+    <longdescription>the level at which the AI mask is cut into contours when the selection is committed as paths. higher values (0.6-0.7) tighten boundaries, lower values include more area. a selection stored as pixels keeps the model's confidence as the mask's opacity, so the threshold shapes how the selection is found rather than where its edge falls.</longdescription>
   </dtconfig>
   <dtconfig>
     <name>plugins/darkroom/masks/object/render_size</name>
-    <type min="1024">int</type>
+    <type min="1024" max="6144">int</type>
     <default>1536</default>
     <shortdescription>AI mask render resolution</shortdescription>
-    <longdescription>target resolution (longest side in pixels) for rendering the image before AI mask encoding. higher values improve edge accuracy but increase processing time. the AI encoder always works at 1024px internally.</longdescription>
+    <longdescription>target resolution (longest side in pixels) for rendering the image before AI mask encoding, and the resolution an object mask is stored at. higher values improve edge accuracy but cost processing time, memory and sidecar size. the AI encoder always works at 1024px internally.</longdescription>
   </dtconfig>
   <dtconfig>
     <name>plugins/darkroom/masks/object/persist_model</name>
@@ -3717,11 +3964,11 @@
     <longdescription>keep the AI segmentation model loaded in memory between mask creation sessions within the same darkroom view. reduces latency when creating multiple masks but uses more memory</longdescription>
   </dtconfig>
   <dtconfig>
-    <name>plugins/darkroom/masks/object/path_preview</name>
+    <name>plugins/darkroom/masks/object/vectorize</name>
     <type>bool</type>
-    <default>TRUE</default>
-    <shortdescription>show AI mask path preview overlay</shortdescription>
-    <longdescription>display the vectorized path (with anchor points) on top of the AI mask while creating it. useful for previewing the final shape before committing</longdescription>
+    <default>false</default>
+    <shortdescription>apply AI object masks as paths</shortdescription>
+    <longdescription>trace the AI object mask into paths when it is applied, with a live preview of the outline while selecting. otherwise the mask is stored as pixels in the image's sidecar</longdescription>
   </dtconfig>
   <dtconfig>
     <name>plugins/darkroom/masks/object/refine_boundary</name>
@@ -3841,6 +4088,20 @@
     <shortdescription>method to use for getting the display profile</shortdescription>
     <longdescription>this option allows to force a specific means of getting the current display profile.\nthis is useful when one alternative gives wrong results</longdescription>
   </dtconfig>
+  <dtconfig prefs="misc" section="interface">
+    <name>ui_last/display_force_cairo</name>
+    <type>bool</type>
+    <default>false</default>
+    <shortdescription>convert to the display profile in darktable</shortdescription>
+    <longdescription>convert images to the display profile in darktable, and do not give them to the color management of the system. use this setting only as a workaround for compositor or driver bugs</longdescription>
+  </dtconfig>
+  <dtconfig prefs="misc" section="interface">
+    <name>ui_last/display_profile_file</name>
+    <type>string</type>
+    <default></default>
+    <shortdescription>display profile file</shortdescription>
+    <longdescription>the absolute path of an ICC profile. darktable uses this profile as the display profile for both windows, instead of the profile from the system. if the field is empty, or the file is not a readable RGB profile, darktable uses the system profile.\nthis setting has no effect on a window that darktable gives to the color management of the system. where the system converts the colors of all applications itself, as macOS does, the colors are then converted twice</longdescription>
+  </dtconfig>
   <dtconfig>
     <name>metadata/resolution</name>
     <type min="72" max="9600">int</type>
@@ -3854,6 +4115,20 @@
     <default>false</default>
     <shortdescription>look for updated XMP files on startup</shortdescription>
     <longdescription>check file modification times of all XMP files on startup to check if any got updated in the meantime</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>run_crawler_in_background</name>
+    <type>bool</type>
+    <default>true</default>
+    <shortdescription>look for updated XMP files in the background</shortdescription>
+    <longdescription>examine one film roll at a time from a background job, most recently opened film roll first, instead of examining the whole library before the user interface appears. opening a film roll that has not been examined yet moves it to the front of the queue.</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>crawler_threads</name>
+    <type>int</type>
+    <default>16</default>
+    <shortdescription>number of threads used to look for updated XMP files</shortdescription>
+    <longdescription>the search for updated XMP files is limited by filesystem latency rather than by processing power, so using considerably more threads than there are CPU cores is beneficial, especially when the images are stored on a network share. set to 1 to search serially.</longdescription>
   </dtconfig>
   <dtconfig>
     <name>colorlabel/red</name>
@@ -3906,7 +4181,35 @@
     <shortdescription>raster mask files root folder</shortdescription>
     <longdescription>this folder (and sub-folders) contains PFM/PNG files used by the raster mask import module. (restart required)</longdescription>
   </dtconfig>
-<dtconfig>
+  <dtconfig>
+    <name>plugins/lighttable/neural_restore/output_pattern/raw_denoise</name>
+    <type>string</type>
+    <default>$(FILE_FOLDER)/$(FILE.NAME)_raw-denoise</default>
+    <shortdescription>output path for neural restore raw denoise</shortdescription>
+    <longdescription>where raw denoise writes its result, as a path pattern with no extension: raw denoise always writes DNG. darktable variables are expanded, and whatever follows the source name becomes the suffix. each task keeps its own pattern</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>plugins/lighttable/neural_restore/output_pattern/denoise</name>
+    <type>string</type>
+    <default>$(FILE_FOLDER)/$(FILE.NAME)_denoise</default>
+    <shortdescription>output path for neural restore denoise</shortdescription>
+    <longdescription>where denoise writes its result, as a path pattern with no extension: denoise always writes TIFF. darktable variables are expanded, and whatever follows the source name becomes the suffix. each task keeps its own pattern</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>plugins/lighttable/neural_restore/output_pattern/upscale</name>
+    <type>string</type>
+    <default>$(FILE_FOLDER)/$(FILE.NAME)_upscale</default>
+    <shortdescription>output path for neural restore upscale</shortdescription>
+    <longdescription>where upscale writes its result, as a path pattern with no extension: upscale always writes TIFF, and every scale shares this one. darktable variables are expanded, and whatever follows the source name becomes the suffix. each task keeps its own pattern</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>plugins/lighttable/neural_restore/mark_output</name>
+    <type>bool</type>
+    <default>true</default>
+    <shortdescription>mark AI raw denoise output as denoised</shortdescription>
+    <longdescription>record in the generated DNG that it has already been denoised, so darktable skips auto-applied denoise presets on it. without this an auto-applied denoise preset matches the output as it matched the original, since the file keeps the source ISO, and denoises it a second time</longdescription>
+  </dtconfig>
+  <dtconfig>
     <name>plugins/lighttable/neural_restore/preview_export_size</name>
     <type min="0">int</type>
     <default>0</default>
@@ -3948,13 +4251,14 @@
         <option>scene-referred (sigmoid)</option>
         <option>scene-referred (filmic)</option>
         <option>scene-referred (AgX)</option>
+        <option>scene-referred (spektrafilm)</option>
         <option>display-referred (legacy)</option>
         <option>none</option>
       </enum>
     </type>
     <default>scene-referred (sigmoid)</default>
     <shortdescription>auto-apply pixel workflow defaults</shortdescription>
-    <longdescription><![CDATA[selects which workflow will be used by default in the darkroom\n\n<b>scene-referred (sigmoid)</b> modern workflow, fewer tonemapper controls\n\n<b>scene-referred (filmic)</b> modern workflow, more tone mapping controls\n\n<b>scene-referred (AgX)</b> modern workflow, maximum tone mapping control\n\n<b>display-referred (legacy)</b> legacy workflow (not recommended)\n\n<b>none</b> do not use a predefined workflow]]></longdescription>
+    <longdescription><![CDATA[selects which workflow will be used by default in the darkroom\n\n<b>scene-referred (sigmoid)</b> modern workflow, fewer tonemapper controls\n\n<b>scene-referred (filmic)</b> modern workflow, more tone mapping controls\n\n<b>scene-referred (AgX)</b> modern workflow, maximum tone mapping control\n\n<b>scene-referred (spektrafilm)</b> modern workflow, the tone mapping done by a simulated film and print\n\n<b>display-referred (legacy)</b> legacy workflow (not recommended)\n\n<b>none</b> do not use a predefined workflow]]></longdescription>
     <welcomescreen pagenum="1" questionnum="1"/>
   </dtconfig>
   <dtconfig prefs="processing" section="general">
@@ -3982,8 +4286,8 @@
     <name>screen_dpi_overwrite</name>
     <type>float</type>
     <default>-1.0</default>
-    <shortdescription>overwrite the screen's dpi setting</shortdescription>
-    <longdescription>if this value is &gt; 0.0 then it is used as the screen's dpi setting which is used to scale the gui</longdescription>
+    <shortdescription>override the screen's dpi setting</shortdescription>
+    <longdescription>if this value is &gt; 0.0 then it is used as the screen's dpi setting which is used to scale the GUI</longdescription>
   </dtconfig>
   <dtconfig>
     <name>plugins/lighttable/preview/max_in_memory_images</name>
@@ -4151,7 +4455,7 @@
     <shortdescription>show right-side buttons in processing module headers</shortdescription>
     <longdescription>when the mouse is not over a module, the multi-instance, reset and preset buttons can be hidden:\n - 'always': always show all buttons,\n - 'active': only show the buttons when the mouse is over the module,\n - 'dim': buttons are dimmed when mouse is away,\n - 'auto': hide the buttons when the panel is narrow,\n - 'fade': fade out all buttons when panel narrows,\n - 'fit': hide all the buttons if the module name doesn't fit,\n - 'smooth': fade out all buttons in one header simultaneously,\n - 'glide': gradually hide individual buttons as needed</longdescription>
   </dtconfig>
-  <dtconfig prefs="darkroom" section="masking">
+  <dtconfig>
     <name>darkroom/ui/show_mask_indicator</name>
     <type>bool</type>
     <default>true</default>
@@ -4260,6 +4564,27 @@
     <longdescription>maximum height the snapshots list in darkroom will grow to before scrolling</longdescription>
   </dtconfig>
   <dtconfig>
+    <name>plugins/darkroom/snapshots/sidebyside</name>
+    <type>bool</type>
+    <default>false</default>
+    <shortdescription>snapshot side-by-side</shortdescription>
+    <longdescription>show snapshots and compared history steps side by side instead of overlaid with a split line</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>plugins/darkroom/snapshots/vertical</name>
+    <type>bool</type>
+    <default>true</default>
+    <shortdescription>snapshot split is vertical</shortdescription>
+    <longdescription>split the comparison left/right instead of top/bottom</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>plugins/darkroom/snapshots/inverted</name>
+    <type>bool</type>
+    <default>false</default>
+    <shortdescription>snapshot sides swapped</shortdescription>
+    <longdescription>show the snapshot on the opposite side of the split</longdescription>
+  </dtconfig>
+  <dtconfig>
     <name>plugins/lighttable/style/windowheight</name>
     <type>int</type>
     <default>400</default>
@@ -4300,6 +4625,13 @@
     <default>false</default>
     <shortdescription>whether to expand the curve graph</shortdescription>
     <longdescription>this is just to store whether to show the curve graph or not</longdescription>
+  </dtconfig>
+  <dtconfig>
+    <name>plugins/darkroom/contrastntexture/expand_gain_graph</name>
+    <type>bool</type>
+    <default>false</default>
+    <shortdescription>whether to expand the total gain graph</shortdescription>
+    <longdescription>this is just to store whether to show the gain graph of contrast and texture or not</longdescription>
   </dtconfig>
   <dtconfig>
     <name>plugins/darkroom/agx/curve_graph_height</name>

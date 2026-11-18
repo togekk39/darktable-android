@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2009-2025 darktable developers.
+    Copyright (C) 2009-2026 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -97,6 +97,17 @@ typedef enum dt_clipping_preview_mode_t
   DT_CLIPPING_PREVIEW_SATURATION = 3
 } dt_clipping_preview_mode_t;
 
+// Cross-module access to the current settings of the exposure module, registered by
+// its gui_init() and currently used by the histogram, channelmixerrgb and agx.
+//
+// Thread contract: must only be called from the GTK main thread -- the accessors read the
+// exposure module's live `params` and the `module` pointer itself, both owned by that
+// thread. See dev-doc/GUI_Threading.md, "Publishing gui_data Through a Proxy".
+//
+// TODO: Known violation tracked as #22005 (remove this when fixed):
+// channelmixerrgb calls dt_dev_exposure_get_exposure() and dt_dev_exposure_get_black()
+// from _extract_patches(), which runs in process() on the preview pipe thread during
+// ColorChecker profiling.
 typedef struct dt_dev_proxy_exposure_t
 {
   struct dt_iop_module_t *module;
@@ -116,6 +127,18 @@ typedef struct dt_dev_viewport_t
   // dimensions of window
   int width, height;
   int32_t border_size;
+  /* width hidden per side behind an overlay on the canvas: the flexi masks
+     panel, which floats over it (see gui/gtk.c). Not subtracted from `width`,
+     so that showing or hiding the overlay never moves the image. Instead the
+     pan clamp (_clamp_zoom_to_mask) lets the view travel that much further, so
+     what lies underneath can be pulled into view. 0 when nothing overlays the
+     canvas */
+  int32_t occlusion_left, occlusion_right;
+  /* the allowance the clamp grants, at least the occlusion above. Hiding the
+     overlay leaves it as it is: dropping it at once would make the next pan
+     or zoom yank the view back inside. It shrinks only to what the current
+     position still uses */
+  int32_t occlusion_hold_left, occlusion_hold_right;
   double dpi, dpi_factor, ppd;
 
   gboolean color_assessment;
@@ -124,6 +147,15 @@ typedef struct dt_dev_viewport_t
   int closeup;
   float zoom_x, zoom_y;
   float zoom_scale;
+
+  /* Viewport centre carried over to the next image, as a fraction of the
+     image in [-0.5, 0.5]. zoom_x/zoom_y themselves live in *input pixel*
+     coordinates of the currently loaded image (so they survive geometry
+     module changes), which makes them meaningless once another image with a
+     different geometry is loaded. So we snapshot the normalised centre before
+     the switch and re-apply it once the new pipe dimensions are known. */
+  gboolean restore_zoom;
+  float restore_zoom_x, restore_zoom_y;
 
   // image processing pipeline with caching
   struct dt_dev_pixelpipe_t *pipe;
@@ -135,32 +167,31 @@ typedef struct dt_dev_viewport_t
   struct dt_develop_t *dev;
 } dt_dev_viewport_t;
 
-/* keep track on what and where we do chromatic adaptation, used
-  a)  to display warnings in GUI of modules that should probably not be doing
-      white balance
-  b)  missing required white balance
-  c)  allow late correction of as-shot or modified coeffs to D65 in color-input
-      but keep processing until then with more reliable (at least for highlights,
-      raw chromatic aberrations and more.
-  d)  avoids keeping of fixed data in temperature gui data
-  e)  we have 3 coefficients kept here
-      - the currently used wb_coeffs in temperature module
-      - D65coeffs and as_shot are read from exif data
-  f)  - late_correction set by temperature if we want to process data as following
-      If we use the new DT_IOP_TEMP_D65_LATE mode in temperature.c and don#t have
-      any temp parameters changes later we can calc correction coeffs to modify
-      as_shot rgb data to D65
+/* white balance and chromatic adaptation state, shared by all pipes of a dev
+   - temperature, adaptation: pipe threads set them
+   - as_shot: only temperature reads it, in its GUI and in commit_params()
+   - wb: what temperature's commit_params() last wrote, in any pipe. processing code reads
+     pipe->wb instead. GUI code calls dt_dev_get_gui_wb(). the exceptions are
+     temperature.c commit_params() and channelmixerrgb.c reload_defaults(), see their
+     comments.
 */
 typedef struct dt_dev_chroma_t
 {
   struct dt_iop_module_t *temperature;  // always available for GUI reports
   struct dt_iop_module_t *adaptation;   // set if one module is processing this without blending
 
-  dt_aligned_pixel_t wb_coeffs;         // coeffs actually set by temperature
-  double D65coeffs[4];                  // both read from exif data or "best guess"
   double as_shot[4];
-  gboolean late_correction;
+  dt_dev_wb_t wb;
 } dt_dev_chroma_t;
+
+// where a channelmixerrgb instance gets the illuminant for chromatic adaptation.
+// ordered: the maximum over all instances describes the whole pipe
+typedef enum dt_dev_cat_source_t
+{
+  DT_DEV_CAT_NONE = 0,       // this instance does no CAT
+  DT_DEV_CAT_OWN_ILLUMINANT, // an illuminant set in channelmixerrgb
+  DT_DEV_CAT_FROM_WB         // DT_ILLUMINANT_FROM_WB
+} dt_dev_cat_source_t;
 
 typedef struct dt_develop_t
 {
@@ -174,12 +205,12 @@ typedef struct dt_develop_t
   double   gui_previous_pipe_time; // time pipe finished after last widget was changed.
 
   gboolean focus_hash;   // determines whether to start a new history item or to merge down.
+  gboolean history_sealed; // the next change starts a new item, see dt_dev_history_seal()
   gboolean history_updating, image_force_reload, first_load;
   gboolean autosaving;
   double autosave_time;
   int32_t image_invalid_cnt;
   uint32_t timestamp;
-  uint32_t preview_average_delay;
   struct dt_iop_module_t *gui_module; // this module claims gui expose/event callbacks.
   struct dt_iop_module_t *header_buttons_module; // module whose header buttons are currently shown (if any)
 
@@ -228,6 +259,20 @@ typedef struct dt_develop_t
   struct dt_masks_form_gui_t *form_gui;
   // all forms to be linked here for cleanup:
   GList *allforms;
+  // mask migrations that create forms, queued while dt_dev_read_history_ext()
+  // converts the history rows (dt_masks_migrate_classic_to_flexi()). The new
+  // forms go under the final history_end, which is only known once every row
+  // is read. Drained by dt_masks_finish_flexi_migrations(), before
+  // dt_masks_read_masks_history(), so that the read picks the forms up.
+  // Empty between dt_dev_read_history_ext() calls
+  GList *pending_flexi_migrations;
+
+  // mask_ids (GINT_TO_POINTER) of classic groups a migration kept, to convert
+  // to flexi groups. Drained by dt_masks_normalize_flexi_groups(), after
+  // dt_masks_read_masks_history(): the groups are already in the database, and
+  // the read would replace a conversion made before it. Empty between
+  // dt_dev_read_history_ext() calls
+  GList *pending_flexi_group_splits;
 
   //full preview stuff
   gboolean full_preview;
@@ -240,10 +285,18 @@ typedef struct dt_develop_t
   /* proxy for communication between plugins and develop/darkroom */
   struct
   {
-    // list of exposure iop instances, with plugin hooks, used by
-    // histogram dragging functions each element is
-    // dt_dev_proxy_exposure_t
+    // exposure iop hooks, used by histogram dragging functions
     dt_dev_proxy_exposure_t exposure;
+
+    // channelmixerrgb reports where an instance gets its illuminant from;
+    // temperature asks through dt_dev_cat_is_active() and dt_dev_cat_overrides_wb()
+    // thread contract: must only be called from the GTK main thread
+    dt_dev_cat_source_t (*cat_source)(struct dt_iop_module_t *cat);
+
+    // temperature reports the WB that its commit_params() would publish for its
+    // current params; color calibration's GUI asks through dt_dev_get_gui_wb()
+    // thread contract: must only be called from the GTK main thread
+    void (*gui_wb)(const struct dt_iop_module_t *temperature, dt_dev_wb_t *wb);
 
     // this module receives right-drag events if not already claimed
     struct dt_iop_module_t *rotate;
@@ -277,22 +330,36 @@ typedef struct dt_develop_t
                                        const gboolean doit);
     } modulegroups;
 
-    // masks plugin hooks
+    // the utility module that hosts the flexi masks panel in the "utility
+    // module" position (masks_flexi_host.c). The separate panel positions use
+    // gui/gtk.c's dt_ui_flexi_panel_* instead. The lib fills this in whatever
+    // the position, and stays hidden outside "utility module"
     struct
     {
       struct dt_lib_module_t *module;
-      /* treview list refresh */
-      void (*list_change)(struct dt_lib_module_t *self);
-      void (*list_remove)(struct dt_lib_module_t *self,
-                          const dt_mask_id_t formid,
-                          const dt_mask_id_t parentid);
-      void (*list_update)(struct dt_lib_module_t *self);
-      /* selected forms change */
-      void (*selection_change)(struct dt_lib_module_t *self,
-                               struct dt_iop_module_t *module,
-                               const dt_mask_id_t selectid);
-    } masks;
+      // where flexi content gets reparented into; owned by the lib
+      GtkBox *content_box;
+      // where the hosted module's mask on/off toggle goes, last on the lib
+      // header; owned by the lib
+      GtkBox *toggle_box;
+      // stand-in for that toggle while no module is focused, in toggle_box:
+      // always insensitive, shown only then (see
+      // dt_masks_gui_utility_header_unhosted); owned by the lib
+      GtkWidget *idle_toggle;
+      // the module whose panel is in content_box, NULL if none, for
+      // dt_iop_gui_blend_masks_panel_relocate to move out first
+      struct dt_iop_module_t *hosted_module;
+      // called right after the blending options write a new
+      // masks_panel_position (see _masks_flexi_host_reconfigure), so the lib
+      // can show/hide itself live
+      void (*reconfigure)(struct dt_lib_module_t *self);
+    } masks_flexi_host;
   } proxy;
+
+  // the darkroom toolbar toggle that shows or hides the masks panel, owned by
+  // views/darkroom.c, for masks_gui_panel_host.c to show the panel's state on
+  // (dt_iop_gui_blend_masks_panel_sync_toolbox)
+  GtkWidget *masks_panel_button;
 
   dt_dev_chroma_t chroma;
 
@@ -348,7 +415,6 @@ typedef struct dt_develop_t
   struct
   {
     GtkWidget *floating_window, *softproof_button, *gamut_button; // TODO (#18559): remove gtk stuff from here
-    GtkWidget *display_intent_widget, *display2_intent_widget;    // TODO (#18559): remove gtk stuff from here
   } profile;
 
   GtkWidget *second_wnd, *second_wnd_button; // TODO (#18559): remove gtk stuff from here
@@ -377,6 +443,13 @@ void dt_dev_process_image_job(dt_develop_t *dev,
                               struct dt_dev_pixelpipe_t *pipe,
                               const dt_signal_t signal,
                               const int devid);
+
+/** Stop and lock all three screen pixelpipes before changing module lifetime
+ * or topology. Locks are acquired preview -> preview2 -> full and must be
+ * released with dt_dev_pixelpipe_unlock_all(). */
+void dt_dev_pixelpipe_stop_and_lock_all(dt_develop_t *dev);
+void dt_dev_pixelpipe_unlock_all(dt_develop_t *dev);
+
 // launch jobs above
 void dt_dev_process_image(dt_develop_t *dev);
 void dt_dev_process_preview(dt_develop_t *dev);
@@ -402,6 +475,9 @@ void dt_dev_add_history_item_target(dt_develop_t *dev,
                                     struct dt_iop_module_t *module,
                                     const gboolean enable,
                                     const gpointer target);
+// make the next change start a new history item instead of merging into the
+// top one (or cancel that); repeating it before that change makes no difference
+void dt_dev_history_seal(dt_develop_t *dev, const gboolean sealed);
 void dt_dev_add_new_history_item(dt_develop_t *dev,
                                  struct dt_iop_module_t *module,
                                  const gboolean enable);
@@ -415,6 +491,7 @@ void dt_dev_add_masks_history_item(dt_develop_t *dev,
 void dt_dev_reload_history_items(dt_develop_t *dev);
 void dt_dev_pop_history_items_ext(dt_develop_t *dev, const int32_t cnt);
 void dt_dev_pop_history_items(dt_develop_t *dev, const int32_t cnt);
+void dt_dev_history_truncate(dt_develop_t *dev, const gboolean compress);
 void dt_dev_write_history_ext(dt_develop_t *dev, const dt_imgid_t imgid);
 void dt_dev_write_history(dt_develop_t *dev);
 void dt_dev_read_history_ext(dt_develop_t *dev,
@@ -463,6 +540,10 @@ void dt_dev_zoom_move(dt_dev_viewport_t *port,
                       const float x,
                       const float y,
                       const gboolean constrain);
+/* Snapshot the current viewport centre as a fraction of the image so it can be
+   re-applied to the next image, see restore_zoom in dt_dev_viewport_t. Call
+   right before changing image, while the current pipe is still valid. */
+void dt_dev_snapshot_zoom_pos(dt_dev_viewport_t *port);
 float dt_dev_get_zoom_scale(dt_dev_viewport_t *port,
                             const dt_dev_zoom_t zoom,
                             const int closeup_factor,
@@ -491,6 +572,15 @@ void dt_dev_get_viewport_params(dt_dev_viewport_t *port,
 
 void dt_dev_configure(dt_dev_viewport_t *port);
 
+/** record how much of the canvas an overlay hides on each side. Only the pan
+    clamp reads it (see dt_dev_viewport_t::occlusion_left), so it is cheap to
+    call on every GUI event that may change it */
+void dt_dev_set_occlusion(dt_dev_viewport_t *port,
+                          const int32_t left,
+                          const int32_t right);
+
+/** the four calls below go through dt_dev_proxy_exposure_t: GTK main thread only,
+    see the thread contract on that struct */
 /** get exposure level */
 float dt_dev_exposure_get_exposure(dt_develop_t *dev);
 /** get final effective exposure level including compensations */
@@ -501,6 +591,20 @@ float dt_dev_exposure_get_black(dt_develop_t *dev);
 void dt_dev_exposure_handle_event(int n_press, gdouble delta,
                                   GdkModifierType state,
                                   const gboolean is_blackpoint);
+
+/** TRUE if a live color calibration instance is actually applying CAT.
+    GTK main thread only: the accessor reads params. */
+gboolean dt_dev_cat_is_active(dt_develop_t *dev);
+
+/** TRUE if a live color calibration instance is applying CAT and none of them
+    uses the illuminant from white balance, so white balance's multipliers don't
+    decide the colors. GTK main thread only: the accessor reads params. */
+gboolean dt_dev_cat_overrides_wb(dt_develop_t *dev);
+
+/** the WB that temperature's current params give, as its commit_params()
+    would publish it; dev->chroma.wb if no temperature instance answers.
+    GTK main thread only: the accessor reads params. */
+void dt_dev_get_gui_wb(dt_develop_t *dev, dt_dev_wb_t *wb);
 
 /*
  * modulegroups plugin hooks
@@ -533,16 +637,10 @@ int dt_dev_modulegroups_basics_module_toggle(dt_develop_t *dev,
                                              const gboolean doit);
 
 /*
- * masks plugin hooks
+ * the focused module's shapes, or the defaults of the shape being drawn,
+ * changed on canvas: its blend mask panel shows the new values
  */
 void dt_dev_masks_list_change(dt_develop_t *dev);
-void dt_dev_masks_list_update(dt_develop_t *dev);
-void dt_dev_masks_list_remove(dt_develop_t *dev,
-                              const dt_mask_id_t formid,
-                              const dt_mask_id_t parentid);
-void dt_dev_masks_selection_change(dt_develop_t *dev,
-                                   struct dt_iop_module_t *module,
-                                   const dt_mask_id_t selectid);
 
 /*
  * multi instances
@@ -553,13 +651,6 @@ struct dt_iop_module_t *dt_dev_module_duplicate_ext(dt_develop_t *dev,
                                                     const gboolean reorder_iop);
 struct dt_iop_module_t *dt_dev_module_duplicate(dt_develop_t *dev,
                                                 struct dt_iop_module_t *base);
-/** Duplicate using at least minimum_priority, for callers retaining retired
- * instance identities across their own undo branches. Existing desktop callers
- * keep the original priority-selection behavior through the wrappers above. */
-struct dt_iop_module_t *dt_dev_module_duplicate_at_priority(dt_develop_t *dev,
-                                                          struct dt_iop_module_t *base,
-                                                          const gboolean reorder_iop,
-                                                          const int minimum_priority);
 /** remove an existent module */
 void dt_dev_module_remove(dt_develop_t *dev,
                           struct dt_iop_module_t *module);
@@ -583,7 +674,7 @@ gboolean dt_dev_distort_backtransform
 gboolean dt_dev_distort_transform_plus
   (dt_develop_t *dev,
    struct dt_dev_pixelpipe_t *pipe,
-   const double iop_order,
+   const int iop_order,
    const dt_dev_transform_direction_t transf_direction,
    float *points,
    const size_t points_count);
@@ -592,7 +683,7 @@ gboolean dt_dev_distort_transform_plus
 gboolean dt_dev_distort_backtransform_plus
   (dt_develop_t *dev,
    struct dt_dev_pixelpipe_t *pipe,
-   const double iop_order,
+   const int iop_order,
    const dt_dev_transform_direction_t transf_direction,
    float *points,
    const size_t points_count);
@@ -609,13 +700,13 @@ struct dt_dev_pixelpipe_iop_t *dt_dev_distort_get_iop_pipe(dt_develop_t *dev,
     transfer direction */
 dt_hash_t dt_dev_hash_plus(dt_develop_t *dev,
                           struct dt_dev_pixelpipe_t *pipe,
-                          const double iop_order,
+                          const int iop_order,
                           const dt_dev_transform_direction_t transf_direction);
 /** synchronize pixelpipe by means hash values by waiting with timeout
  * and potential reprocessing */
 gboolean dt_dev_sync_pixelpipe_hash(dt_develop_t *dev,
                                struct dt_dev_pixelpipe_t *pipe,
-                               const double iop_order,
+                               const int iop_order,
                                const dt_dev_transform_direction_t transf_direction,
                                dt_pthread_mutex_t *lock,
                                const volatile dt_hash_t *const hash);
@@ -623,7 +714,7 @@ gboolean dt_dev_sync_pixelpipe_hash(dt_develop_t *dev,
     We can specify iop with priority between pmin and pmax */
 dt_hash_t dt_dev_hash_distort_plus(dt_develop_t *dev,
                                   struct dt_dev_pixelpipe_t *pipe,
-                                  const double iop_order,
+                                  const int iop_order,
                                   const dt_dev_transform_direction_t transf_direction);
 /*
  *   history undo support helpers for darkroom
@@ -634,25 +725,27 @@ void dt_dev_undo_start_record(dt_develop_t *dev);
 void dt_dev_undo_end_record(dt_develop_t *dev);
 
 /*
- * develop an image and returns the buf and processed width / height.
- * this is done as in the context of the darkroom, meaning that the
- * final processed sizes will align perfectly on the darkroom view.
+ * develop an image and returns the frame it published, NULL if nothing was
+ * rendered: fit into width x height, or else as in the context of the
+ * darkroom, meaning that the final processed sizes will align perfectly
+ * on the darkroom view.
+ * output is the sink: the frame is rendered for its image encoding, or
+ * stays in the pipe's working RGB if that is DT_COLORSPACE_NONE and
+ * colorout is filtered out, and is made in its format. the frame's
+ * encoding says what its values are: output's profile, the sRGB colorout
+ * replaced it with, or the working RGB.
  * if called with a valid CL devid that device is used without locking/unlocking as the caller is doing that
  */
-void dt_dev_image(const dt_imgid_t imgid,
-                  const size_t width,
-                  const size_t height,
-                  const int history_end,
-                  uint8_t **buf,
-                  float *scale,
-                  size_t *buf_width,
-                  size_t *buf_height,
-                  dt_dev_zoom_pos_t zoom_pos,
-                  const int32_t snapshot_id,
-                  GList *module_filter_out,
-                  const int devid,
-                  const gboolean finalscale,
-                  const gboolean want_float);
+struct dt_frame_t *dt_dev_image(const dt_imgid_t imgid,
+                                const size_t width,
+                                const size_t height,
+                                const gboolean fit,
+                                const int history_end,
+                                const int32_t snapshot_id,
+                                GList *module_filter_out,
+                                const int devid,
+                                const gboolean finalscale,
+                                const dt_display_output_t *output);
 
 gboolean dt_dev_equal_chroma(const float *f, const double *d);
 void dt_dev_reset_chroma(dt_develop_t *dev);
@@ -662,6 +755,8 @@ static inline struct dt_iop_module_t *dt_dev_gui_module(void)
 {
   return darktable.develop ? darktable.develop->gui_module : NULL;
 }
+
+void dt_dev_wb_set_neutral(dt_dev_wb_t *wb);
 
 G_END_DECLS
 

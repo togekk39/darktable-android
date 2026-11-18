@@ -24,6 +24,8 @@
 #define PAD_G_INTERP 3
 #define PAD_G_RECALC 6
 
+#define HOMOGENITY_EPS 1e-10f
+
 /** Lookup for allhex[], making sure that row/col aren't negative **/
 static inline const short *_hexmap(const int row,
                                    const int col,
@@ -380,7 +382,12 @@ static void xtrans_markesteijn_interpolate(float *out,
                   {
                     const float g = 3.f * rfx[0][1] - 2.f * rfx[hex[d]][1] - rfx[hex[d + 1]][1];
                     for(int c = 0; c < 4; c += 2)
-                      rfx[0][c] = (g + 2.f * rfx[hex[d]][c] + rfx[hex[d + 1]][c]) / 3.f;
+                      /** depending on compiler flags `/ 3.0f` is less precise than `*(1.0f / 3.0f)`
+                          and thus different from OpenCL code. These subtle differences ~1ulp
+                          lead to flipping the solitary-green and homogeneity decisions leading to
+                          incorrect output / OpenCL vs CPU differences.
+                      */
+                      rfx[0][c] = (g + 2.f * rfx[hex[d]][c] + rfx[hex[d + 1]][c]) * (1.0f / 3.0f);
                   }
                   else
                   {
@@ -423,20 +430,20 @@ static void xtrans_markesteijn_interpolate(float *out,
             yuv[1][row][col] = (rx[2] - y) * 0.56433f;
             yuv[2][row][col] = (rx[0] - y) * 0.67815f;
           }
-        // Note that f can offset by a column (-1 or +1) and by a row
-        // (-TS or TS). The row-wise offsets cause the undefined
-        // behavior sanitizer to warn of an out of bounds index, but
-        // as yfx is multi-dimensional and there is sufficient
-        // padding, that is not actually so.
+        // f steps by a column, a row (TS) or a diagonal, so index each
+        // plane through a flat pointer: a row step leaves the inner
+        // float[TS] array, which is out of bounds for array indexing
         const int f = dir[d & 3];
         const int pad_drv = (passes == 1) ? 9 : 14;
         for(int row = pad_drv; row < mrow - pad_drv; row++)
           for(int col = pad_drv; col < mcol - pad_drv; col++)
           {
-            const float(*yfx)[TS][TS] = (float(*)[TS][TS]) & yuv[0][row][col];
-            drv[d][row][col] = sqrf(2 * yfx[0][0][0] - yfx[0][0][f] - yfx[0][0][-f])
-                               + sqrf(2 * yfx[1][0][0] - yfx[1][0][f] - yfx[1][0][-f])
-                               + sqrf(2 * yfx[2][0][0] - yfx[2][0][f] - yfx[2][0][-f]);
+            const float *const y0 = &yuv[0][row][col];
+            const float *const y1 = &yuv[1][row][col];
+            const float *const y2 = &yuv[2][row][col];
+            drv[d][row][col] = sqrf(2 * y0[0] - y0[f] - y0[-f])
+                               + sqrf(2 * y1[0] - y1[f] - y1[-f])
+                               + sqrf(2 * y2[0] - y2[f] - y2[-f]);
           }
       }
 
@@ -449,7 +456,7 @@ static void xtrans_markesteijn_interpolate(float *out,
           float tr = FLT_MAX;
           for(unsigned d = 0; d < ndir; ++d)
             if(tr > drv[d][row][col]) tr = drv[d][row][col];
-          tr *= 8;
+          tr = fmaxf(8.0f * tr, HOMOGENITY_EPS);
           for(unsigned d = 0; d < ndir; ++d)
             for(int v = -1; v <= 1; v++)
               for(int h = -1; h <= 1; h++)
@@ -1367,7 +1374,7 @@ static void xtrans_fdc_interpolate(float *out,
                   float g = 3.f * rfx[0][1] - 2.f * rfx[hex[d]][1] - rfx[hex[d + 1]][1];
                   for(int c = 0; c < 4; c += 2)
                   {
-                    rfx[0][c] = (g + 2.f * rfx[hex[d]][c] + rfx[hex[d + 1]][c]) / 3.f;
+                    rfx[0][c] = (g + 2.f * rfx[hex[d]][c] + rfx[hex[d + 1]][c]) * (1.0f / 3.0f);
                     redblue[d][c] = rfx[0][c];
                   }
                 }
@@ -1416,20 +1423,20 @@ static void xtrans_fdc_interpolate(float *out,
             yuv[1][row][col] = (rx[2] - y) * 0.56433f;
             yuv[2][row][col] = (rx[0] - y) * 0.67815f;
           }
-        // Note that f can offset by a column (-1 or +1) and by a row
-        // (-TS or TS). The row-wise offsets cause the undefined
-        // behavior sanitizer to warn of an out of bounds index, but
-        // as yfx is multi-dimensional and there is sufficient
-        // padding, that is not actually so.
+        // f steps by a column, a row (TS) or a diagonal, so index each
+        // plane through a flat pointer: a row step leaves the inner
+        // float[TS] array, which is out of bounds for array indexing
         const int f = dir[d & 3];
         const int pad_drv = 9;
         for(int row = pad_drv; row < mrow - pad_drv; row++)
           for(int col = pad_drv; col < mcol - pad_drv; col++)
           {
-            float(*yfx)[TS][TS] = (float(*)[TS][TS]) & yuv[0][row][col];
-            drv[d][row][col] = sqrf(2 * yfx[0][0][0] - yfx[0][0][f] - yfx[0][0][-f])
-                               + sqrf(2 * yfx[1][0][0] - yfx[1][0][f] - yfx[1][0][-f])
-                               + sqrf(2 * yfx[2][0][0] - yfx[2][0][f] - yfx[2][0][-f]);
+            const float *const y0 = &yuv[0][row][col];
+            const float *const y1 = &yuv[1][row][col];
+            const float *const y2 = &yuv[2][row][col];
+            drv[d][row][col] = sqrf(2 * y0[0] - y0[f] - y0[-f])
+                               + sqrf(2 * y1[0] - y1[f] - y1[-f])
+                               + sqrf(2 * y2[0] - y2[f] - y2[-f]);
           }
       }
 
@@ -1962,8 +1969,8 @@ static cl_int process_markesteijn_cl(const dt_iop_module_t *self,
 
     for(int d = 0; d < ndir; d++)
     {
-      size_t sizes[2] = { ROUNDUP(width, locopt_homo_sum.sizex), ROUNDUP(height, locopt_homo_sum.sizey) };
-      size_t local[2] = { locopt_homo_sum.sizex, locopt_homo_sum.sizey };
+      const size_t sizes[2] = { ROUNDUP(width, locopt_homo_sum.sizex), ROUNDUP(height, locopt_homo_sum.sizey) };
+      const size_t local[2] = { locopt_homo_sum.sizex, locopt_homo_sum.sizey };
       err = dt_opencl_enqueue_kernel_2d_local_args(devid, gd->kernel_markesteijn_homo_sum, sizes, local,
         CLARG(dev_homo[d]), CLARG(dev_homosum[d]),
         CLARG(width), CLARG(height), CLARG(pad_tile), CLLOCAL(sizeof(char) * (locopt_homo_sum.sizex + 2*2) * (locopt_homo_sum.sizey + 2*2)));

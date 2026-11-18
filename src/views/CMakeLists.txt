@@ -22,15 +22,12 @@ if(Gphoto2_FOUND)
     set(MODULES ${MODULES} tethering)
 endif(Gphoto2_FOUND)
 
-if(CUPS_FOUND)
+if(CUPS_FOUND OR WIN32)
     add_library(print MODULE "print.c")
     set(MODULES ${MODULES} print)
-endif(CUPS_FOUND)
+endif()
 
 foreach(module ${MODULES})
-    if(ANDROID)
-        set_target_properties(${module} PROPERTIES PREFIX "libdt_view_")
-    endif()
     target_link_libraries(${module} lib_darktable)
 endforeach(module)
 

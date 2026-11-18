@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Keep libxcf pinned at 64efecf63ddd952ccf654e479714aaae6f8c5986. Compile
 # a generated copy with close/error cleanup fixed; the original encoder and
-# pixel layout are unchanged. Apply this to host and Android builds alike.
+# pixel layout are unchanged. Apply only to Android and explicit host integration tests.
 function(dt_mobile_prepare_xcf_writer)
   get_target_property(xcf_source_dir xcf SOURCE_DIR)
   set(xcf_original "${xcf_source_dir}/xcf.c")

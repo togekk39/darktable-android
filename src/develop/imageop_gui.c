@@ -27,7 +27,6 @@
 #include "osx/osx.h"
 #endif
 
-#include <assert.h>
 #include <gmodule.h>
 #include <math.h>
 #include <stdlib.h>
@@ -270,6 +269,9 @@ GtkWidget *dt_iop_togglebutton_new(dt_iop_module_t *self, const char *section, c
     g_signal_connect_data(gesture, "pressed", callback, self, NULL, 0);
     g_signal_connect(gesture, "begin", G_CALLBACK(_gesture_begin_claim), NULL);
     gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(gesture), 0);
+    /* shortcut activation routes through this gesture (DT_ACTION_GESTURE_KEY,
+     * see _action_process_toggle in accelerators.c) */
+    g_object_set_data(G_OBJECT(w), DT_ACTION_GESTURE_KEY, gesture);
   }
 
   if(!ctrl_label)
@@ -297,8 +299,10 @@ GtkWidget *dt_iop_button_new(dt_iop_module_t *self, const gchar *label,
 
   if(paint)
   {
-    button = dtgtk_button_new(paint, paintflags, NULL);
-    gtk_widget_set_tooltip_text(button, Q_(label));
+    button = dtgtk_button_new_full(paint, paintflags, NULL,
+      &(dtgtk_button_config_t){
+        .tooltip = Q_(label),
+      });
   }
   else
   {
@@ -341,4 +345,3 @@ GtkWidget *dt_bauhaus_combobox_new_interpolation(dt_iop_module_t *self)
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
 // kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
 // clang-format on
-

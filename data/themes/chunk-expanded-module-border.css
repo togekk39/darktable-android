@@ -1,0 +1,14 @@
+
+/* ensure space for border is reserved for all modules */
+#iop-expander
+{
+  border: 1px solid @plugin_bg_color;
+  margin-left: 1px;
+  margin-right: 1px;
+}
+
+/* border for expanded modules */
+#iop-expander.dt_module_expanded
+{
+  border: 1px solid @plugin_expanded_border_color;
+}

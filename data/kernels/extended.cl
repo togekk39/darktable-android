@@ -37,7 +37,7 @@ graduatedndp (read_only image2d_t in,
 
   if(x >= width || y >= height) return;
 
-  float4 pixel = readpixel(in, x, y);
+  float4 pixel = Areadpixel(in, x, y);
 
   float len = length_base + y*length_inc_y + x*length_inc_x;
   float dens = dtcl_exp2(density * clipf(0.5f + len));
@@ -62,7 +62,7 @@ graduatedndm (read_only image2d_t in,
 
   if(x >= width || y >= height) return;
 
-  float4 pixel = readpixel(in, x, y);
+  float4 pixel = Areadpixel(in, x, y);
 
   float len = length_base + y*length_inc_y + x*length_inc_x;
   float dens = dtcl_exp2(-density * clipf(0.5f - len));
@@ -79,7 +79,7 @@ colorize (read_only image2d_t in, write_only image2d_t out, const int width, con
 
   if(x >= width || y >= height) return;
 
-  float4 pixel = read_imagef(in, sampleri, (int2)(x, y));
+  float4 pixel = Areadpixel(in, x, y);
 
   pixel.x = pixel.x * mix + L - 50.0f * mix;
   pixel.y = a;
@@ -107,7 +107,7 @@ relight (read_only image2d_t in, write_only image2d_t out, const int width, cons
 
   if(x >= width || y >= height) return;
 
-  float4 pixel = read_imagef(in, sampleri, (int2)(x, y));
+  float4 pixel = Areadpixel(in, x, y);
 
   const float lightness = pixel.x/100.0f;
   const float value = -1.0f+(lightness*2.0f);
@@ -146,7 +146,7 @@ channelmixer (read_only image2d_t in, write_only image2d_t out, const int width,
 
   if(x >= width || y >= height) return;
 
-  float4 pixel = read_imagef(in, sampleri, (int2)(x, y));
+  float4 pixel = Areadpixel(in, x, y);
   float4 opixel = (float4)(0.0f, 0.0f, 0.0f, pixel.w);
   float gray, hmix, smix, lmix;
 
@@ -214,7 +214,7 @@ velvia (read_only image2d_t in, write_only image2d_t out, const int width, const
 
   if(x >= width || y >= height) return;
 
-  float4 pixel = read_imagef(in, sampleri, (int2)(x, y));
+  float4 pixel = Areadpixel(in, x, y);
 
   // calculate vibrance, and apply boost velvia saturation at least saturated pixels
   const float pmax = fmax(pixel.x, fmax(pixel.y, pixel.z));     // max value in RGB set
@@ -245,7 +245,7 @@ colorcontrast (read_only image2d_t in, write_only image2d_t out, const int width
 
   if(x >= width || y >= height) return;
 
-  float4 pixel = read_imagef(in, sampleri, (int2)(x, y));
+  float4 pixel = Areadpixel(in, x, y);
 
   pixel.xyz = (pixel * scale + offset).xyz;
   pixel.y = unbound ? pixel.y : clamp(pixel.y, -128.0f, 128.0f);
@@ -263,7 +263,7 @@ vibrance (read_only image2d_t in, write_only image2d_t out, const int width, con
 
   if(x >= width || y >= height) return;
 
-  float4 pixel = readpixel(in, x, y);
+  float4 pixel = Areadpixel(in, x, y);
 
   const float sw = dt_fast_hypot(pixel.y, pixel.z)/256.0f;
   const float ls = 1.0f - amount * sw * 0.25f;
@@ -304,6 +304,31 @@ tpdf(unsigned int urandom)
 }
 
 
+// random dither of the dither module, with the noise of each pixel seeded by
+// its position as in _process_random()
+__kernel void
+dither_random(read_only image2d_t in, write_only image2d_t out, const int width, const int height,
+              const float dither)
+{
+  const int x = get_global_id(0);
+  const int y = get_global_id(1);
+
+  if(x >= width || y >= height) return;
+
+  unsigned int tea_state[2] = { mad24(y, width, x), 0 };
+  encrypt_tea(tea_state);
+  const float dith = dither * tpdf(tea_state[0]);
+
+  // CLIP() of the CPU code, which also maps NaN to 0
+  const float4 v = readpixel(in, x, y) + dith;
+  const float4 pixel = (float4)(v.x >= 0.0f ? fmin(v.x, 1.0f) : 0.0f,
+                                v.y >= 0.0f ? fmin(v.y, 1.0f) : 0.0f,
+                                v.z >= 0.0f ? fmin(v.z, 1.0f) : 0.0f,
+                                v.w >= 0.0f ? fmin(v.w, 1.0f) : 0.0f);
+  write_imagef(out, (int2)(x, y), pixel);
+}
+
+
 __kernel void
 vignette (read_only image2d_t in, write_only image2d_t out, const int width, const int height,
           const float2 scale, const float2 roi_center_scaled, const float2 expt,
@@ -320,7 +345,7 @@ vignette (read_only image2d_t in, write_only image2d_t out, const int width, con
 
   const float2 pv = fabs((float2)(x,y) * scale - roi_center_scaled);
 
-  const float cplen = pow(pow(pv.x, expt.x) + pow(pv.y, expt.x), expt.y);
+  const float cplen = dtcl_pow(dtcl_pow(pv.x, expt.x) + dtcl_pow(pv.y, expt.x), expt.y);
 
   float weight = 0.0f;
   float dith = 0.0f;
@@ -331,10 +356,10 @@ vignette (read_only image2d_t in, write_only image2d_t out, const int width, con
 
     dith = (weight <= 1.0f && weight >= 0.0f) ? dither * tpdf(tea_state[0]) : 0.0f;
 
-    weight = weight >= 1.0f ? 1.0f : (weight <= 0.0f ? 0.0f : 0.5f - cos(M_PI_F * weight) / 2.0f);
+    weight = weight >= 1.0f ? 1.0f : (weight <= 0.0f ? 0.0f : 0.5f - dtcl_cos(M_PI_F * weight) / 2.0f);
   }
 
-  float4 pixel = read_imagef(in, sampleri, (int2)(x, y));
+  float4 pixel = readpixel(in, x, y);
 
   if(weight > 0.0f)
   {
@@ -367,7 +392,7 @@ splittoning (read_only image2d_t in, write_only image2d_t out, const int width, 
 
   if(x >= width || y >= height) return;
 
-  float4 pixel = read_imagef(in, sampleri, (int2)(x, y));
+  float4 pixel = Areadpixel(in, x, y);
 
   float4 hsl = RGB_2_HSL(pixel);
 
@@ -472,7 +497,7 @@ global_tonemap_reinhard (read_only image2d_t in, write_only image2d_t out, const
 
   if(x >= width || y >= height) return;
 
-  float4 pixel = read_imagef(in, sampleri, (int2)(x, y));
+  float4 pixel = Areadpixel(in, x, y);
 
   const float l = pixel.x * 0.01f;
 
@@ -498,11 +523,11 @@ global_tonemap_drago (read_only image2d_t in, write_only image2d_t out, const in
   const float bl = parameters.z;
   const float lwmax = parameters.w;
 
-  float4 pixel = read_imagef(in, sampleri, (int2)(x, y));
+  float4 pixel = Areadpixel(in, x, y);
 
   const float lw = pixel.x * 0.01f;
 
-  pixel.x = 100.0f * (ldc * log(fmax(eps, lw + 1.0f)) / log(fmax(eps, 2.0f + (pow(lw/lwmax,bl)) * 8.0f)));
+  pixel.x = 100.0f * (ldc * dtcl_log(fmax(eps, lw + 1.0f)) / dtcl_log(fmax(eps, 2.0f + (dtcl_pow(lw/lwmax,bl)) * 8.0f)));
 
   write_imagef (out, (int2)(x, y), pixel);
 }
@@ -518,7 +543,7 @@ global_tonemap_filmic (read_only image2d_t in, write_only image2d_t out, const i
 
   if(x >= width || y >= height) return;
 
-  float4 pixel = read_imagef(in, sampleri, (int2)(x, y));
+  float4 pixel = Areadpixel(in, x, y);
 
   const float l = pixel.x * 0.01f;
   const float m = fmax(0.0f, l - 0.004f);
@@ -576,8 +601,8 @@ colormapping_mapping (read_only image2d_t in, read_only image2d_t tmp, write_onl
 
   if(x >= width || y >= height) return;
 
-  float4 ipixel = read_imagef(in, sampleri, (int2)(x, y));
-  const float dL = read_imagef(tmp, sampleri, (int2)(x, y)).x;
+  float4 ipixel = Areadpixel(in, x, y);
+  const float dL = readpixel(tmp, x, y).x;
   float weight[MAXN];
   float4 opixel = (float4)0.0f;
 
@@ -610,7 +635,7 @@ colorbalance (read_only image2d_t in, write_only image2d_t out, const int width,
 
   if(x >= width || y >= height) return;
 
-  float4 Lab = read_imagef(in, sampleri, (int2)(x, y));
+  float4 Lab = Areadpixel(in, x, y);
   float4 sRGB = XYZ_to_sRGB(Lab_to_XYZ(Lab));
 
   // Lift gamma gain
@@ -631,7 +656,7 @@ colorbalance_lgg (read_only image2d_t in, write_only image2d_t out, const int wi
 
   if(x >= width || y >= height) return;
 
-  float4 Lab = read_imagef(in, sampleri, (int2)(x, y));
+  float4 Lab = Areadpixel(in, x, y);
   const float4 XYZ = Lab_to_XYZ(Lab);
   float4 RGB = XYZ_to_prophotorgb(XYZ);
 
@@ -661,7 +686,7 @@ colorbalance_lgg (read_only image2d_t in, write_only image2d_t out, const int wi
   {
     const float4 contrast4 = contrast;
     const float4 grey4 = grey;
-    RGB = (RGB <= (float4)0.0f) ? (float4)0.0f : pow(RGB / grey4, contrast4) * grey4;
+    RGB = (RGB <= (float4)0.0f) ? (float4)0.0f : dtcl_pow(RGB / grey4, contrast4) * grey4;
   }
 
   Lab.xyz = prophotorgb_to_Lab(RGB).xyz;
@@ -678,7 +703,7 @@ colorbalance_cdl (read_only image2d_t in, write_only image2d_t out, const int wi
 
   if(x >= width || y >= height) return;
 
-  float4 Lab = read_imagef(in, sampleri, (int2)(x, y));
+  float4 Lab = Areadpixel(in, x, y);
   const float4 XYZ = Lab_to_XYZ(Lab);
   float4 RGB = XYZ_to_prophotorgb(XYZ);
 
@@ -715,13 +740,6 @@ colorbalance_cdl (read_only image2d_t in, write_only image2d_t out, const int wi
   write_imagef (out, (int2)(x, y), Lab);
 }
 
-
-static inline float sqf(const float x)
-{
-  return x * x;
-}
-
-
 static inline float4 opacity_masks(const float x,
                                    const float shadows_weight, const float highlights_weight,
                                    const float midtones_weight, const float mask_grey_fulcrum)
@@ -731,7 +749,7 @@ static inline float4 opacity_masks(const float x,
   const float x_offset_norm = x_offset / mask_grey_fulcrum;
   const float alpha = 1.f / (1.f + dtcl_exp(x_offset_norm * shadows_weight));    // opacity of shadows
   const float beta = 1.f / (1.f + dtcl_exp(-x_offset_norm * highlights_weight)); // opacity of highlights
-  const float gamma = dtcl_exp(-sqf(x_offset) * midtones_weight / 4.f) * sqf(1.f - alpha) * sqf(1.f - beta) * 8.f; // opacity of midtones
+  const float gamma = dtcl_exp(-fsquare(x_offset) * midtones_weight / 4.f) * fsquare(1.f - alpha) * fsquare(1.f - beta) * 8.f; // opacity of midtones
 
   output.x = alpha;
   output.y = gamma;
@@ -954,7 +972,7 @@ colorbalancergb (read_only image2d_t in, write_only image2d_t out,
     a = soft_clip(a, 0.5f * max_a, max_a);
 
     const float P_prime = (a - 1.f) * P;
-    const float W_prime = dtcl_sqrt(sqf(P) * (1.f - sqf(a)) + sqf(W)) * b;
+    const float W_prime = dtcl_sqrt(fsquare(P) * (1.f - fsquare(a)) + fsquare(W)) * b;
 
     HCB.y = fmax(M_rot_inv[0][0] * P_prime + M_rot_inv[0][1] * W_prime, 0.f);
     HCB.z = fmax(M_rot_inv[1][0] * P_prime + M_rot_inv[1][1] * W_prime, 0.f);
@@ -1053,7 +1071,7 @@ colorchecker (read_only image2d_t in, write_only image2d_t out, const int width,
   global float4 *coeff_Lab = params + num_patches;
   global float4 *poly_Lab = params + 2 * num_patches;
 
-  float4 ipixel = read_imagef(in, sampleri, (int2)(x, y));
+  float4 ipixel = readpixel(in, x, y);
 
   const float w = ipixel.w;
 
@@ -1081,7 +1099,7 @@ primaries(read_only image2d_t in,
   const int y = get_global_id(1);
   if(x >= width || y >= height) return;
 
-  const float4 ipixel = read_imagef(in, sampleri, (int2)(x, y));
+  const float4 ipixel = Areadpixel(in, x, y);
   float4 opixel = matrix_product_float4(ipixel, matrix);
   opixel.w = ipixel.w;
   write_imagef(out, (int2)(x, y), opixel);

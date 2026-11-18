@@ -452,21 +452,21 @@ static inline void _compute_downsampling_kernel(const dt_interpolation_t *itor,
                                                 float *kernel,
                                                 float *norm,
                                                 const float outoinratio,
-                                                const int xout)
+                                                const float xout)
 {
   // Keep this at hand
   const float w = (float)itor->width;
 
   /* Compute the phase difference between output pixel and its
    * input corresponding input pixel */
-  const float xin = ceil_fast(((float)xout - w) / outoinratio);
+  const float xin = ceilf((xout - w) / outoinratio);
   if(first)
   {
     *first = (int)xin;
   }
 
   // Compute first interpolator parameter
-  const float t = xin * outoinratio - (float)xout;
+  const float t = xin * outoinratio - xout;
 
   // Compute all filter taps
   const int num_taps = *taps = (int)((w - t) / outoinratio);
@@ -519,8 +519,8 @@ float dt_interpolation_compute_sample(const dt_interpolation_t *itor,
   // Precompute the inverse of the filter norm for later use
   const float oonorm = (1.f / (normh * normv));
 
-  int ix = (int)x;
-  int iy = (int)y;
+  int ix = (int)floorf(x);
+  int iy = (int)floorf(y);
 
   float s = 0.0f;
   /* Now 2 cases, the pixel + filter width goes outside the image
@@ -549,7 +549,7 @@ float dt_interpolation_compute_sample(const dt_interpolation_t *itor,
       in += linestride;
     }
   }
-  else if(ix >= 0 && iy >= 0 && ix < width && iy < height)
+  else if(ix >= -1 && iy >= -1 && ix < width && iy < height)
   {
     // At least a valid coordinate
     // Point to the upper left pixel index wise
@@ -605,8 +605,8 @@ void dt_interpolation_compute_pixel4c(const dt_interpolation_t *itor,
    * in that case we have to use index clipping to keep all reads
    * in the input image (slow path) or we are sure it won't fall
    * outside and can do more simple code */
-  int ix = (int)x;
-  int iy = (int)y;
+  int ix = (int)floorf(x);
+  int iy = (int)floorf(y);
 
   if(ix >= (itor->width - 1)
     && iy >= (itor->width - 1)
@@ -641,7 +641,7 @@ void dt_interpolation_compute_pixel4c(const dt_interpolation_t *itor,
     for_each_channel(c,aligned(out))
       out[c] = pixel[c] * oonorm;
   }
-  else if(ix >= 0 && iy >= 0 && ix < width && iy < height)
+  else if(ix >= -1 && iy >= -1 && ix < width && iy < height)
   {
     // At least a valid coordinate
     // Point to the upper left pixel index wise
@@ -796,7 +796,7 @@ const dt_interpolation_t *dt_interpolation_new(enum dt_interpolation_type type)
 static gboolean _prepare_resampling_plan(const dt_interpolation_t *itor,
                                          const int in,
                                          const int out,
-                                         const int shift,
+                                         const float shift,
                                          const float scale,
                                          int **plength,
                                          float **pkernel,
@@ -828,7 +828,7 @@ static gboolean _prepare_resampling_plan(const dt_interpolation_t *itor,
   else
   {
     // Downscale... going for worst case values memory wise
-    maxtapsapixel = ceil_fast((float)2 * (float)itor->width / scale);
+    maxtapsapixel = ceilf(2.0f * (float)itor->width / scale);
   }
 
   int nlengths = out;
@@ -879,7 +879,7 @@ static gboolean _prepare_resampling_plan(const dt_interpolation_t *itor,
       }
 
       // Projected position in input samples
-      const float fx = (float)(shift + x) / scale;
+      const float fx = (shift + (float)x) / scale;
 
       // Compute the filter kernel at that position
       int first;
@@ -932,7 +932,7 @@ static gboolean _prepare_resampling_plan(const dt_interpolation_t *itor,
       // Compute downsampling kernel centered on output position
       int taps;
       int first;
-      _compute_downsampling_kernel(itor, &taps, &first, scratchpad, NULL, scale, shift + x);
+      _compute_downsampling_kernel(itor, &taps, &first, scratchpad, NULL, scale, shift + (float)x);
 
       /* Check lower and higher bound pixel index and skip as many pixels as
        * necessary to fall into range */
@@ -976,14 +976,15 @@ static gboolean _prepare_resampling_plan(const dt_interpolation_t *itor,
   return FALSE;
 }
 
-/** Applies resampling (re-scaling) on *full* input and output buffers.
- *  roi_in and roi_out define the part of the buffers that is affected.
- */
-void dt_interpolation_resample(const dt_interpolation_t *itor,
-                               float *out,
-                               const dt_iop_roi_t *const roi_out,
-                               const float *const in,
-                               const dt_iop_roi_t *const roi_in)
+// xshift and yshift are the position of the first output pixel in the
+// output image, the input buffer starts at input position 0
+static void _resample(const dt_interpolation_t *itor,
+                      float *out,
+                      const dt_iop_roi_t *const roi_out,
+                      const float *const in,
+                      const dt_iop_roi_t *const roi_in,
+                      const float xshift,
+                      const float yshift)
 {
   if(out == NULL)
   {
@@ -1046,11 +1047,11 @@ void dt_interpolation_resample(const dt_interpolation_t *itor,
   // Generic non 1:1 case... much more complicated :D
 
   // Prepare resampling plans once and for all
-  if(_prepare_resampling_plan(itor, roi_in->width, roi_out->width, dx, roi_out->scale,
+  if(_prepare_resampling_plan(itor, roi_in->width, roi_out->width, xshift, roi_out->scale,
                               &hlength, &hkernel, &hindex, NULL))
     goto exit;
 
-  if(_prepare_resampling_plan(itor, roi_in->height, roi_out->height, dy, roi_out->scale,
+  if(_prepare_resampling_plan(itor, roi_in->height, roi_out->height, yshift, roi_out->scale,
                               &vlength, &vkernel, &vindex, &vmeta))
     goto exit;
 
@@ -1130,6 +1131,17 @@ exit:
   _show_2_times(&start, &mid, "resample_plain");
 }
 
+/** Applies resampling (re-scaling) on *full* input and output buffers.
+ *  roi_in and roi_out define the part of the buffers that is affected.
+ */
+void dt_interpolation_resample(const dt_interpolation_t *itor,
+                               float *out,
+                               const dt_iop_roi_t *const roi_out,
+                               const float *const in,
+                               const dt_iop_roi_t *const roi_in)
+{
+  _resample(itor, out, roi_out, in, roi_in, MAX(0, roi_out->x), MAX(0, roi_out->y));
+}
 
 /** Applies resampling (re-scaling) on a specific region-of-interest
  *  of an image. The input and output buffers hold exactly those
@@ -1149,6 +1161,23 @@ void dt_interpolation_resample_roi(const dt_interpolation_t *itor,
   iroi.x = iroi.y = 0;
 
   dt_interpolation_resample(itor, out, &oroi, in, &iroi);
+}
+
+void dt_interpolation_resample_tile(const dt_interpolation_t *itor,
+                                    float *out,
+                                    const dt_iop_roi_t *const roi_out,
+                                    const float *const in,
+                                    const dt_iop_roi_t *const roi_in)
+{
+  dt_iop_roi_t oroi = *roi_out;
+  oroi.x = oroi.y = 0;
+
+  dt_iop_roi_t iroi = *roi_in;
+  iroi.x = iroi.y = 0;
+
+  _resample(itor, out, &oroi, in, &iroi,
+            roi_out->x - roi_in->x * roi_out->scale,
+            roi_out->y - roi_in->y * roi_out->scale);
 }
 
 #ifdef HAVE_OPENCL
@@ -1183,15 +1212,15 @@ static uint32_t _roundToNextPowerOfTwo(uint32_t x)
   return x;
 }
 
-/** Applies resampling (re-scaling) on *full* input and output buffers.
- *  roi_in and roi_out define the part of the buffers that is affected.
- */
-int dt_interpolation_resample_cl(const dt_interpolation_t *itor,
-                                 const int devid,
-                                 cl_mem dev_out,
-                                 const dt_iop_roi_t *const roi_out,
-                                 cl_mem dev_in,
-                                 const dt_iop_roi_t *const roi_in)
+// as _resample()
+static int _resample_cl(const dt_interpolation_t *itor,
+                        const int devid,
+                        cl_mem dev_out,
+                        const dt_iop_roi_t *const roi_out,
+                        cl_mem dev_in,
+                        const dt_iop_roi_t *const roi_in,
+                        const float xshift,
+                        const float yshift)
 {
   int *hindex = NULL;
   int *hlength = NULL;
@@ -1258,11 +1287,11 @@ int dt_interpolation_resample_cl(const dt_interpolation_t *itor,
   // Generic non 1:1 case... much more complicated :D
 
   // Prepare resampling plans once and for all
-  if(_prepare_resampling_plan(itor, roi_in->width, width, dx, roi_out->scale,
+  if(_prepare_resampling_plan(itor, roi_in->width, width, xshift, roi_out->scale,
                               &hlength, &hkernel, &hindex, &hmeta))
     goto error;
 
-  if(_prepare_resampling_plan(itor, roi_in->height, height, dy, roi_out->scale,
+  if(_prepare_resampling_plan(itor, roi_in->height, height, yshift, roi_out->scale,
                               &vlength, &vkernel, &vindex, &vmeta))
     goto error;
 
@@ -1373,6 +1402,20 @@ error:
   return err;
 }
 
+/** Applies resampling (re-scaling) on *full* input and output buffers.
+ *  roi_in and roi_out define the part of the buffers that is affected.
+ */
+int dt_interpolation_resample_cl(const dt_interpolation_t *itor,
+                                 const int devid,
+                                 cl_mem dev_out,
+                                 const dt_iop_roi_t *const roi_out,
+                                 cl_mem dev_in,
+                                 const dt_iop_roi_t *const roi_in)
+{
+  return _resample_cl(itor, devid, dev_out, roi_out, dev_in, roi_in,
+                      MAX(0, roi_out->x), MAX(0, roi_out->y));
+}
+
 /** Applies resampling (re-scaling) on a specific region-of-interest
  *  of an image. The input and output buffers hold exactly those
  *  roi's. roi_in and roi_out define the relative positions of the
@@ -1392,6 +1435,24 @@ int dt_interpolation_resample_roi_cl(const dt_interpolation_t *itor,
   iroi.x = iroi.y = 0;
 
   return dt_interpolation_resample_cl(itor, devid, dev_out, &oroi, dev_in, &iroi);
+}
+
+int dt_interpolation_resample_tile_cl(const dt_interpolation_t *itor,
+                                      const int devid,
+                                      cl_mem dev_out,
+                                      const dt_iop_roi_t *const roi_out,
+                                      cl_mem dev_in,
+                                      const dt_iop_roi_t *const roi_in)
+{
+  dt_iop_roi_t oroi = *roi_out;
+  oroi.x = oroi.y = 0;
+
+  dt_iop_roi_t iroi = *roi_in;
+  iroi.x = iroi.y = 0;
+
+  return _resample_cl(itor, devid, dev_out, &oroi, dev_in, &iroi,
+                      roi_out->x - roi_in->x * roi_out->scale,
+                      roi_out->y - roi_in->y * roi_out->scale);
 }
 #endif
 

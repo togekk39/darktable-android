@@ -39,6 +39,7 @@ typedef struct dt_paper_info_t
 {
   char name[MAX_NAME], common_name[MAX_NAME];
   double width, height;
+  uint16_t dm_paper_id; // specfic to Windows, added here for a common structure to hold paper information across platforms
 } dt_paper_info_t;
 
 typedef struct dt_medium_info_t
@@ -60,6 +61,7 @@ typedef struct dt_printer_info_t
   dt_iop_color_intent_t intent;
   char profile[256];
   gboolean is_turboprint;
+  gboolean is_standard_media_type;
 } dt_printer_info_t;
 
 typedef struct dt_print_info_t

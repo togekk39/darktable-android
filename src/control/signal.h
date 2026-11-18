@@ -160,10 +160,7 @@ typedef enum dt_signal_t
   DT_SIGNAL_DEVELOP_UI_PIPE_FINISHED,
 
   /** \brief This signal is raised when develop history is about to be changed
-    1 : GList *  the current history
-    2 : uint32_t the correpsing history end
-    3 : GList *  the current iop-order list
-  no returned value
+  no param, no returned value
     */
   DT_SIGNAL_DEVELOP_HISTORY_WILL_CHANGE,
 
@@ -289,6 +286,14 @@ typedef enum dt_signal_t
     no param, no returned value
     */
   DT_SIGNAL_AI_MODELS_CHANGED,
+
+  /** \brief This signal is raised when every repository queried by
+    dt_ai_models_check_updates() has reported back, successfully or not.
+    Model statuses are settled by the time it fires, so a listener can
+    count what was found.
+    no param, no returned value
+    */
+  DT_SIGNAL_AI_UPDATE_CHECK_DONE,
 
   /* do not touch !*/
   DT_SIGNAL_COUNT

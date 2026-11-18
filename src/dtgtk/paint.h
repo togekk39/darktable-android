@@ -63,6 +63,8 @@ void dtgtk_cairo_paint_line_arrow(cairo_t *cr, gint x, int y, gint w, gint h, gi
 void dtgtk_cairo_paint_sortby(cairo_t *cr, gint x, int y, gint w, gint h, gint flags, void *data);
 /** Paint a store icon */
 void dtgtk_cairo_paint_store(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
+/** Paint an import icon: a downward arrow over an open tray */
+void dtgtk_cairo_paint_import(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 /** Paint a reset icon */
 void dtgtk_cairo_paint_reset(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 /** Paint a preset icon - similar to hamburger menu */
@@ -103,6 +105,10 @@ void dtgtk_cairo_paint_color(cairo_t *cr, gint x, gint y, gint w, gint h, gint f
 void dtgtk_cairo_paint_eye(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 /** Paint an eye icon which is crossed out if toggled */
 void dtgtk_cairo_paint_eye_toggle(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
+/** paint a filled eye with the pupil cut out: soloed */
+void dtgtk_cairo_paint_eye_solo(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
+/** Paint a selection box with corner handles (solo-edit) */
+void dtgtk_cairo_paint_soloedit(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 /** Paint a timer icon */
 void dtgtk_cairo_paint_timer(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 /** Paint a filmstrip icon */
@@ -131,6 +137,8 @@ void dtgtk_cairo_paint_local_copy(cairo_t *cr, gint x, gint y, gint w, gint h, g
 void dtgtk_cairo_paint_reject(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 /** Paint the remove icon */
 void dtgtk_cairo_paint_remove(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
+/** Paint a trash bin icon */
+void dtgtk_cairo_paint_trash(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 /** Paint a rating icon on thumbs */
 void dtgtk_cairo_paint_star(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 /** Paint an icon for unrating star on thumbs */
@@ -159,7 +167,8 @@ void dtgtk_cairo_paint_messages(cairo_t *cr, gint x, gint y, gint w, gint h, gin
 void dtgtk_cairo_paint_styles(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 /** paint the ? help label */
 void dtgtk_cairo_paint_help(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
-/** paint the i info label */
+/** paint the i info label: outlined, or filled with the i cut out when
+    CPF_ACTIVE (a toggle that is on) */
 void dtgtk_cairo_paint_info(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 /** paint the grouping icon. */
 void dtgtk_cairo_paint_grouping(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
@@ -179,6 +188,8 @@ void dtgtk_cairo_paint_dropdown(cairo_t *cr, gint x, gint y, gint w, gint h, gin
 void dtgtk_cairo_paint_bracket(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 /** paint lock icon */
 void dtgtk_cairo_paint_lock(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
+/** paint the blend mask's lock icon */
+void dtgtk_cairo_paint_mask_lock(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 /** paint check mark icon */
 void dtgtk_cairo_paint_check_mark(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 /** paint an over/under exposure icon */
@@ -193,8 +204,6 @@ void dtgtk_cairo_paint_bulb_mod(cairo_t *cr, gint x, gint y, gint w, gint h, gin
 void dtgtk_cairo_paint_warning(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 /** paint a soft proofing icon */
 void dtgtk_cairo_paint_softproof(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
-/** paint a display icon */
-void dtgtk_cairo_paint_display(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 /** paint a display2 icon */
 void dtgtk_cairo_paint_display2(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 /** paint a landscape rectangle */
@@ -205,6 +214,8 @@ void dtgtk_cairo_paint_rect_portrait(cairo_t *cr, gint x, gint y, gint w, gint h
 void dtgtk_cairo_paint_polygon(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 /** paint a zoom icon */
 void dtgtk_cairo_paint_zoom(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
+/** paint a workspace icon */
+void dtgtk_cairo_paint_workspace(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 /** paint a duplicate/multi instance indicator */
 void dtgtk_cairo_paint_multiinstance(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 /** paint a simple grid icon */
@@ -293,26 +304,36 @@ void dtgtk_cairo_paint_masks_brush(cairo_t *cr, gint x, gint y, gint w, gint h, 
 void dtgtk_cairo_paint_masks_vertgradient(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 /** Paint a brush + inverse icon for masks selection */
 void dtgtk_cairo_paint_masks_brush_and_inverse(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
-#ifdef HAVE_AI
 /** Paint an AI object mask icon (wand) */
 void dtgtk_cairo_paint_masks_object(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
-#endif
 /** Paint a multi-path icon for masks */
 void dtgtk_cairo_paint_masks_multi(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 /** Paint an inverse icon for masks */
 void dtgtk_cairo_paint_masks_inverse(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
-/** Paint an op union icon for masks */
-void dtgtk_cairo_paint_masks_union(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
-/** Paint an op intersection icon for masks */
-void dtgtk_cairo_paint_masks_intersection(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
+/** Paint an op maximum (union) icon for masks */
+void dtgtk_cairo_paint_masks_maximum(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
+/** Paint an op screen (smooth union) icon for masks */
+void dtgtk_cairo_paint_masks_screen(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
+/** Paint an op minimum (intersection) icon for masks */
+void dtgtk_cairo_paint_masks_minimum(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 /** Paint an op difference icon for masks */
 void dtgtk_cairo_paint_masks_difference(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 /** Paint an op sum icon for masks */
 void dtgtk_cairo_paint_masks_sum(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 /** Paint an op exclusion icon for masks */
 void dtgtk_cairo_paint_masks_exclusion(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
+/** Paint an op product (smooth intersection) icon for masks */
+void dtgtk_cairo_paint_masks_product(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 /** Paint a used icon for masks */
 void dtgtk_cairo_paint_masks_used(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
+/** paint the masks panel icon: a domino mask, filled with CPF_SPECIAL_FLAG
+    (the module has a mask), outlined otherwise. Not CPF_ACTIVE: its caller is
+    a toggle button, which sets CPF_ACTIVE to its own state, whether the panel
+    shows, and shows that with its styling */
+void dtgtk_cairo_paint_masks_panel(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
+void dtgtk_cairo_paint_masks_panel_toggle(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
+/** paint a viewfinder: the focused module, whose mask the panel is showing */
+void dtgtk_cairo_paint_module_focus(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 /** Paint a clone tool for retouch */
 void dtgtk_cairo_paint_tool_clone(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 /** Paint a heal tool for retouch */
@@ -361,6 +382,13 @@ void dtgtk_cairo_paint_filtering_menu(cairo_t *cr, gint x, gint y, gint w, gint 
 
 /** Paint an icon for snapshots restore button */
 void dtgtk_cairo_paint_snapshots_restore(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
+
+/** Paint an icon for comparing with another edit state: a frame split in two */
+void dtgtk_cairo_paint_compare(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
+
+/** Paint the way a comparison is shown: two frames side by side, or one with
+    its left half filled for an overlay with a split line. CPF_ACTIVE: side by side */
+void dtgtk_cairo_paint_compare_mode(cairo_t *cr, gint x, gint y, gint w, gint h, gint flags, void *data);
 
 G_END_DECLS
 

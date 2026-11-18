@@ -145,8 +145,8 @@ dt_job_t *dt_control_job_create(dt_job_execute_callback execute,
   job->state = DT_JOB_STATE_INITIALIZED;
   job->view_creator = dt_view_get_current();
 
-  dt_pthread_mutex_init(&job->state_mutex, NULL);
-  dt_pthread_mutex_init(&job->wait_mutex, NULL);
+  dt_pthread_mutex_init(&job->state_mutex);
+  dt_pthread_mutex_init(&job->wait_mutex);
   return job;
 }
 
@@ -505,9 +505,6 @@ gboolean dt_control_add_job(dt_job_queue_t queue_id, _dt_job_t *job)
 
 static void *_control_work_res(void *ptr)
 {
-#ifdef _OPENMP // need to do this in every thread
-  omp_set_num_threads(dt_get_num_threads());
-#endif
   worker_thread_parameters_t *params = (worker_thread_parameters_t *)ptr;
   dt_control_t *s = params->self;
   threadid = params->threadid;
@@ -522,19 +519,13 @@ static void *_control_work_res(void *ptr)
     if(_control_run_job_res(s, threadid_res))
     {
       // wait for a new job.
-#ifndef __ANDROID__
-      // Bionic has no POSIX thread cancellation. Android workers still use
-      // the same condition variable and cooperative dt_control_running() exit.
       int old;
       pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &old);
-#endif
       dt_pthread_mutex_lock(&s->cond_mutex);
       dt_pthread_cond_wait(&s->cond, &s->cond_mutex);
       dt_pthread_mutex_unlock(&s->cond_mutex);
-#ifndef __ANDROID__
       int tmp;
       pthread_setcancelstate(old, &tmp);
-#endif
     }
   }
   return NULL;
@@ -556,9 +547,6 @@ static void *_control_worker_kicker(void *ptr)
 
 static void *_control_work(void *ptr)
 {
-#ifdef _OPENMP // need to do this in every thread
-  omp_set_num_threads(dt_get_num_threads());
-#endif
   worker_thread_parameters_t *params = (worker_thread_parameters_t *)ptr;
   dt_control_t *control = params->self;
   threadid = params->threadid;

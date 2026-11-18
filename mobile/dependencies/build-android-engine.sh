@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 set -euo pipefail
 readonly root_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+readonly upstream_dir=${DT_MOBILE_UPSTREAM_SOURCE:-"$root_dir"}
 readonly source_dir=${DT_MOBILE_VCPKG_ROOT:-"$root_dir/.vcpkg/2025.06.13"}
 readonly build_dir=${DT_MOBILE_ENGINE_BUILD:-"$root_dir/.vcpkg/engine/build"}
 readonly install_dir=${DT_MOBILE_VCPKG_INSTALLED:-"$root_dir/.vcpkg/engine/installed"}
@@ -12,7 +13,7 @@ resolution_only=false
 for argument in "$@"; do
   [[ "$argument" != --dry-run ]] || resolution_only=true
 done
-if ! "$resolution_only" && [[ ! -f "$root_dir/src/external/LibRaw/libraw/libraw_version.h" ]]; then
+if ! "$resolution_only" && [[ ! -f "$upstream_dir/src/external/LibRaw/libraw/libraw_version.h" ]]; then
   echo 'Initialize the source submodules with git submodule update --init --recursive before building the engine.' >&2
   exit 1
 fi
@@ -25,7 +26,7 @@ export DT_MOBILE_VCPKG_ENV_FILE="$build_dir/android-dependencies.env"
 export DT_MOBILE_VCPKG_CLEAN_AFTER_BUILD=${DT_MOBILE_VCPKG_CLEAN_AFTER_BUILD:-0}
 "$root_dir/mobile/dependencies/build-android-dependencies.sh" "$@"
 if "$resolution_only"; then exit 0; fi
-cmake -S "$root_dir" -B "$build_dir" -G Ninja \
+python3 "$root_dir/mobile/tools/configure-engine.py" --source-root "$upstream_dir" -B "$build_dir" -- -G Ninja \
   -DCMAKE_BUILD_TYPE="$build_type" \
   -DCMAKE_TOOLCHAIN_FILE="$source_dir/scripts/buildsystems/vcpkg.cmake" \
   -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \

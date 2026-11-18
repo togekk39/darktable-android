@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2011-2025 darktable developers.
+    Copyright (C) 2011-2026 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -15,6 +15,7 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
+
 #include "common/gpx.h"
 #include "common/geo.h"
 #include "common/darktable.h"
@@ -39,6 +40,7 @@ typedef struct dt_gpx_t
   /* the list of track records parsed */
   GList *trkpts;
   GList *trksegs;
+  GPtrArray *timeidx;
 
   /* currently parsed track point */
   dt_gpx_track_point_t *current_track_point;
@@ -108,6 +110,9 @@ dt_gpx_t *dt_gpx_new(const gchar *filename)
 
   gpx->trkpts = g_list_sort(gpx->trkpts, _sort_track);
   gpx->trksegs = g_list_sort(gpx->trksegs, _sort_segment);
+  gpx->timeidx = g_ptr_array_sized_new(g_list_length(gpx->trkpts));
+  for(GList *item = gpx->trkpts; item; item = g_list_next(item))
+    g_ptr_array_add(gpx->timeidx, item);
 
   return gpx;
 
@@ -128,13 +133,13 @@ error:
   return NULL;
 }
 
-void _track_seg_free(dt_gpx_track_segment_t *trkseg)
+static void _track_seg_free(dt_gpx_track_segment_t *trkseg)
 {
   g_free(trkseg->name);
   g_free(trkseg);
 }
 
-void _track_pts_free(dt_gpx_track_point_t *trkpt)
+static void _track_pts_free(dt_gpx_track_point_t *trkpt)
 {
   g_date_time_unref(trkpt->time);
   g_free(trkpt);
@@ -144,6 +149,7 @@ void dt_gpx_destroy(dt_gpx_t *gpx)
 {
   g_assert(gpx != NULL);
 
+  g_ptr_array_free(gpx->timeidx, TRUE);
   if(gpx->trkpts) g_list_free_full(gpx->trkpts, (GDestroyNotify)_track_pts_free);
   if(gpx->trksegs) g_list_free_full(gpx->trksegs, (GDestroyNotify)_track_seg_free);
 
@@ -155,9 +161,25 @@ gboolean dt_gpx_get_location(const dt_gpx_t *gpx, GDateTime *timestamp, dt_image
   g_assert(gpx != NULL);
 
   /* verify that we got at least 2 trackpoints */
-  if(g_list_shorter_than(gpx->trkpts,2)) return FALSE;
+  if(gpx->timeidx->len < 2) return FALSE;
 
-  for(GList *item = gpx->trkpts; item; item = g_list_next(item))
+  // use a lower bound to preserve the ordering of matches with duplicate timestamps
+  guint left = 0;
+  guint right = gpx->timeidx->len;
+  while(left < right)
+  {
+    const guint mid = left + (right - left) / 2;
+    const GList *item = g_ptr_array_index(gpx->timeidx, mid);
+    const dt_gpx_track_point_t *point = item->data;
+    if(g_date_time_compare(point->time, timestamp) < 0)
+      left = mid + 1;
+    else
+      right = mid;
+  }
+
+  // the binary search selects the matching interval, so this loop should run only once
+  for(GList *item = g_ptr_array_index(gpx->timeidx, left ? left - 1 : 0);
+      item; item = g_list_next(item))
   {
     const dt_gpx_track_point_t *tp = item->data;
 
@@ -238,7 +260,7 @@ gboolean dt_gpx_get_location(const dt_gpx_t *gpx, GDateTime *timestamp, dt_image
         geoloc->longitude = lon;
 
         /* make a simple linear interpolation on elevation */
-        if(tp_next->elevation == NAN || tp->elevation == NAN)
+        if(isnan(tp_next->elevation) || isnan(tp->elevation))
           geoloc->elevation = NAN;
         else
           geoloc->elevation = tp->elevation + (tp_next->elevation - tp->elevation) * f;
@@ -262,9 +284,9 @@ static void _gpx_parse_error(GError **error)
 /*
  * GPX XML parser code
  */
-void _gpx_parser_start_element(GMarkupParseContext *ctx, const gchar *element_name,
-                               const gchar **attribute_names, const gchar **attribute_values,
-                               const gpointer user_data, GError **error)
+static void _gpx_parser_start_element(GMarkupParseContext *ctx, const gchar *element_name,
+                                      const gchar **attribute_names, const gchar **attribute_values,
+                                      const gpointer user_data, GError **error)
 {
   g_return_if_fail(*error == NULL);
 
@@ -374,15 +396,15 @@ element_error:
   _gpx_parse_error(error);
 }
 
-void _gpx_parser_end_element(GMarkupParseContext *context, const gchar *element_name, const gpointer user_data,
-                             GError **error)
+static void _gpx_parser_end_element(GMarkupParseContext *context, const gchar *element_name, const gpointer user_data,
+                                    GError **error)
 {
   g_return_if_fail(*error == NULL);
 
   dt_gpx_t *gpx = (dt_gpx_t *)user_data;
 
   /* closing trackpoint lets take care of data parsed */
-  if(gpx->parsing_trk == TRUE)
+  if(gpx->parsing_trk)
   {
     if(strcmp(element_name, "trk") == 0)
     {
@@ -407,8 +429,8 @@ void _gpx_parser_end_element(GMarkupParseContext *context, const gchar *element_
   }
 }
 
-void _gpx_parser_text(GMarkupParseContext *context, const gchar *text, gsize text_len, const gpointer user_data,
-                      GError **error)
+static void _gpx_parser_text(GMarkupParseContext *context, const gchar *text, gsize text_len, const gpointer user_data,
+                             GError **error)
 {
   g_return_if_fail(*error == NULL);
 

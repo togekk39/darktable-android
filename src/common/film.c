@@ -1,6 +1,6 @@
 /*
    This file is part of darktable,
-   Copyright (C) 2009-2025 darktable developers.
+   Copyright (C) 2009-2026 darktable developers.
 
    darktable is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -24,10 +24,10 @@
 #include "common/tags.h"
 #include "control/conf.h"
 #include "control/control.h"
+#include "control/crawler.h"
 #include "control/jobs.h"
 #include "views/view.h"
 
-#include <assert.h>
 #include <errno.h>
 #include <limits.h>
 #include <math.h>
@@ -38,17 +38,19 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+
 #ifdef USE_LUA
 #include "lua/glist.h"
 #include "lua/lua.h"
 #endif
+
 #ifdef GDK_WINDOWING_QUARTZ
 #include "osx/osx.h"
 #endif
 
 void dt_film_init(dt_film_t *film)
 {
-  dt_pthread_mutex_init(&film->images_mutex, NULL);
+  dt_pthread_mutex_init(&film->images_mutex);
   film->last_loaded = film->num_images = 0;
   film->dirname[0] = '\0';
   film->dir = NULL;
@@ -163,6 +165,13 @@ gboolean dt_film_open(const dt_filmid_t id)
     sqlite3_step(stmt);
   }
   sqlite3_finalize(stmt);
+
+  // the user is about to look at this film roll, so make sure its sidecar
+  // files have been checked before its images can be edited.  this waits,
+  // but only for this one film roll rather than for the whole library,
+  // and only until the background crawl has reached it.
+  dt_control_crawler_ensure_filmroll(id);
+
   // TODO: prefetch to cache using image_open
   dt_film_set_query(id);
   dt_control_queue_redraw_center();
@@ -547,6 +556,102 @@ void dt_film_set_folder_status()
   }
   sqlite3_finalize(stmt);
   sqlite3_finalize(stmt2);
+}
+
+gchar *dt_film_get_folder(const dt_filmid_t id)
+{
+  gchar *folder = NULL;
+  sqlite3_stmt *stmt;
+  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), "SELECT folder FROM main.film_rolls WHERE id = ?1",
+                              -1, &stmt, NULL);
+  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, id);
+  if(sqlite3_step(stmt) == SQLITE_ROW)
+    folder = g_strdup((char *)sqlite3_column_text(stmt, 0));
+  sqlite3_finalize(stmt);
+  return folder;
+}
+
+uint32_t dt_film_count_images(const dt_filmid_t id)
+{
+  uint32_t count = 0;
+  sqlite3_stmt *stmt = NULL;
+  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),
+                              "SELECT COUNT(*) FROM main.images WHERE film_id = ?1  ", -1, &stmt, NULL);
+  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, id);
+  if(sqlite3_step(stmt) == SQLITE_ROW)
+    count = sqlite3_column_int(stmt, 0);
+  sqlite3_finalize(stmt);
+  return count;
+}
+
+dt_imgid_t dt_film_get_nth_image(const dt_filmid_t id, const int n)
+{
+  dt_imgid_t imgid = NO_IMGID;
+  sqlite3_stmt *stmt = NULL;
+  char query[1024];
+  snprintf(query, sizeof(query), "SELECT id FROM main.images WHERE film_id = ?1 ORDER BY id LIMIT 1 OFFSET %d",
+           n);
+  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), query, -1, &stmt, NULL);
+  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, id);
+  if(sqlite3_step(stmt) == SQLITE_ROW)
+    imgid = sqlite3_column_int(stmt, 0);
+  sqlite3_finalize(stmt);
+  return imgid;
+}
+
+uint32_t dt_film_count(void)
+{
+  uint32_t count = 0;
+  sqlite3_stmt *stmt = NULL;
+  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), "SELECT COUNT(*) FROM main.film_rolls ", -1, &stmt,
+                              NULL);
+  if(sqlite3_step(stmt) == SQLITE_ROW)
+    count = sqlite3_column_int(stmt, 0);
+  sqlite3_finalize(stmt);
+  return count;
+}
+
+dt_filmid_t dt_film_get_nth(const int n)
+{
+  dt_filmid_t id = NO_FILMID;
+  sqlite3_stmt *stmt = NULL;
+  char query[1024];
+  snprintf(query, sizeof(query), "SELECT id FROM main.film_rolls ORDER BY id LIMIT 1 OFFSET %d", n);
+  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), query, -1, &stmt, NULL);
+  if(sqlite3_step(stmt) == SQLITE_ROW)
+    id = sqlite3_column_int(stmt, 0);
+  sqlite3_finalize(stmt);
+  return id;
+}
+
+GList *dt_film_get_by_access(void)
+{
+  sqlite3_stmt *stmt;
+  // clang-format off
+  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),
+                              "SELECT id FROM main.film_rolls"
+                              " ORDER BY access_timestamp DESC, id DESC",
+                              -1, &stmt, NULL);
+  // clang-format on
+  GList *rolls = NULL;
+  while(sqlite3_step(stmt) == SQLITE_ROW)
+    rolls = g_list_prepend(rolls, GINT_TO_POINTER(sqlite3_column_int(stmt, 0)));
+  sqlite3_finalize(stmt);
+  return g_list_reverse(rolls);
+}
+
+GList *dt_film_get_images(const dt_filmid_t id)
+{
+  sqlite3_stmt *stmt;
+  GList *imgs = NULL;
+  DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),
+                              "SELECT id FROM main.images WHERE film_id = ?1", -1,
+                              &stmt, NULL);
+  DT_DEBUG_SQLITE3_BIND_INT(stmt, 1, id);
+  while(sqlite3_step(stmt) == SQLITE_ROW)
+    imgs = g_list_prepend(imgs, GINT_TO_POINTER(sqlite3_column_int(stmt, 0)));
+  sqlite3_finalize(stmt);
+  return g_list_reverse(imgs);
 }
 
 // clang-format off

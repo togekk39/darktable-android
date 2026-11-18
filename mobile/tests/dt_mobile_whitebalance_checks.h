@@ -134,10 +134,18 @@ static int wb_test_native_preset(int expected)
   size_t size;
   void *blob = wb_test_native_blob(&size);
   const dt_introspection_field_t *field = wb_test_field("preset", size, DT_INTROSPECTION_TYPE_INT, sizeof(int));
+  const dt_introspection_field_t *late = wb_test_field("late_correction", size,
+    DT_INTROSPECTION_TYPE_BOOL, sizeof(gboolean));
   int preset = -99;
-  if(blob && field) memcpy(&preset, (const char *)blob + field->header.offset, sizeof(preset));
+  gboolean late_correction = FALSE;
+  if(blob && field && late)
+  {
+    memcpy(&preset, (const char *)blob + field->header.offset, sizeof(preset));
+    memcpy(&late_correction, (const char *)blob + late->header.offset, sizeof(late_correction));
+  }
   g_free(blob);
-  return preset == expected;
+  return field && late && preset == (expected == 4 ? 0 : expected)
+    && late_correction == (expected == 4);
 }
 
 static int wb_test_gains_equal(const wb_test_metadata *first, const wb_test_metadata *second)

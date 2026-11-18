@@ -1215,8 +1215,7 @@ static int _default_process_tiling_cl_ptp(dt_iop_module_t *self,
 
   const float available = (float)dt_opencl_get_device_available(devid);
   const float factor = fmaxf(tiling.factor_cl -1.0f, 1.0f);
-  const float singlebuffer = fminf(fmaxf((available - tiling.overhead) / factor, 0.0f),
-                                  (float)(dt_opencl_get_device_memalloc(devid)));
+  const float singlebuffer = fmaxf((available - tiling.overhead) / factor, 0.0f);
   const float maxbuf = fmaxf(tiling.maxbuf_cl, 1.0f);
   int width = MIN(roi_in->width, darktable.opencl->dev[devid].max_image_width);
   int height = MIN(roi_in->height, darktable.opencl->dev[devid].max_image_height);
@@ -1464,8 +1463,7 @@ static int _default_process_tiling_cl_roi(dt_iop_module_t *self,
 
   const float available = (float)dt_opencl_get_device_available(devid);
   const float factor = fmaxf(tiling.factor_cl - 1.0f, 1.0f);
-  const float singlebuffer = fminf(fmaxf((available - tiling.overhead) / factor, 0.0f),
-                                  (float)(dt_opencl_get_device_memalloc(devid)));
+  const float singlebuffer = fmaxf((available - tiling.overhead) / factor, 0.0f);
   const float maxbuf = fmaxf(tiling.maxbuf_cl, 1.0f);
 
   int width = MIN(MAX(roi_in->width, roi_out->width), darktable.opencl->dev[devid].max_image_width);
@@ -1651,8 +1649,8 @@ static int _default_process_tiling_cl_roi(dt_iop_module_t *self,
       const int in_dy = iroi_full.y - roi_in->y;
       const int out_dx = oroi_good.x - roi_out->x;
       const int out_dy = oroi_good.y - roi_out->y;
-      const size_t ioffs = (size_t)(in_dy  * ipitch) + (size_t)(in_dx * in_bpp);
-      const size_t ooffs = (size_t)(out_dy * opitch) + (size_t)(out_dx * out_bpp);
+      const size_t ioffs = (size_t)in_dy  * ipitch + (size_t)in_dx * in_bpp;
+      const size_t ooffs = (size_t)out_dy * opitch + (size_t)out_dx * out_bpp;
 
       /* region of full input tile */
       const size_t iregion[2] = { iroi_full.width, iroi_full.height };
@@ -1769,36 +1767,37 @@ int default_process_tiling_cl(dt_iop_module_t *self,
 int process_tiling_cl_fast(dt_dev_pixelpipe_iop_t *piece,
                            void *cl_in,
                            void *cl_out,
-                           const dt_iop_roi_t *roi_in,
-                           const dt_iop_roi_t *roi_out,
-                           const int in_bpp,
-                           const int bpp,
+                           const dt_iop_roi_t *roi,
+                           const int ibpp,
+                           const int obpp,
                            const dt_develop_tiling_t *tiling)
 {
   dt_dev_pixelpipe_t *pipe = piece->pipe;
   dt_iop_module_t *module = piece->module;
   const int devid = pipe->devid;
-  const int width = roi_in->width;
-  const int height = roi_in->height;
-  const int aligner = MAX(tiling->align, dt_opencl_tiling_align(devid));
-  const int border = _align_up(tiling->overlap, aligner);
+  const int width = roi->width;
+  const int height = roi->height;
+  const int aligner = _align_up(tiling->align, dt_opencl_tiling_align(devid));
+  const int border = tiling->overlap;
   const int64_t overhead = tiling->overhead;
   const int64_t allmem = dt_opencl_get_device_available(devid);
-  const int64_t avail = allmem - (int64_t)(in_bpp + bpp)*width*height - overhead;
-  const int per_row = in_bpp * width * tiling->factor_cl;
-  const int possible = avail / per_row;
-  const int tile_height = darktable.opencl->fast_tiling
-        ? _align_up(MIN(300+3*border, possible), aligner)
-        : _align_up(possible, aligner);
+  const int64_t avail = allmem - (int64_t)(ibpp + obpp)*width*height - overhead;
+
+  const int64_t per_line = (ibpp + obpp) * width * tiling->factor;
+  const int tile_height = MIN(_align_up((int)(avail / per_line), aligner), height);
   const int valid_rows = tile_height - 2*border;
+  if(valid_rows < 1) // should never happen - just make sure, see dt_opencl_image_fits_device()
+    return DT_OPENCL_PROCESS_CL;
+
   const int num_tiles = (height + valid_rows - 1) / valid_rows;
-  dt_print_pipe(DT_DEBUG_OPENCL | DT_DEBUG_TILING | DT_DEBUG_VERBOSE,
-    "  fast tiling", pipe, module, devid, roi_in, roi_out,
-    "tiles=%d validrows=%d border=%d", num_tiles, valid_rows, border);
+  dt_print_pipe(DT_DEBUG_TILING,
+    "  fast tiling", pipe, module, devid, roi, NULL,
+    "tavail=%dMB tiles=%d validrows=%d border=%d perline=%dKB",
+    (int)(avail/DT_MEGA), num_tiles, valid_rows, border, (int)(per_line / 1024));
 
   cl_int err = CL_SUCCESS;
-  cl_mem t_in = dt_opencl_alloc_device(devid, width, tile_height, in_bpp);
-  cl_mem t_out = dt_opencl_alloc_device(devid, width, tile_height, bpp);
+  cl_mem t_in = dt_opencl_alloc_device(devid, width, tile_height, ibpp);
+  cl_mem t_out = dt_opencl_alloc_device(devid, width, tile_height, obpp);
   if(!t_in || !t_out)
   {
     err = CL_MEM_OBJECT_ALLOCATION_FAILURE;
@@ -1812,24 +1811,25 @@ int process_tiling_cl_fast(dt_dev_pixelpipe_iop_t *piece,
   for(int tile_nr = 0; tile_nr < num_tiles; tile_nr++)
   {
     const int group = tile_nr * valid_rows ;
-    const int last_in = MIN(height, group + valid_rows + border);
-    const int topline = group - border;
-    const int first_in = MAX(0, topline);
-    const int t_rows = last_in - first_in;
-    const int missing = topline < 0 ? -topline : 0;
-    const int first_out = border - missing;
-    const int out_height = t_rows - first_out;
+    // every tile has the height of t_in and t_out, so the last one starts
+    // earlier. A shorter tile leaves rows of the previous tile below its
+    // roi, which kernels reading past the roi through a clamping sampler
+    // took for the bottom of the image
+    const int first_in = CLAMP(group - border, 0, height - tile_height);
+    const int last_in = first_in + tile_height;
+    const int t_rows = tile_height;
+    const int first_out = group - first_in;
+    const int out_height = MIN(valid_rows, height - group);
 
     if(out_height > 0)
     {
       /* roi_in and roi_out for process_cl on subbuffer */
-      const dt_iop_roi_t iroi = { roi_in->x, roi_in->y + first_in, width, t_rows, roi_in->scale };
-      const dt_iop_roi_t oroi = { roi_out->x, roi_out->y + first_in, width, t_rows, roi_out->scale };
-      dt_dev_prepare_piece_cfa(piece, &iroi);
+      const dt_iop_roi_t troi = { roi->x, roi->y + first_in, width, t_rows, roi->scale };
+      dt_dev_prepare_piece_cfa(piece, &troi);
       for_four_channels(k) piece->pipe->dsc.processed_maximum[k] = processed_maximum_saved[k];
 
       dt_print_pipe(DT_DEBUG_OPENCL | DT_DEBUG_TILING | DT_DEBUG_VERBOSE,
-        "    tile", pipe, module, devid, &iroi, &oroi,
+        "    tile", pipe, module, devid, &troi, NULL,
         "tile=%.3d/%.3d, group=%.5d first=%.5d last=%.5d rows=%.4d",
         tile_nr, num_tiles, group, first_in, last_in, t_rows);
       const size_t insrc[2]  = { 0, first_in };
@@ -1837,14 +1837,14 @@ int process_tiling_cl_fast(dt_dev_pixelpipe_iop_t *piece,
       err = dt_opencl_enqueue_copy_image(devid, (cl_mem)cl_in, t_in, insrc, CLIMG_ORIGIN, iarea);
       if(err != CL_SUCCESS) goto finish;
 
-      err = module->process_cl(module, piece, t_in, t_out, &iroi, &oroi);
+      err = module->process_cl(module, piece, t_in, t_out, &troi, &troi);
       if(err != CL_SUCCESS) goto finish;
 
       for_four_channels(k)
       {
         if(tile_nr > 0 && fabs(processed_maximum_new[k] - piece->pipe->dsc.processed_maximum[k]) > 1.0e-6f)
           dt_print_pipe(DT_DEBUG_OPENCL | DT_DEBUG_TILING,
-            "changed procmax", pipe, module, devid, &iroi, &oroi,
+            "changed procmax", pipe, module, devid, NULL, NULL,
             "tile=%d channel=%d procmax=%.3f", tile_nr, (int)k, piece->pipe->dsc.processed_maximum[k]);
         processed_maximum_new[k] = piece->pipe->dsc.processed_maximum[k];
       }
@@ -1880,10 +1880,9 @@ int default_process_tiling_cl(dt_iop_module_t *self,
 int process_tiling_cl_fast(dt_dev_pixelpipe_iop_t *piece,
                         void *cl_in,
                         void *cl_out,
-                        const dt_iop_roi_t *roi_in,
-                        const dt_iop_roi_t *roi_out,
-                        const int in_bpp,
-                        const int bpp,
+                        const dt_iop_roi_t *roi,
+                        const int ibpp,
+                        const int obpp,
                         const dt_develop_tiling_t *tiling)
 {
   return DT_OPENCL_DEFAULT_ERROR;

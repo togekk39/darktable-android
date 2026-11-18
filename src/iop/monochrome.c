@@ -15,6 +15,7 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
+
 #include "common/gdk_event_utils.h"
 
 #include "bauhaus/bauhaus.h"
@@ -34,9 +35,10 @@
 #include "gui/presets.h"
 #include "gui/accelerators.h"
 #include "iop/iop_api.h"
-#include <assert.h>
+
 #include <stdlib.h>
 #include <string.h>
+
 
 DT_MODULE_INTROSPECTION(2, dt_iop_monochrome_params_t)
 
@@ -210,7 +212,7 @@ void process(dt_iop_module_t *self,
   const float d_a = d->a;
   const float d_b = d->b;
   DT_OMP_FOR_SIMD(aligned(in, out:64))
-  for(int k = 0; k < 4*npixels; k += 4)
+  for(size_t k = 0; k < 4*npixels; k += 4)
   {
     out[k+0] = 100.0f * _color_filter(in[k+1], in[k+2], d_a, d_b, sigma2);
     out[k+1] = out[k+2] = 0.0f;
@@ -223,6 +225,17 @@ void process(dt_iop_module_t *self,
   const float detail = -1.0f; // bilateral base layer
 
   dt_bilateral_t *b = dt_bilateral_init(roi_in->width, roi_in->height, sigma_s, sigma_r);
+  if(!b)
+  {
+    dt_print(DT_DEBUG_ALWAYS, "[monochrome] error: memory allocation failed for bilateral filter, the module does nothing");
+    dt_control_log(_("error: bilateral filter failed to allocate memory, check your RAM usage!"));
+    // Copy the input buffer to the output buffer, making the processing no-op
+    // Another possible option is to not copy the buffer so that the garbage
+    // output will be more likely to draw the user's attention to the warning
+    // that the operation cannot be performed
+    dt_iop_copy_image_roi(o, i, piece->colors, roi_in, roi_out);
+    return;
+  }
   dt_bilateral_splat(b, (float *)o);
   dt_bilateral_blur(b);
   dt_bilateral_slice(b, (float *)o, (float *)o, detail);
@@ -230,7 +243,7 @@ void process(dt_iop_module_t *self,
 
   const float highlights = d->highlights;
   DT_OMP_FOR_SIMD(aligned(in, out:64))
-  for(int k = 0; k < 4*npixels; k += 4)
+  for(size_t k = 0; k < 4*npixels; k += 4)
   {
     const float tt = _envelope(in[k]);
     const float t = tt + (1.0f - tt) * (1.0f - highlights);

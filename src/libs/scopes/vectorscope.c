@@ -251,13 +251,7 @@ static void _lib_histogram_vectorscope_bkgd(dt_scopes_vec_t *d,
       {
         case DT_SCOPES_VEC_VECTORSCOPE_CIELUV:
         {
-          dt_ioppr_rgb_matrix_to_xyz(rgb_scope,
-                                     XYZ_D50,
-                                     vs_prof->matrix_in_transposed,
-                                     vs_prof->lut_in,
-                                     vs_prof->unbounded_coeffs_in,
-                                     vs_prof->lutsize,
-                                     vs_prof->nonlinearlut);
+          dt_ioppr_rgb_to_xyz(rgb_scope, XYZ_D50, vs_prof);
           dt_aligned_pixel_t xyY;
           dt_D50_XYZ_to_xyY(XYZ_D50, xyY);
           dt_xyY_to_Luv(xyY, chromaticity);
@@ -266,13 +260,7 @@ static void _lib_histogram_vectorscope_bkgd(dt_scopes_vec_t *d,
         }
         case DT_SCOPES_VEC_VECTORSCOPE_JZAZBZ:
         {
-          dt_ioppr_rgb_matrix_to_xyz(rgb_scope,
-                                     XYZ_D50,
-                                     vs_prof->matrix_in_transposed,
-                                     vs_prof->lut_in,
-                                     vs_prof->unbounded_coeffs_in,
-                                     vs_prof->lutsize,
-                                     vs_prof->nonlinearlut);
+          dt_ioppr_rgb_to_xyz(rgb_scope, XYZ_D50, vs_prof);
           dt_aligned_pixel_t XYZ_D65;
           dt_XYZ_D50_2_XYZ_D65(XYZ_D50, XYZ_D65);
           dt_XYZ_2_JzAzBz(XYZ_D65, chromaticity);
@@ -429,12 +417,7 @@ static void _get_chromaticity(const dt_aligned_pixel_t RGB,
       // NOTE: see for comparison/reference rgb_to_JzCzhz() in color_picker.c
       dt_aligned_pixel_t XYZ_D50;
       // this goes to the PCS which has standard illuminant D50
-      dt_ioppr_rgb_matrix_to_xyz(RGB, XYZ_D50,
-                                 vs_prof->matrix_in_transposed,
-                                 vs_prof->lut_in,
-                                 vs_prof->unbounded_coeffs_in,
-                                 vs_prof->lutsize,
-                                 vs_prof->nonlinearlut);
+      dt_ioppr_rgb_to_xyz(RGB, XYZ_D50, vs_prof);
       // FIXME: do have to worry about chromatic adaptation? this
       // assumes that the histogram profile white point is the same as
       // PCS whitepoint (D50) -- if we have a D65 whitepoint profile,
@@ -452,10 +435,7 @@ static void _get_chromaticity(const dt_aligned_pixel_t RGB,
     {
       dt_aligned_pixel_t XYZ_D50;
       // this goes to the PCS which has standard illuminant D50
-      dt_ioppr_rgb_matrix_to_xyz(RGB, XYZ_D50,
-                                 vs_prof->matrix_in_transposed,
-                                 vs_prof->lut_in,
-      vs_prof->unbounded_coeffs_in, vs_prof->lutsize, vs_prof->nonlinearlut);
+      dt_ioppr_rgb_to_xyz(RGB, XYZ_D50, vs_prof);
       // FIXME: can skip a hop by pre-multipying matrices: see
       // colorbalancergb and dt_develop_blendif_init_masking_profile()
       // for how to make hacked profile
@@ -917,8 +897,7 @@ static void _vec_draw(const dt_scopes_mode_t *const self,
       const dt_scopes_vec_color_harmony_t hm = _vec_color_harmonies[cur_harmony];
       PangoLayout *layout;
       PangoRectangle ink;
-      PangoFontDescription *desc =
-        pango_font_description_copy_static(darktable.bauhaus->pango_font_desc);
+      PangoFontDescription *desc = dt_gui_get_font();
       pango_font_description_set_weight(desc, PANGO_WEIGHT_NORMAL);
       pango_font_description_set_absolute_size(desc, DT_PIXEL_APPLY_DPI(16) * PANGO_SCALE);
       layout = pango_cairo_create_layout(cr);
@@ -1303,8 +1282,8 @@ static void _lib_histogram_cycle_harmony_callback(dt_action_t *action)
   _color_harmony_changed_record(vec_mode);
 }
 
-void _vec_signal_image_changed(gpointer instance,
-                               dt_scopes_mode_t *const self)
+static void _vec_signal_image_changed(gpointer instance,
+                                      dt_scopes_mode_t *const self)
 {
   dt_scopes_vec_t *const d = self->data;
   dt_color_harmony_guide_t new_guide;
@@ -1420,14 +1399,20 @@ static void _vec_add_options(dt_scopes_mode_t *const self,
 {
   dt_scopes_vec_t *const d = self->data;
 
-  d->colorspace_button = dtgtk_button_new(dtgtk_cairo_paint_empty, CPF_NONE, NULL);
-  dt_action_define(dark, NULL, N_("cycle vectorscope types"),
-                   d->colorspace_button, &dt_action_def_button);
+  d->colorspace_button = dtgtk_button_new_full(dtgtk_cairo_paint_empty, CPF_NONE, NULL,
+      &(dtgtk_button_config_t){
+        .action = dark,
+        .action_label = N_("cycle vectorscope types"),
+        .action_def = &dt_action_def_button,
+      });
 
-  d->vec_scale_button = dtgtk_button_new(dtgtk_cairo_paint_empty, CPF_NONE, NULL);
+  d->vec_scale_button = dtgtk_button_new_full(dtgtk_cairo_paint_empty, CPF_NONE, NULL,
+      &(dtgtk_button_config_t){
+        .action = dark,
+        .action_label = N_("switch vectorscope scale"),
+        .action_def = &dt_action_def_button,
+      });
   gtk_widget_set_valign(d->vec_scale_button, GTK_ALIGN_START);
-  dt_action_define(dark, NULL, N_("switch vectorscope scale"),
-                   d->vec_scale_button, &dt_action_def_button);
 
   d->harmony_viewport = gtk_viewport_new(NULL, NULL);
   gtk_widget_set_halign(d->harmony_viewport, GTK_ALIGN_END);

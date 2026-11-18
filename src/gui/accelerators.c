@@ -15,6 +15,7 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
+
 #include "common/gdk_event_utils.h"
 
 #include "gui/accelerators.h"
@@ -23,11 +24,12 @@
 #include "common/file_location.h"
 #include "common/utility.h"
 #include "control/control.h"
+#include "gui/gtk.h"
 #include "gui/presets.h"
 #include "dtgtk/expander.h"
 #include "bauhaus/bauhaus.h"
+#include "develop/masks.h"
 
-#include <assert.h>
 #include <gtk/gtk.h>
 #include <math.h>
 
@@ -209,6 +211,40 @@ const dt_action_element_def_t _action_elements_entry[]
 const dt_action_element_def_t _action_elements_value_fallback[]
   = { { NULL, dt_action_effect_value } };
 
+/* encode an action effect as (state << 8) | button for the synthetic gesture
+ * press used by shortcut activation (decoded by dt_gui_current_button() /
+ * dt_gui_current_state() in gtk.h); plain effects become a plain primary
+ * click.
+ *
+ * Effect values alias across action definitions (DT_ACTION_EFFECT_ON ==
+ * DT_ACTION_EFFECT_ACTIVATE_CTRL == 1 and DT_ACTION_EFFECT_OFF ==
+ * DT_ACTION_EFFECT_ACTIVATE_RIGHT == 2, see action.h), so the caller's
+ * definition selects the meaning: a toggle's plain on/off is a plain
+ * primary click (matching the synthetic branch below), while a button's
+ * ctrl/right variants carry the modifier / button.  A correction confined
+ * to this switch could not serve both callers. */
+static inline gint _action_effect_button_state(const dt_action_effect_t effect,
+                                               const gboolean is_toggle)
+{
+  switch(effect)
+  {
+    case DT_ACTION_EFFECT_TOGGLE_CTRL:
+    case DT_ACTION_EFFECT_ON_CTRL:
+      return (GDK_CONTROL_MASK << 8) | GDK_BUTTON_PRIMARY;
+    case DT_ACTION_EFFECT_TOGGLE_RIGHT:
+    case DT_ACTION_EFFECT_ON_RIGHT:
+      return (0 << 8) | GDK_BUTTON_SECONDARY;
+    case DT_ACTION_EFFECT_ACTIVATE_CTRL: /* == DT_ACTION_EFFECT_ON */
+      return is_toggle ? (0 << 8) | GDK_BUTTON_PRIMARY
+                       : (GDK_CONTROL_MASK << 8) | GDK_BUTTON_PRIMARY;
+    case DT_ACTION_EFFECT_ACTIVATE_RIGHT: /* == DT_ACTION_EFFECT_OFF */
+      return is_toggle ? (0 << 8) | GDK_BUTTON_PRIMARY
+                       : (0 << 8) | GDK_BUTTON_SECONDARY;
+    default:
+      return (0 << 8) | GDK_BUTTON_PRIMARY;
+  }
+}
+
 static float _action_process_toggle(gpointer target,
                                     dt_action_element_t element,
                                     dt_action_effect_t effect,
@@ -219,27 +255,56 @@ static float _action_process_toggle(gpointer target,
   if(DT_ACTION_TOGGLE_NEEDED(effect, move_size, value)
      && gtk_widget_get_ancestor(target, GTK_TYPE_WINDOW))
   {
-    GdkEvent *event = gdk_event_new(GDK_BUTTON_PRESS);
-    event->button.state = (effect == DT_ACTION_EFFECT_TOGGLE_CTRL
-                           || effect == DT_ACTION_EFFECT_ON_CTRL)
-                        ? GDK_CONTROL_MASK : 0;
-    event->button.button = (effect == DT_ACTION_EFFECT_TOGGLE_RIGHT
-                            || effect == DT_ACTION_EFFECT_ON_RIGHT)
-                         ? GDK_BUTTON_SECONDARY : GDK_BUTTON_PRIMARY;
-
-    if(!gtk_widget_get_realized(target)) gtk_widget_realize(target);
-    event->button.window = gtk_widget_get_window(target);
-    g_object_ref(event->button.window);
-
-    // some togglebuttons connect to the clicked signal, others to toggled or button-press-event
-    // gtk_widget_event does not work when widgets are hidden in event boxes or some other conditions
-    gboolean handled;
-    g_signal_emit_by_name(G_OBJECT(target), "button-press-event", event, &handled);
-    if(!handled) gtk_button_clicked(GTK_BUTTON(target));
-    event->type = GDK_BUTTON_RELEASE;
-    g_signal_emit_by_name(G_OBJECT(target), "button-release-event", event, &handled);
-
-    gdk_event_free(event);
+    GtkGestureSingle *const gesture = g_object_get_data(G_OBJECT(target), DT_ACTION_GESTURE_KEY);
+    if(gesture)
+    {
+      /* the widget's activation lives in a gesture controller, which
+       * synthetic GdkEvents never reach: invoke it through the same
+       * "pressed" signal a real click produces, carrying the action
+       * effect as button/state so ctrl-/right-variants keep working
+       * (the callback manages the button states itself, as for a real
+       * click) */
+      g_object_set_data(G_OBJECT(gesture), DT_ACTION_GESTURE_SYNTH_KEY,
+                        GINT_TO_POINTER(_action_effect_button_state(effect, TRUE)));
+      g_signal_emit_by_name(gesture, "pressed", 1, 0.0, 0.0);
+      g_object_set_data(G_OBJECT(gesture), DT_ACTION_GESTURE_SYNTH_KEY, NULL);
+    }
+    else
+    {
+      /* no stored gesture: a plain GTK toggle button.  Its internal press
+       * gesture is primary-button-only and the "clicked"/"toggled" wiring
+       * lives in the button itself, so gtk_widget_activate() is the
+       * GTK4-compatible equivalent of the synthetic press+release GTK3
+       * used.  DT_ACTION_TOGGLE_NEEDED above already restricts the ON/OFF
+       * effects to the state change they demand, so a single flip via
+       * activate() is right for every effect: the toggle variants flip,
+       * the ON/OFF variants flip only when the button is in the wrong
+       * state, and the right variants have no distinct right-click handler
+       * on a plain button and flip like the primary (the old synthetic
+       * secondary press fell back to gtk_button_clicked() the same way;
+       * a widget whose right-click behavior lives in a gesture uses the
+       * stored-gesture branch above). */
+      switch(effect)
+      {
+        case DT_ACTION_EFFECT_TOGGLE:
+        case DT_ACTION_EFFECT_TOGGLE_CTRL:
+        case DT_ACTION_EFFECT_ON:
+        case DT_ACTION_EFFECT_OFF:
+        case DT_ACTION_EFFECT_ON_CTRL:
+        case DT_ACTION_EFFECT_TOGGLE_RIGHT:
+        case DT_ACTION_EFFECT_ON_RIGHT:
+          /* gtk_widget_activate() only acts on a realized widget, so a
+           * toggle in a module that has never been expanded (never realized)
+           * would be a silent no-op.  Realize it first, as the pre-gtk4-prep
+           * code did before the synthetic press+release was dropped. */
+          if(!gtk_widget_get_realized(GTK_WIDGET(target)))
+            gtk_widget_realize(GTK_WIDGET(target));
+          gtk_widget_activate(GTK_WIDGET(target));
+          break;
+        default:
+          break;
+      }
+    }
 
     value = gtk_toggle_button_get_active(target);
 
@@ -261,28 +326,39 @@ static float _action_process_button(gpointer target,
      && gtk_widget_is_sensitive(target)
      && gtk_widget_get_ancestor(target, GTK_TYPE_WINDOW))
   {
-    if(!gtk_widget_get_realized(target)) gtk_widget_realize(target);
-
-    if(effect != DT_ACTION_EFFECT_ACTIVATE
-      || !g_signal_handler_find(target, G_SIGNAL_MATCH_ID,
-                                g_signal_lookup("clicked", gtk_button_get_type()),
-                                0, NULL, NULL, NULL)
-      || !gtk_widget_activate(GTK_WIDGET(target)))
+    GtkGestureSingle *const gesture = g_object_get_data(G_OBJECT(target), DT_ACTION_GESTURE_KEY);
+    if(gesture)
     {
-      GdkEvent *event = gdk_event_new(GDK_BUTTON_PRESS);
-      event->button.state = effect == DT_ACTION_EFFECT_ACTIVATE_CTRL
-                          ? GDK_CONTROL_MASK : 0;
-      event->button.button = effect == DT_ACTION_EFFECT_ACTIVATE_RIGHT
-                          ? GDK_BUTTON_SECONDARY : GDK_BUTTON_PRIMARY;
-
-      event->button.window = gtk_widget_get_window(target);
-      g_object_ref(event->button.window);
-
-      gtk_widget_event(target, event);
-      event->type = GDK_BUTTON_RELEASE;
-      gtk_widget_event(target, event);
-
-      gdk_event_free(event);
+      /* same as _action_process_toggle: the widget's activation lives in a
+       * gesture controller, which synthetic GdkEvents never reach; carry the
+       * action effect as button/state (see _action_effect_button_state) */
+      g_object_set_data(G_OBJECT(gesture), DT_ACTION_GESTURE_SYNTH_KEY,
+                        GINT_TO_POINTER(_action_effect_button_state(effect, FALSE)));
+      g_signal_emit_by_name(gesture, "pressed", 1, 0.0, 0.0);
+      g_object_set_data(G_OBJECT(gesture), DT_ACTION_GESTURE_SYNTH_KEY, NULL);
+    }
+    else
+    {
+      /* no stored gesture: a plain GTK button.  Its internal press gesture
+       * is primary-button-only, so the old synthetic press+release ran the
+       * "clicked" handler for the primary/ctrl variants and reached the
+       * then-still-connected button-press-event handlers for the right
+       * variant; those handlers now live in gestures (routed through the
+       * stored-gesture branch above), so on a plain button a right-click
+       * shortcut has nothing left to reach and stays a no-op.
+       * gtk_widget_activate() is the GTK4-compatible equivalent of the
+       * primary press+release.  However it only schedules a click when the
+       * button is realized, so a button in a module that has never been
+       * expanded (and thus never realized) would be a silent no-op (see
+       * #21837: Ctrl+A on a collapsed selection module).  Realize it first,
+       * as the pre-gtk4-prep code did before the synthetic press+release
+       * was dropped. */
+      if(effect == DT_ACTION_EFFECT_ACTIVATE || effect == DT_ACTION_EFFECT_ACTIVATE_CTRL)
+      {
+        if(!gtk_widget_get_realized(GTK_WIDGET(target)))
+          gtk_widget_realize(GTK_WIDGET(target));
+        gtk_widget_activate(GTK_WIDGET(target));
+      }
     }
   }
 
@@ -398,8 +474,52 @@ const dt_action_def_t dt_action_def_value
 const dt_action_def_t _action_def_dummy
   = { };
 
+// actions that moved, by the path a shortcut was saved under. Such a shortcut
+// is bound to the new action and saved again under its path. The mask
+// manager went with the flexi masks panel, which took over its controls
+static const struct
+{
+  const gchar *from, *to;
+} _action_moved[] = {
+  { "lib/masks", "lib/masks_flexi_host" },
+  { "lib/masks/shapes/add gradient", "iop/blend/shapes/add gradient" },
+  { "lib/masks/shapes/add path", "iop/blend/shapes/add path" },
+  { "lib/masks/shapes/add ellipse", "iop/blend/shapes/add ellipse" },
+  { "lib/masks/shapes/add circle", "iop/blend/shapes/add circle" },
+  { "lib/masks/shapes/add brush", "iop/blend/shapes/add brush" },
+  { "lib/masks/shapes/add object", "iop/blend/shapes/add AI object" },
+  { "lib/masks/properties/opacity", "iop/blend/properties/opacity" },
+  { "lib/masks/properties/size", "iop/blend/properties/size" },
+  { "lib/masks/properties/hardness", "iop/blend/properties/hardness" },
+  { "lib/masks/properties/feather", "iop/blend/properties/fade-out border" },
+  { "lib/masks/properties/rotation", "iop/blend/properties/rotation" },
+  { "lib/masks/properties/curvature", "iop/blend/properties/curvature" },
+  { "lib/masks/properties/compression", "iop/blend/properties/compression" },
+  { "lib/masks/properties/cleanup", "iop/blend/properties/cleanup" },
+  { "lib/masks/properties/refine mask boundary", "iop/blend/properties/refine mask boundary" },
+  // the brush preference took this path from the AI object's smoothing slider,
+  // being defined after it
+  { "lib/masks/properties/smoothing", "iop/blend/properties/brush smoothing" },
+  { "lib/masks/properties/pressure", "iop/blend/properties/brush pressure" },
+  { "lib/masks/properties/shrink or grow", "iop/blend/properties/shrink or grow" },
+  { "iop/blend/tools/show and edit mask elements", "iop/blend/tools/edit on canvas" },
+  // matched before unescaping: the label's "/" is saved as "@<"
+  { "iop/blend/tools/display mask and@<or color channel", "iop/blend/tools/display mask" },
+  { "iop/blend/mask opacity", "iop/blend/mask brightness" },
+  { "iop/blend/tools/toggle polarity of drawn mask",
+    "iop/blend/masks/invert output of selected group" },
+  { "iop/blend/tools/toggle polarity of raster mask", "iop/blend/masks/invert selected element" },
+};
+
 static dt_action_t *_action_find(const gchar *action_name)
 {
+  for(size_t i = 0; i < G_N_ELEMENTS(_action_moved); i++)
+    if(!strcmp(action_name, _action_moved[i].from))
+    {
+      action_name = _action_moved[i].to;
+      break;
+    }
+
   gchar **path = g_strsplit(action_name, "/", 0);
   for(gchar **cur = path; *cur; cur++)
   {
@@ -936,7 +1056,13 @@ static gchar *_shortcut_lua_command(GtkWidget *widget,
           break;
         }
       }
-      s->effect = DT_ACTION_EFFECT_COMBO_SEPARATOR + 1 + value;
+      // entries added by hand can carry arbitrary data, including negative
+      // values (spektrafilm's paper combo uses -1 and -2 for its "auto" and
+      // "none" entries). only data that is a usable list position can be turned
+      // into an item effect; anything else would index the effects table below
+      // out of bounds.
+      if(value >= 0)
+        s->effect = DT_ACTION_EFFECT_COMBO_SEPARATOR + 1 + value;
     }
     else
     {
@@ -947,7 +1073,9 @@ static gchar *_shortcut_lua_command(GtkWidget *widget,
 
   const gchar *cef = elements ? _action_find_effect_combo(s->action, &elements[elem], s->effect) : NULL;
   const gchar *el = elements ? elements[elem].name : NULL;
-  const gchar **ef = elements && s->effect >= 0 ? elements[elem].effects : NULL;
+  const gchar **ef = elements && s->effect >= 0 ? elements[elem].effects : NULL;    
+  for(int i = 0; ef && i <= s->effect; i++)
+    if(!ef[i]) { ef = NULL; break; } // effect not covered by this element's table
   const gchar *quo = elements ? "\", \"" : "";
 
   return g_strdup_printf("dt.gui.action(\"%s%s%s%s%s%s\", %.3f%s)\n",
@@ -956,13 +1084,34 @@ static gchar *_shortcut_lua_command(GtkWidget *widget,
                          s->speed, instance_string);
 }
 
-void _shortcut_copy_lua(GtkWidget *widget, dt_shortcut_t *shortcut, gchar *preset_name)
+static void _shortcut_copy_lua(GtkWidget *widget, dt_shortcut_t *shortcut, gchar *preset_name)
 {
   gchar *lua_command = _shortcut_lua_command(widget, shortcut);
   if(!lua_command) return;
   gtk_clipboard_set_text(gtk_clipboard_get_default(gdk_display_get_default()), lua_command, -1);
   dt_control_log(_("Lua script command copied to clipboard:\n\n<tt>%s</tt>"), lua_command);
   g_free(lua_command);
+}
+
+gchar *dt_shortcut_action_keys(dt_action_t *action,
+                               const dt_view_type_flags_t views,
+                               const gchar *separator)
+{
+  if(!action) return NULL;
+  GString *keys = NULL;
+  for(GSequenceIter *iter = g_sequence_get_begin_iter(darktable.control->shortcuts);
+      !g_sequence_iter_is_end(iter);
+      iter = g_sequence_iter_next(iter))
+  {
+    dt_shortcut_t *s = g_sequence_get(iter);
+    if(s->action != action || !(s->views & views)) continue;
+    if(keys)
+      g_string_append(keys, separator);
+    else
+      keys = g_string_new(NULL);
+    g_string_append(keys, _shortcut_description(s));
+  }
+  return keys ? g_string_free(keys, FALSE) : NULL;
 }
 
 void dt_shortcut_copy_lua(dt_action_t *action, gchar *preset_name)
@@ -1013,6 +1162,61 @@ static void _tooltip_reposition(GtkWidget *widget,
     gdk_window_move(window, nx, wy);
 }
 
+#if !GTK_CHECK_VERSION(4, 0, 0)
+// GTK3 on Wayland keeps each GtkPopover in its own subsurface.
+// gtk_tooltip_position measures from that subsurface, not the main window.
+// Adjust the tooltip anchor from the pointer position when the content maps.
+typedef struct _tooltip_anchor_t
+{
+  GdkRectangle rect;
+  gint dx;
+} _tooltip_anchor_t;
+
+static _tooltip_anchor_t *_tooltip_popover_anchor(GtkWidget *widget,
+                                                  const gint x,
+                                                  const gint y)
+{
+  // the placement of gtk_tooltip_position, with the pointer where it is
+  GtkWidget *toplevel = gtk_widget_get_toplevel(widget);
+  GtkAllocation top;
+  gtk_widget_get_allocation(toplevel, &top);
+  _tooltip_anchor_t *anchor = g_new0(_tooltip_anchor_t, 1);
+  GdkRectangle *rect = &anchor->rect;
+  gint px = 0, py = 0;
+  gtk_widget_translate_coordinates(widget, toplevel, top.x, top.y, &rect->x, &rect->y);
+  gtk_widget_translate_coordinates(widget, toplevel, top.x + x, top.y + y, &px, &py);
+
+  gint cursor_size = 0;
+  g_object_get(gtk_widget_get_settings(widget),
+               "gtk-cursor-theme-size", &cursor_size, NULL);
+  if(!cursor_size)
+    cursor_size = gdk_display_get_default_cursor_size(gtk_widget_get_display(widget));
+  const gint padding = MAX(4, cursor_size - 32);
+  rect->x -= padding;
+  rect->y -= padding;
+  rect->width = gtk_widget_get_allocated_width(widget) + 2 * padding;
+  rect->height = gtk_widget_get_allocated_height(widget) + 2 * padding;
+
+  if(rect->height > 48 + 8)
+    *rect = (GdkRectangle){ px - 4, py - 4, cursor_size, cursor_size };
+  else
+  {
+    const gint distance = px - (rect->x + rect->width / 2);
+    anchor->dx = distance > 32 ? distance - 32 : distance < -32 ? distance + 32 : 0;
+  }
+  return anchor;
+}
+
+static void _tooltip_move_to_anchor(GtkWidget *content,
+                                    const _tooltip_anchor_t *anchor)
+{
+  GdkWindow *window = gtk_widget_get_window(gtk_widget_get_toplevel(content));
+  if(window)
+    gdk_window_move_to_rect(window, &anchor->rect, GDK_GRAVITY_SOUTH, GDK_GRAVITY_NORTH,
+                            GDK_ANCHOR_FLIP_Y | GDK_ANCHOR_SLIDE_X, anchor->dx, 0);
+}
+#endif
+
 gboolean dt_shortcut_tooltip_callback(GtkWidget *widget,
                                       gint x,
                                       gint y,
@@ -1030,6 +1234,12 @@ gboolean dt_shortcut_tooltip_callback(GtkWidget *widget,
      || darktable.bauhaus->current
      || darktable.gui->hide_tooltips)
     return FALSE;
+
+#if !GTK_CHECK_VERSION(4, 0, 0)
+  // GTK anchors the tooltip to the widget it queried, which the code below may replace by its parent
+  GtkWidget *const queried = widget;
+  const gint queried_x = x, queried_y = y;
+#endif
 
   gchar *markup_text = NULL;
   gchar *description = NULL;
@@ -1226,6 +1436,14 @@ gboolean dt_shortcut_tooltip_callback(GtkWidget *widget,
   gtk_widget_show_all(vbox);
   gtk_tooltip_set_custom(tooltip, vbox);
   g_signal_connect(G_OBJECT(vbox), "size-allocate", G_CALLBACK(_tooltip_reposition), widget);
+#if !GTK_CHECK_VERSION(4, 0, 0)
+  if(!keyboard_mode
+     && dt_gui_get_session_type() == DT_GUI_SESSION_WAYLAND
+     && gtk_widget_get_ancestor(queried, GTK_TYPE_POPOVER))
+    g_signal_connect_data(G_OBJECT(vbox), "map", G_CALLBACK(_tooltip_move_to_anchor),
+                          _tooltip_popover_anchor(queried, queried_x, queried_y),
+                          (GClosureNotify)g_free, 0);
+#endif
 
   return TRUE;
 }
@@ -2066,7 +2284,21 @@ static gboolean _view_key_pressed_cb(GtkEventControllerKey *controller,
     }
   }
 
-  return dt_gui_search_start(widget, (GdkEventKey *)gtk_get_current_event(), GTK_SEARCH_ENTRY(search_entry));
+  GdkEvent *event = dt_gui_get_current_event(GTK_EVENT_CONTROLLER(controller));
+#if GTK_CHECK_VERSION(4, 0, 0)
+  /* GTK4: gtk_search_entry_handle_event() is gone -- the entry handles key
+   * events through its internal controller.  Focus the entry so typing
+   * lands in it; the very first keystroke is consumed (TODO: feed it via
+   * gdk_keyval_to_unicode for full search-as-you-type parity). */
+  (void)event;
+  gtk_entry_grab_focus_without_selecting(GTK_ENTRY(search_entry));
+  return TRUE;
+#else
+  const gboolean handled =
+    dt_gui_search_start(widget, (GdkEventKey *)event, GTK_SEARCH_ENTRY(search_entry));
+  gdk_event_free(event);
+  return handled;
+#endif
 }
 
 static void _add_shortcuts_to_tree()
@@ -2873,6 +3105,7 @@ static void _import_extended_clicked(GtkButton *button, gpointer user_data)
       const int lang_len = underscore ? underscore - langcode : strlen(langcode);
       gchar *localized_file = g_strdup_printf("darktable/shortcutsrc.%.*s", lang_len, langcode);
       gchar *shortcuts_file = g_build_filename(sharedir, localized_file, NULL);
+      g_free(localized_file);
       if(g_file_test(shortcuts_file, G_FILE_TEST_EXISTS))
       {
         dt_print(DT_DEBUG_PARAMS,"load localized shortcuts from %s", shortcuts_file);
@@ -2906,7 +3139,30 @@ static void _notice_clicked(GtkWidget *button,
  * in its own key handling before any handler connected on the treeview runs,
  * so the delete keys are intercepted at the toplevel instead, before the key
  * event is propagated to the focus widget.  GDK_KEY_BackSpace is the delete
- * key on macOS. */
+ * key on macOS.  On GTK4 a CAPTURE-phase key controller on the toplevel runs
+ * before the focus widget's own handling, which is the same "first"
+ * position; GTK3 delivers key events to the toplevel and then propagates
+ * them, so there the classic signal is connected instead (see
+ * _shortcuts_view_realized). */
+#if GTK_CHECK_VERSION(4, 0, 0)
+static gboolean _shortcuts_dialog_key_pressed(GtkEventControllerKey *controller,
+                                              guint keyval,
+                                              guint keycode,
+                                              GdkModifierType state,
+                                              gpointer user_data)
+{
+  GtkWidget *toplevel = dt_gui_get_widget(controller);
+  GtkWidget *view = user_data;
+
+  if(gtk_window_get_focus(GTK_WINDOW(toplevel)) != view)
+    return GDK_EVENT_PROPAGATE;
+
+  if(keyval == GDK_KEY_Delete || keyval == GDK_KEY_KP_Delete || keyval == GDK_KEY_BackSpace)
+    return _shortcut_delete_selected(GTK_TREE_VIEW(view));
+
+  return GDK_EVENT_PROPAGATE;
+}
+#else
 static gboolean _shortcuts_dialog_key_pressed(GtkWidget *widget,
                                               GdkEventKey *event,
                                               gpointer user_data)
@@ -2924,6 +3180,7 @@ static gboolean _shortcuts_dialog_key_pressed(GtkWidget *widget,
 
   return FALSE;
 }
+#endif
 
 static void _shortcuts_view_realized(GtkWidget *widget, gpointer user_data)
 {
@@ -2935,8 +3192,16 @@ static void _shortcuts_view_realized(GtkWidget *widget, gpointer user_data)
   if(!toplevel || !GTK_IS_WINDOW(toplevel))
     return;
 
+#if GTK_CHECK_VERSION(4, 0, 0)
+  GtkEventController *controller = gtk_event_controller_key_new();
+  gtk_event_controller_set_propagation_phase(controller, GTK_PHASE_CAPTURE);
+  dt_gui_add_controller(toplevel, controller);
+  g_signal_connect(controller, "key-pressed",
+                   G_CALLBACK(_shortcuts_dialog_key_pressed), widget);
+#else
   g_signal_connect(G_OBJECT(toplevel), "key-press-event",
                    G_CALLBACK(_shortcuts_dialog_key_pressed), widget);
+#endif
 }
 
 GtkWidget *dt_shortcuts_prefs(GtkWidget *widget)
@@ -3653,6 +3918,12 @@ static gboolean _pointer_grabbed = FALSE; // seat grab held by the shortcut mach
                                           //  report it, see dt_gui_pointer_is_grabbed)
 #endif
 static guint _last_time = 0; // time of key or button press
+
+/* a hold key's delayed release is pending (see dt_shortcut_key_release):
+ * the hold action was already dispatched (ON at engage, OFF at release),
+ * so the delayed release must not re-run the shortcut pass, it only has
+ * to clear _sc once the double/triple-press window elapses */
+static gboolean _hold_release_pending = FALSE;
                              // used to determine if release should trigger action
                              // set to 0 by any intermediate move (so no action on release)
 static guint  _last_mapping_time = 0;
@@ -3883,7 +4154,9 @@ static gboolean _shortcut_match(dt_shortcut_t *f,
     f->action = matched_action;
   }
 
-  return f->action != NULL && !f->move;
+  // modifiers that neither the shortcut nor a fallback consumed mean the
+  // combination is unassigned, not the base shortcut pressed carelessly
+  return f->action != NULL && !f->move && !f->mods;
 }
 
 
@@ -3901,6 +4174,19 @@ static float _process_action(dt_action_t *action,
     owner = owner->owner;
 
   gpointer action_target = action->type == DT_ACTION_TYPE_LIB ? action : action->target;
+
+  // the add-shape and add-parametric actions are shared by all modules and
+  // their target is whichever module was focused last (see
+  // dt_accel_connect_instance_iop), so with nothing focused a shortcut would
+  // add to a module the user has left. Clicking the button is not affected
+  if(action->owner
+     && action->owner->owner == &darktable.control->actions_blend
+     && !g_strcmp0(action->owner->id, "shapes")
+     && !dt_dev_gui_module())
+  {
+    dt_toast_log(_("no module is focused"));
+    return return_value;
+  }
 
   if(owner && owner->type == DT_ACTION_TYPE_IOP)
   {
@@ -4110,8 +4396,12 @@ static float _process_shortcut(float move_size)
             "  [_process_shortcut] processing shortcut: %s",
             _shortcut_description(&_sc));
 
-  if(DT_PERFORM_ACTION(move_size) &&
-     gtk_widget_has_grab(darktable.control->progress_system.proxy.module->widget))
+  // the progress proxy is only set while the backgroundjobs lib module is alive,
+  // so it is NULL early in startup and again after that module is cleaned up.
+  // no proxy means nothing holds the grab.
+  if(DT_PERFORM_ACTION(move_size)
+     && darktable.control->progress_system.proxy.module
+     && gtk_widget_has_grab(darktable.control->progress_system.proxy.module->widget))
   {
     if(_sc.key_device == DT_SHORTCUT_DEVICE_KEYBOARD_MOUSE && _sc.key == GDK_KEY_Escape)
       dt_print(DT_DEBUG_ALWAYS, "this should cancel the running blocking job"); // TODO
@@ -4256,6 +4546,16 @@ static inline void _interrupt_delayed_release(gboolean trigger)
     g_source_remove(_timeout_source);
     _timeout_source = 0;
 
+    if(_hold_release_pending)
+    {
+      /* the cancelled delayed release belonged to a hold key whose action
+       * was already dispatched: drop the stale key so the reentrant pass
+       * below (and any later shortcut lookup) cannot re-dispatch it */
+      _hold_release_pending = FALSE;
+      _sc.key_device = 0;
+      _sc.key = 0;
+    }
+
     if(trigger)
       dt_shortcut_move(DT_SHORTCUT_DEVICE_KEYBOARD_MOUSE, 0, DT_SHORTCUT_MOVE_NONE, 1);
 
@@ -4373,23 +4673,66 @@ static gboolean _key_release_delayed(gpointer timed_out)
 {
   _timeout_source = 0;
 
-  /* Run the shortcut action while the seat grab is still held, then
-   * ungrab.  Releasing the grab first makes GDK (and on macOS the
-   * Quartz tracking-area machinery behind it) emit phantom crossing
-   * events between the ungrab and the action, which clear the
-   * mouse-over id and make 'prioritize hovered image' fall back to the
-   * selection (see #21729).  This also matches the double/triple-press
-   * path, which processes the action while the grab is held. */
-  if(!timed_out)
+  /* Run the shortcut action after releasing the seat grab, but keep the
+   * grabbed flag set while the action runs.  Releasing the grab first
+   * lets modal dialogs opened by the action receive mouse events: on
+   * Windows the grab is implemented as SetCapture() on the main window
+   * and swallows every mouse event for as long as it is held, so a dialog
+   * opened synchronously inside the action (selective copy/paste, ...)
+   * would be dead to the mouse for its whole lifetime (see #21777).
+   * The flag is what dt_gui_pointer_is_grabbed() checks first, so the
+   * lighttable hover handlers keep filtering the phantom crossing events
+   * that the ungrab makes GDK (and on macOS the Quartz tracking-area
+   * machinery behind it) synthesize around the action -- both while the
+   * action runs and while a dialog's nested main loop is dispatching
+   * them -- and 'prioritize hovered image' keeps working (see #21729).
+   * The flag is cleared right after the action: any crossings still in
+   * the queue then settle to the correct mouse-over (the enter event
+   * re-sets it), so filtering them is no longer needed.
+   *
+   * A released hold key's action was already dispatched by the hold
+   * machinery (DT_ACTION_EFFECT_ON at engage, OFF at release), so for it
+   * this pass only has to clear _sc, not re-run the shortcut. */
+  const gboolean hold_release = _hold_release_pending;
+  _hold_release_pending = FALSE;
+
+  if(!timed_out && !hold_release)
+  {
+#if !GTK_CHECK_VERSION(4, 0, 0)
+    /* GTK3 only: releasing the grab is done here (not in
+     * _ungrab_grab_widget()) so it happens before the action runs; the
+     * flag stays set until the action returns (see comment above).
+     * GTK4 migration: delete -- GTK4 removed the grab APIs, so there is
+     * nothing to release and no flag to keep. */
+    if(_pointer_grabbed)
+      gdk_seat_ungrab(gdk_display_get_default_seat(gdk_display_get_default()));
+#endif
+
     dt_shortcut_move(DT_SHORTCUT_DEVICE_KEYBOARD_MOUSE, 0, DT_SHORTCUT_MOVE_NONE, 1);
+
+#if !GTK_CHECK_VERSION(4, 0, 0)
+    _pointer_grabbed = FALSE;
+#endif
+  }
 
   if(!_pressed_keys)
     _ungrab_grab_widget();
 
-  if(!_pressed_keys)
+  if(!_pressed_keys && !_hold_keys)
     _sc = (dt_shortcut_t) { 0 };
   else
+  {
+    if(!_pressed_keys)
+    {
+      /* another hold key is still engaged: keep its identity in _sc, or
+       * move/scroll routing stops matching while it is held (see
+       * _shortcut_closest_match, which requires c->key == s->key) */
+      const dt_device_key_t *held = _hold_keys->data;
+      _sc.key_device = held->key_device;
+      _sc.key = held->key;
+    }
     _sc.press &= ~DT_SHORTCUT_LONG;
+  }
 
   return G_SOURCE_REMOVE;
 }
@@ -4405,6 +4748,27 @@ static gboolean _button_release_delayed(gpointer timed_out)
   _sc.click = 0;
 
   return G_SOURCE_REMOVE;
+}
+
+// returns TRUE if a double or triple press shortcut is registered for this key
+static gboolean _shortcut_has_double_triple_press(const dt_input_device_t id,
+                                           const guint key,
+                                           const guint mods)
+{
+  dt_shortcut_t s = { .key_device = id, .key = key, .mods = mods,
+                      .press = DT_SHORTCUT_DOUBLE,
+                      .views = dt_view_get_current() };
+
+  GSequenceIter *multi = _shortcut_search(&s, GINT_TO_POINTER(s.views));
+  for(int checks = 2; checks--; multi = g_sequence_iter_prev(multi))
+  {
+    if(g_sequence_iter_is_end(multi)) continue;
+
+    const dt_shortcut_t *m = g_sequence_get(multi);
+    if(m->key_device == id && m->key == key && m->press >= DT_SHORTCUT_DOUBLE)
+      return TRUE;
+  }
+  return FALSE;
 }
 
 void dt_shortcut_key_press(const dt_input_device_t id,
@@ -4463,16 +4827,50 @@ void dt_shortcut_key_press(const dt_input_device_t id,
                          _shortcut_description(s), _action_description(s, 2));
         }
 
-        definition->process(NULL, s->element, DT_ACTION_EFFECT_ON, 1);
+        // a hold action must not swallow a fast consecutive press of the same
+        // key: if the key was held and released within the double-click time
+        // window and a double/triple press shortcut exists for it, fall
+        // through to the normal handling below which turns this press into a
+        // double/triple press instead of re-engaging the hold
+        if(key == _sc.key
+           && _sc.key_device == id
+           && !dt_gui_long_click(time, _last_time)
+           && _shortcut_has_double_triple_press(id, key, _sc.mods))
+        {
+          /* fall through to the double/triple press detection below */
+        }
+        else
+        {
+          /* a still-armed delayed release (a previous tap or click whose
+           * double/triple-press window has not elapsed) must be flushed
+           * against the state that armed it before the hold takes over
+           * _sc: the pending pass requires c->key == s->key, so left armed
+           * it would resolve against the hold key and re-run the hold
+           * action, silently disengaging the hold while the key is still
+           * held.  A same-key re-engage inside the window is that pending
+           * pass's own double-press check: just cancel it -- the hold
+           * action already ran OFF at the previous release. */
+          const gboolean same_key_reengage
+            = key == _sc.key && _sc.key_device == id && !dt_gui_long_click(time, _last_time);
+          _interrupt_delayed_release(!same_key_reengage);
 
-        this_key.hold_def = definition;
-        this_key.hold_element = s->element;
+          definition->process(NULL, s->element, DT_ACTION_EFFECT_ON, 1);
 
-        dt_device_key_t *new_key = calloc(1, sizeof(dt_device_key_t));
-        *new_key = this_key;
-        _hold_keys = g_slist_prepend(_hold_keys, new_key);
+          this_key.hold_def = definition;
+          this_key.hold_element = s->element;
 
-        return;
+          dt_device_key_t *new_key = calloc(1, sizeof(dt_device_key_t));
+          *new_key = this_key;
+          _hold_keys = g_slist_prepend(_hold_keys, new_key);
+
+          // remember the press so a fast consecutive press of this key
+          // (after release) can be detected as a double/triple press below
+          _last_time = time;
+          _sc.key_device = id;
+          _sc.key = key;
+
+          return;
+        }
       }
     }
 
@@ -4563,6 +4961,16 @@ static void _delay_for_double_triple(guint time, guint is_key)
   {
     _ungrab_grab_widget();
     dt_control_log(_("short key press resets stuck keys"));
+    /* this early return skips the _key_release_delayed() cleanup a hold
+     * release scheduled: drop its flag and the stale hold key now, or the
+     * next ordinary key release would silently skip its own dispatch and
+     * every later move/scroll would resolve as "that key + move" */
+    if(_hold_release_pending)
+    {
+      _hold_release_pending = FALSE;
+      _sc.key_device = 0;
+      _sc.key = 0;
+    }
     return;
   }
   else if((is_key ? _sc.press : _sc.click) & DT_SHORTCUT_TRIPLE)
@@ -4624,6 +5032,26 @@ void dt_shortcut_key_release(const dt_input_device_t id,
     held_data->hold_def->process(NULL, held_data->hold_element, DT_ACTION_EFFECT_OFF, 1);
     g_free(held_data);
     _hold_keys = g_slist_delete_link(_hold_keys, held_key);
+
+    /* schedule the same delayed cleanup a normal key release gets: the
+     * double/triple-press window needs _sc.key to stay valid for a fast
+     * consecutive press of this key, but once the window elapses _sc must
+     * be cleared -- otherwise the stale hold key makes every later
+     * move/scroll shortcut resolve as "that key + move" (see
+     * _shortcut_closest_match, which requires c->key == s->key) and wheel
+     * scrolling stops working.  The HOLD_OFF dispatch above replaces the
+     * shortcut pass the delayed release would otherwise run, so flag it.
+     * Also cancel a still-armed delayed release before scheduling the
+     * cleanup, mirroring the ordinary key release below: otherwise the
+     * g_timeout_add() in _delay_for_double_triple() overwrites the live
+     * source handle and the orphaned pass later runs an extra cleanup.
+     * Never trigger it here (TRUE): it would resolve against the hold key
+     * still in _sc and re-run the hold action; the OFF dispatch above
+     * already replaced that pass. */
+    _interrupt_delayed_release(FALSE);
+
+    _hold_release_pending = TRUE;
+    _delay_for_double_triple(time, -1);
     return;
   }
 
@@ -4631,6 +5059,12 @@ void dt_shortcut_key_release(const dt_input_device_t id,
   if(stored_key)
   {
     _interrupt_delayed_release(TRUE);
+
+    // the pending release just run can complete a shortcut being defined in
+    // the preferences dialog, and _ungrab_grab_widget() then frees every
+    // pressed key, this one included
+    stored_key = g_slist_find_custom(_pressed_keys, &this_key, _cmp_key);
+    if(!stored_key) return;
 
     g_free(stored_key->data);
     _pressed_keys = g_slist_delete_link(_pressed_keys, stored_key);
@@ -4695,7 +5129,7 @@ gboolean dt_shortcut_dispatcher(GtkWidget *w,
        && (s.action || (s.action = dt_action_widget(darktable.control->mapping_widget))))
     {
       int delta;
-      if(middle_click || dt_gui_get_scroll_unit_delta(&event->scroll, &delta))
+      if(middle_click || dt_gui_get_scroll_unit_delta((const GdkEvent *)event, &delta))
       {
         // delta < 0 -> 10^(-delta) increases speed
         s.speed = middle_click ? -1 : powf(10.0f, -delta);
@@ -4724,8 +5158,18 @@ gboolean dt_shortcut_dispatcher(GtkWidget *w,
        (dt_gdk_event_get_type(event) == GDK_KEY_PRESS || dt_gdk_event_get_type(event) == GDK_KEY_RELEASE))
     {
       GtkWidget *focused_widget = gtk_window_get_focus(GTK_WINDOW(w));
-      if(focused_widget)
+      // a focus widget that is not realized, such as one inside a collapsed
+      // module, cannot take the event: gtk_widget_event() then fails its
+      // assertion and reports the event as handled, so no shortcut would run
+      if(focused_widget && gtk_widget_get_realized(focused_widget))
       {
+        // macOS: Command+C/X/V/A on an editable must not reach the widget's
+        // own handlers -- GTK's IM filtering does not skip Mod2 the way it
+        // skips Control, so the modifier is dropped and a bare character is
+        // committed into the buffer instead
+        if(dt_gui_osx_edit_command(focused_widget, event))
+          return TRUE;
+
         if(gtk_widget_event(focused_widget, event))
           return TRUE;
 
@@ -4748,6 +5192,18 @@ gboolean dt_shortcut_dispatcher(GtkWidget *w,
        || dt_gdk_event_get_keyval(event) == GDK_KEY_Meta_R
        || dt_gdk_event_get_keyval(event) == GDK_KEY_ISO_Level3_Shift)
       return FALSE;
+
+    // Escape cancels the shape being drawn ahead of the lookup below, so it
+    // wins over any user binding of Escape while a shape is being added, and
+    // reaches that binding as usual the rest of the time
+    if(!_sc.action && !dt_action_widget(darktable.control->mapping_widget)
+       && (dt_view_get_current() & DT_VIEW_DARKROOM)
+       && dt_gdk_event_get_keyval(event) == GDK_KEY_Escape
+       && !_key_modifiers_clean(dt_gdk_event_get_state(event)))
+    {
+      if(dt_masks_cancel_creation())
+        return TRUE;
+    }
 
     dt_shortcut_t ko = { .key = _fix_keyval(event) - 1, .press = 0x7,
                          .views = dt_view_get_current() };
@@ -4797,7 +5253,7 @@ gboolean dt_shortcut_dispatcher(GtkWidget *w,
     _sc.mods = _key_modifiers_clean(dt_gdk_event_get_state(event));
 
     int delta_x, delta_y;
-    if(dt_gui_get_scroll_unit_deltas(&event->scroll, &delta_x, &delta_y))
+    if(dt_gui_get_scroll_unit_deltas((const GdkEvent *)event, &delta_x, &delta_y))
     {
       if(delta_x)
         dt_shortcut_move(DT_SHORTCUT_DEVICE_KEYBOARD_MOUSE, dt_gdk_event_get_time(event),

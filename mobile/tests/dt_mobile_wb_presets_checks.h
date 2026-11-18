@@ -79,7 +79,7 @@ static int mobile_wb_presets_catalog_checks(void)
        && !strcmp(wb->name, "daylight") && wb->tuning == 0) { exact = i; break; }
   }
   WB_CATALOG_CHECK(exact >= 1 && exact + 1 < dt_wb_presets_count());
-  WB_CATALOG_CHECK(set_preset(module, 6, 0) == 1 && *preset == 6);
+  WB_CATALOG_CHECK(set_preset(module, 6, 0) == 1 && *preset == 5);
   const dt_wb_data *original = dt_wb_preset(exact);
   WB_CATALOG_CHECK(*red == (float)original->channels[0] && *green == (float)original->channels[1]
     && *blue == (float)original->channels[2] && !memcmp(fourth, &inactive, sizeof(inactive)));
@@ -89,7 +89,7 @@ static int mobile_wb_presets_catalog_checks(void)
     && json_object_get_int_member(catalog, "selectedTuning") == 0);
   dt_wb_data interpolated = { .tuning = 1 };
   dt_wb_preset_interpolate(original, dt_wb_preset(exact + 1), &interpolated);
-  WB_CATALOG_CHECK(set_preset(module, 6, 1) == 1 && *preset == 6);
+  WB_CATALOG_CHECK(set_preset(module, 6, 1) == 1 && *preset == 5);
   WB_CATALOG_CHECK(*red == (float)interpolated.channels[0] && *green == (float)interpolated.channels[1]
     && *blue == (float)interpolated.channels[2] && !memcmp(fourth, &inactive, sizeof(inactive)));
   WB_CATALOG_METADATA();
@@ -104,7 +104,7 @@ static int mobile_wb_presets_catalog_checks(void)
     WB_CATALOG_CHECK(json_object_get_null_member(catalog, "selectedPreset")
       && json_object_get_null_member(catalog, "selectedTuning"));
   }
-  *preset = 6; *red += 0.125f;
+  *preset = 5; *red += 0.125f;
   WB_CATALOG_METADATA();
   catalog = json_node_get_object(json_parser_get_root(parser));
   WB_CATALOG_CHECK(json_object_get_null_member(catalog, "selectedPreset")
