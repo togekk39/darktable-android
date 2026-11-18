@@ -1,0 +1,19 @@
+--- a/src/common/darktable.c
++++ b/src/common/darktable.c
+@@ -28,6 +28,7 @@
+ #include "common/collection.h"
+ #include "common/colorspaces.h"
+ #include "common/darktable.h"
++#include "mobile/adapters/common/style_location.h"
+ #include "develop/masks/check.h"
+ #include "develop/masks/persist.h"
+ #include "develop/masks/harvest.h"
+@@ -2266,7 +2267,7 @@
+   }
+ 
+   // import default styles from shared directory
+-  gchar *styledir = g_build_filename(sharedir, "darktable/styles", NULL);
++  gchar *styledir = dt_mobile_style_directory(sharedir);
+   if(styledir)
+   {
+     dt_splash_screen_set_progress(_("importing default styles"));

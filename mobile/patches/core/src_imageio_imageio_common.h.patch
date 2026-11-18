@@ -1,0 +1,11 @@
+--- a/src/imageio/imageio_common.h
++++ b/src/imageio/imageio_common.h
+@@ -134,6 +134,8 @@
+                                  dt_export_metadata_t *metadata,
+                                  const int history_end);
+ 
++#include "imageio/mobile.h"
++
+ // general, efficient buffer flipping function using memcopies
+ void dt_imageio_flip_buffers(char *out,
+                              const char *in,

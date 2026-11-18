@@ -1,0 +1,73 @@
+--- a/src/iop/toneequal.c
++++ b/src/iop/toneequal.c
+@@ -810,6 +810,8 @@
+                                    b_y);
+ }
+ 
++#include "mobile/adapters/iop/toneequal-sample.inc"
++
+ /***
+  * Exposure compensation computation
+  *
+@@ -1199,6 +1201,8 @@
+     compute_luminance_mask(in, luminance, width, height, d);
+   }
+ 
++  _mobile_toneequal_sample(self, piece, luminance, roi_in);
++
+   // Display output
+   if(self->dev->gui_attached && dt_pipe_is_full(piece->pipe))
+   {
+@@ -1609,6 +1613,9 @@
+                const dt_iop_roi_t *const roi_in,
+                const dt_iop_roi_t *const roi_out)
+ {
++  /* Sampling needs the CPU mask, and requests a normal upstream fallback. */
++  if(piece->pipe->toneequal_sample) return DT_OPENCL_PROCESS_CL;
++
+   const dt_iop_toneequalizer_data_t *const d = piece->data;
+   const dt_iop_toneequalizer_global_data_t *const gd = self->global_data;
+   dt_iop_toneequalizer_gui_data_t *const g = self->gui_data;
+@@ -1876,6 +1883,20 @@
+  *
+  ***/
+ 
++/* Evaluate one original LUT entry. Keep the accumulation order shared with
++ * the mobile output query, so feedback describes the correction actually
++ * applied by the pixel processor rather than the requested mouse/touch step. */
++static inline float _correction_lut_entry(const float exposure,
++                                          const float gauss_denom,
++                                          const float *const restrict factors)
++{
++  float result = 0.0f;
++  for(int i = 0; i < PIXEL_CHAN; i++)
++    result += gaussian_func(exposure - centers_ops[i], gauss_denom) * factors[i];
++  return fast_clamp(result, 0.25f, 4.0f);
++}
++
++
+ static void compute_correction_lut(float* restrict lut,
+                                    const float sigma,
+                                    const float *const restrict factors)
+@@ -1889,11 +1910,8 @@
+     // build the correction for each pixel
+     // as the sum of the contribution of each luminance channelcorrection
+     const float exposure = (float)j / (float)LUT_RESOLUTION + DT_TONEEQ_MIN_EV;
+-    float result = 0.0f;
+-    for(int i = 0; i < PIXEL_CHAN; i++)
+-      result += gaussian_func(exposure - centers_ops[i], gauss_denom) * factors[i];
+     // the user-set correction is expected in [-2;+2] EV, so is the interpolated one
+-    lut[j] = fast_clamp(result, 0.25f, 4.0f);
++    lut[j] = _correction_lut_entry(exposure, gauss_denom, factors);
+   }
+ }
+ 
+@@ -2856,6 +2874,8 @@
+ }
+ 
+ 
++#include "mobile/adapters/iop/toneequal-controls.inc"
++
+ int scrolled(dt_iop_module_t *self,
+              const float x,
+              const float y,

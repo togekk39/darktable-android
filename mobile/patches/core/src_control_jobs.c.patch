@@ -1,0 +1,25 @@
+--- a/src/control/jobs.c
++++ b/src/control/jobs.c
+@@ -17,6 +17,7 @@
+ */
+ 
+ #include "control/jobs.h"
++#include "mobile/adapters/common/thread_cancel.h"
+ #include "control/control.h"
+ 
+ #define DT_CONTROL_FG_PRIORITY 4
+@@ -520,12 +521,12 @@
+     {
+       // wait for a new job.
+       int old;
+-      pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &old);
++      dt_mobile_setcancelstate(DT_MOBILE_CANCEL_DISABLE, &old);
+       dt_pthread_mutex_lock(&s->cond_mutex);
+       dt_pthread_cond_wait(&s->cond, &s->cond_mutex);
+       dt_pthread_mutex_unlock(&s->cond_mutex);
+       int tmp;
+-      pthread_setcancelstate(old, &tmp);
++      dt_mobile_setcancelstate(old, &tmp);
+     }
+   }
+   return NULL;

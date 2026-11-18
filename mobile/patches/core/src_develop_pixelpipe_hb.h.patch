@@ -1,0 +1,10 @@
+--- a/src/develop/pixelpipe_hb.h
++++ b/src/develop/pixelpipe_hb.h
+@@ -340,6 +340,7 @@
+   // reusable ping-pong buffers for mask distortion walks
+   float *mask_distort_buf[2];
+   size_t mask_distort_buf_size[2];
++  struct dt_imageio_toneequal_sample_t *toneequal_sample;
+   // sum of all per-piece detail/raster mask caches currently allocated in this pipe
+   size_t mask_cache_size;
+   gint64 started_time; // monotonic timestamp (in microseconds) when the pipe started

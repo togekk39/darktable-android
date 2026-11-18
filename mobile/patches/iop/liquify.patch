@@ -1,0 +1,48 @@
+--- a/src/iop/liquify.c
++++ b/src/iop/liquify.c
+@@ -1079,6 +1079,11 @@
+   {
+     const dt_liquify_warp_t *warp = ((dt_liquify_warp_t *) i->data);
+     cairo_rectangle_int_t r;
++    const float radius = cabsf(warp->radius - warp->point);
++    /* Reduced previews can shrink an otherwise valid raw-image stamp below
++     * one pixel. It has no raster extent at this scale; keep its original
++     * parameters for higher-resolution previews and exports. */
++    if(!isfinite(radius) || roundf(radius) < 1.f) continue;
+     compute_round_stamp_extent(&r, warp);
+     // add extent if not entirely outside the roi
+     if(cairo_region_contains_rectangle(roi_out_region, &r) != CAIRO_REGION_OVERLAP_OUT)
+@@ -1100,6 +1105,8 @@
+                                                    const GSList *interpolated,
+                                                    const gboolean inverted)
+ {
++  if(map_extent->width <= 0 || map_extent->height <= 0
++     || (size_t)map_extent->width > INT_MAX / (size_t)map_extent->height) return NULL;
+   const int mapsize = map_extent->width * map_extent->height;
+   if(mapsize == 0)
+   {
+@@ -1111,6 +1118,7 @@
+ 
+   // allocate distortion map big enough to contain all paths
+   float complex *map = dt_alloc_align_type(float complex, mapsize);
++  if(!map) return NULL;
+   memset(map, 0, sizeof(float complex) * mapsize);
+ 
+   // build map
+@@ -1123,6 +1131,7 @@
+   if(inverted)
+   {
+     float complex * const imap = dt_alloc_align_type(float complex, mapsize);
++    if(!imap) { dt_free_align(map); return NULL; }
+     memset(imap, 0, sizeof(float complex) * mapsize);
+ 
+     // copy map into imap(inverted map).
+@@ -2629,6 +2638,8 @@
+   warp->status   = DT_LIQUIFY_STATUS_NONE;
+ }
+ 
++#include "mobile/adapters/iop/liquify.inc"
++
+ static dt_liquify_path_data_t *alloc_move_to(const dt_iop_module_t *self,
+                                              const float complex start_point)
+ {

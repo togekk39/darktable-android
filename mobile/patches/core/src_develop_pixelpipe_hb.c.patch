@@ -1,0 +1,10 @@
+--- a/src/develop/pixelpipe_hb.c
++++ b/src/develop/pixelpipe_hb.c
+@@ -331,6 +331,7 @@
+   pipe->bcache_data = NULL;
+   pipe->bcache_size = 0;
+   pipe->bcache_hash = DT_INVALID_HASH;
++  pipe->toneequal_sample = NULL;
+   memset(pipe->mask_distort_buf, 0, sizeof(pipe->mask_distort_buf));
+   memset(pipe->mask_distort_buf_size, 0, sizeof(pipe->mask_distort_buf_size));
+   pipe->mask_cache_size = 0;

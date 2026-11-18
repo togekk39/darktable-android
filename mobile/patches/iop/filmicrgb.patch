@@ -1,0 +1,11 @@
+--- a/src/iop/filmicrgb.c
++++ b/src/iop/filmicrgb.c
+@@ -2601,6 +2601,8 @@
+            min, max);
+ }
+ 
++#include "mobile/adapters/iop/filmicrgb.inc"
++
+ static void apply_auto_grey(dt_iop_module_t *self)
+ {
+   dt_iop_filmicrgb_params_t *p = self->params;
