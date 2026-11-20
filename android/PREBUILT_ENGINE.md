@@ -33,7 +33,8 @@ successful packaging; its standalone push/manual path can recover an existing
 successful engine run without rebuilding the native dependency graph.
 
 A Release download does not establish full desktop parity or physical-device
-support. The default Gradle engine and existing `dev-latest` release are separate.
+support. The signed `dev-latest` workflow uses the same staging pipeline for
+its ARM64 release APK.
 
 First finish the ARM64/API 26 [engine build](../mobile/dependencies/ENGINE_BOOTSTRAP.md),
 install it, and run the current [staging tool](../mobile/dependencies/STAGING.md)
@@ -119,6 +120,8 @@ its ELF/SONAME/search paths and dependency closure, and reports it separately as
 The official Google Maven AAR has SHA-256
 `8ca4032b6d79b351f0b59ad4b580eddbb9423e1652f7c958830687f1eee2ec03`.
 Stage and generated-source verification retain their exact engine-only file list.
+Final release APK verification also recognizes the two ART baseline profile
+assets that Android Gradle Plugin adds under `assets/dexopt/`.
 
 The same final-artifact check can run on a copied APK or after an external
 signing step:

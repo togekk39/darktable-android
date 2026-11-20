@@ -126,6 +126,22 @@ class RuntimeStageTest(unittest.TestCase):
         with self.assertRaisesRegex(stage.StageError, "runtime assets do not match"):
             verifier.verify_apk(self.root, self.modules, apk)
 
+    def test_release_apk_baseline_profiles_are_separate_from_runtime_assets(self):
+        apk = self.apk(extra=[("assets/dexopt/baseline.prof", b"pro\0" + b"010\0"),
+                              ("assets/dexopt/baseline.profm", b"prm\0" + b"002\0")])
+        report = verifier.verify_apk(self.root, self.modules, apk)
+        self.assertEqual(report["assets"], len(self.manifest["assets"]))
+
+    def test_apk_rejects_unknown_or_invalid_baseline_profile(self):
+        for name, data, error in (
+            ("assets/dexopt/other.prof", b"pro\0", "complete darktable-runtime tree"),
+            ("assets/dexopt/baseline.prof", b"\x7fELF", "invalid APK baseline profile header"),
+        ):
+            with self.subTest(name=name):
+                apk = self.apk(extra=[(name, data)])
+                with self.assertRaisesRegex(stage.StageError, error):
+                    verifier.verify_apk(self.root, self.modules, apk)
+
     def test_stage_missing_translations_fails_even_with_matching_manifest(self):
         name = "locale/test/LC_MESSAGES/darktable.mo"
         (self.runtime / name).unlink()
