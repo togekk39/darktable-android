@@ -35,6 +35,12 @@ APP_NATIVE_LIBRARIES = {
     "libandroidx.graphics.path.so": "41e9a793c43a0f4fddb19e33f346bace464f30f888ba7b9eaf96294ea115bfb6",
 }
 
+# AGP adds these ART baseline profiles to release APKs during packaging.
+APK_BASELINE_PROFILES = {
+    "assets/dexopt/baseline.prof": b"pro\0",
+    "assets/dexopt/baseline.profm": b"prm\0",
+}
+
 
 def require(condition: bool, message: str) -> None:
     if not condition:
@@ -227,6 +233,11 @@ def verify_apk(root: Path, modules: Path, apk: Path) -> dict:
                 continue
             mode = item.external_attr >> 16
             require(not stat.S_ISLNK(mode), f"APK runtime entry must not be a symlink: {name}")
+            if name in APK_BASELINE_PROFILES:
+                with archive.open(item) as profile:
+                    require(profile.read(4) == APK_BASELINE_PROFILES[name],
+                            f"invalid APK baseline profile header: {name}")
+                continue
             relative = Path(name)
             destination = target / ("jniLibs" if relative.parts[0] == "lib" else "assets")
             destination = destination.joinpath(*relative.parts[1:])

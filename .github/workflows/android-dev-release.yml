@@ -9,17 +9,11 @@ on:
       - "src/**"
       - "CMakeLists.txt"
       - "cmake/**"
+      - ".gitmodules"
+      - ".github/actions/stage-android-engine/**"
       - ".github/workflows/android-dev-release.yml"
   workflow_dispatch:
 
-env:
-  ANDROID_ABI: arm64-v8a
-  ANDROID_PLATFORM: android-26
-  CMAKE_ANDROID_ARCH_ABI: arm64-v8a
-  CMAKE_ANDROID_ARCH: aarch64
-  VCPKG_ROOT: ${{ github.workspace }}/.vcpkg/2025.06.13
-  VCPKG_DEFAULT_TRIPLET: arm64-android
-  VCPKG_TARGET_TRIPLET: arm64-android
 permissions:
   contents: write
 
@@ -31,69 +25,20 @@ jobs:
   release:
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-24.04
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: recursive
-
-      - name: Require signing secrets and create temporary keystore
-        shell: bash
-        env:
-          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          missing=()
-          [[ -n "$KEYSTORE_B64" ]] || missing+=(ANDROID_KEYSTORE_BASE64)
-          [[ -n "$KEYSTORE_PASSWORD" ]] || missing+=(ANDROID_KEYSTORE_PASSWORD)
-          [[ -n "$KEY_ALIAS" ]] || missing+=(ANDROID_KEY_ALIAS)
-          [[ -n "$KEY_PASSWORD" ]] || missing+=(ANDROID_KEY_PASSWORD)
-          if (( ${#missing[@]} )); then
-            printf 'Missing required signing secrets:\n' >&2
-            printf ' - %s\n' "${missing[@]}" >&2
-            exit 1
-          fi
-          umask 077
-          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/dev-release.keystore"
-          chmod 600 "$RUNNER_TEMP/dev-release.keystore"
 
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - uses: android-actions/setup-android@v3
-        with:
-          packages: platform-tools
-
-      - name: Install pinned Android tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
-          echo "$ANDROID_SDK_ROOT/build-tools/35.0.0" >> "$GITHUB_PATH"
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
-      - name: Debug Android native target environment
-        shell: bash
-        run: |
-          set -euo pipefail
-          for name in ANDROID_NDK_HOME ANDROID_NDK_ROOT VCPKG_ROOT VCPKG_DEFAULT_TRIPLET VCPKG_TARGET_TRIPLET; do
-            printf '%s=%s\n' "$name" "${!name-<unset>}"
-          done
-          printf 'CMAKE_TOOLCHAIN_FILE=%s\n' "$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
-          env | LC_ALL=C sort | grep -E '^(ANDROID_(ABI|PLATFORM)|CMAKE_ANDROID_)' || true
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            .vcpkg/installed
-            ~/.cache/vcpkg/archives
-            ~/.cache/vcpkg/downloads
-          key: android-native-${{ runner.os }}-arm64-api26-ndk27.2.12479018-vcpkg2025.06.13-${{ hashFiles('mobile/dependencies/**', '.gitmodules') }}
+      - name: Stage the photo processing engine
+        id: engine
+        uses: ./.github/actions/stage-android-engine
 
       - uses: gradle/actions/setup-gradle@v4
         with:
@@ -119,14 +64,41 @@ jobs:
           cmake --build build/mobile
           ctest --test-dir build/mobile --output-on-failure
 
-      - name: Lint, unit tests, and signed dev release
+      - name: Require signing secrets and create temporary keystore
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [[ -n "$KEYSTORE_B64" ]] || missing+=(ANDROID_KEYSTORE_BASE64)
+          [[ -n "$KEYSTORE_PASSWORD" ]] || missing+=(ANDROID_KEYSTORE_PASSWORD)
+          [[ -n "$KEY_ALIAS" ]] || missing+=(ANDROID_KEY_ALIAS)
+          [[ -n "$KEY_PASSWORD" ]] || missing+=(ANDROID_KEY_PASSWORD)
+          if (( ${#missing[@]} )); then
+            printf 'Missing required signing secrets:\n' >&2
+            printf ' - %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
+          umask 077
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/dev-release.keystore"
+          chmod 600 "$RUNNER_TEMP/dev-release.keystore"
+
+      - name: Lint, unit tests, and signed engine-enabled dev release
         working-directory: android
         env:
+          DARKTABLE_RUNTIME_STAGE: ${{ steps.engine.outputs.path }}
           ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/dev-release.keystore
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: ./gradlew --no-daemon lintDevRelease testDevReleaseUnitTest assembleDevRelease
+        run: |
+          ./gradlew --no-daemon :app:lintDevRelease :app:testDevReleaseUnitTest \
+            :app:assembleDevRelease :app:verifyDevReleasePrebuiltRuntimeApk \
+            -PdarktableRuntimeStage="$DARKTABLE_RUNTIME_STAGE"
 
       - name: Verify and collect APK
         id: apk
@@ -145,6 +117,7 @@ jobs:
           output="dist/dev-release/darktable-android-dev-$short_sha.apk"
           mv "${apks[0]}" "$output"
           apksigner verify --verbose --print-certs "$output"
+          zipalign -c -P 16 4 "$output"
           package_name=$(aapt2 dump badging "$output" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")
           if [[ "$package_name" != org.example.darktableandroid.dev ]]; then
             printf 'Unexpected APK package name: %s\n' "$package_name" >&2
@@ -167,6 +140,14 @@ jobs:
             android/app/build/reports/**
             android/app/build/test-results/**
             build/mobile/Testing/**
+
+      - name: Preserve engine build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-release-engine-diagnostics-${{ github.sha }}
+          if-no-files-found: ignore
+          path: ${{ runner.temp }}/darktable-android-engine/logs/
 
       - name: Publish moving development prerelease
         shell: bash
@@ -206,6 +187,7 @@ jobs:
           trap 'rm -f "$notes_file"' EXIT
           {
             printf 'Automated development build from commit `%s`.\n\n' "$GITHUB_SHA"
+            printf 'Includes the photo processing engine for ARM64 devices running Android 8.0 or later.\n\n'
             printf '**Commit message:**\n\n%s\n\n' "$commit_message"
             printf '**Built (UTC):** %s\n\n' "$build_time"
             printf '**Warning:** This is an unstable development build. It may contain incomplete features, regressions, or data-loss bugs.\n'
